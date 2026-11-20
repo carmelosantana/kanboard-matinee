@@ -10,8 +10,23 @@ owner or shared with every active Kanboard user, and a shared server is always t
 `matinee_shares` and `matinee_share_sections` tables, the share form (and its reusable-token link), project
 audiences and project-role abilities were removed; schema v1 was edited in place, since it never shipped.
 
+**P2 browse (2026-11-20).** Anyone who may browse a server can page through its libraries and see posters.
+Nothing plays yet.
+
 ### Added
 
+- **Browse (Media):** a **Media** link in the dashboard sidebar lists the servers you may browse, then a
+  server's libraries, then a library as a poster grid of 60 items a page. Shows, seasons, artists and albums
+  open into their children. The breadcrumb names the server and library. A page past the end of a shrunken
+  library links back to the first page.
+- **Proxied posters (`matinee/art`):** 144 or 512 pixel posters fetched through Plex's photo transcoder,
+  JPEG/PNG/WebP only, buffered under the 2 MiB cap.
+- **RefSigner:** signed, user-bound, server- and library-scoped refs (HMAC-SHA256 under a `refs` subkey,
+  base64url, at most one hour) for every listing and poster link.
+- **PlexPaths:** the two anchored path shapes a ref may carry, shared by minting and use.
+- **PlexClient::children() and art():** a whitelisted listing page and a poster fetch.
+- **BrowseModel:** turns a verified ref into a listing or an image, re-authorizing on every use. A listing
+  re-checks the live library list and that Plex's container is the ref's library.
 - **Plex servers:** connect a server with a name, address and pasted token under your profile's **Plex
   servers**. Matinee checks the server's identity and libraries before it stores anything. Edit, verify and
   remove; a blank token keeps the stored one, and a changed address or machine id needs the token again.
@@ -47,7 +62,21 @@ audiences and project-role abilities were removed; schema v1 was edited in place
 - Every change is a CSRF-checked POST; actions authorize from the live server row, never the caller's copy;
   admin checks read the live users row. Matinee responses, refusals included, send `Referrer-Policy: same-origin`.
 
+- Browse refs are refused when tampered, expired, minted for another user, of the wrong kind or for a
+  library no longer live; refusals are decided before any Plex request except the live-library and container
+  checks. A server that is unshared, disabled or whose owner is deactivated stops browsing on the next click.
+- Posters carry `nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`,
+  `Cross-Origin-Resource-Policy: same-origin`, `Content-Disposition: inline` and `Cache-Control: private,
+  max-age=3600`; refusals and failures are empty 403s and 502s with `no-store`. Plex titles have control and
+  format characters stripped and are always escaped.
+- A Plex JSON reply with more than 20,000 objects and arrays is refused before it is decoded, so a hostile
+  2 MiB body can't exhaust PHP memory.
+
 ### Tests
+
+- P2, after the whole-branch security gate (pass; no Critical, High or Medium):
+  `./testing/run-plugin-tests.sh Matinee`: OK (901 tests, 7606 assertions). MariaDB and Postgres: 901 tests,
+  7605 assertions, 1 skipped. `--all`: all suites pass.
 
 - `./testing/run-plugin-tests.sh Matinee`: OK (584 tests, 4857 assertions) after the light scope.
 - `./testing/run-realdb-tests.sh Matinee mariadb` and `postgres`: 584 tests, 4856 assertions, 1 skipped (the

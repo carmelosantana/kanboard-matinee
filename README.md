@@ -3,11 +3,11 @@
 Connect a Plex server to Kanboard and keep it to yourself, or share the whole server with everyone on your
 Kanboard. The Plex token is encrypted at rest and never shown to anyone, admins included.
 
-**Status:** 0.1.0, in development (P1 foundation). Not released or listed in ModMenu yet.
+**Status:** 0.1.0, in development (P1 foundation and P2 browse). Not released or listed in ModMenu yet.
 
 ## What it does today
 
-P1 is the foundation: servers and the sharing switch. Nothing plays yet.
+P1 is the foundation: servers and the sharing switch. P2 adds browsing. Nothing plays yet.
 
 - **Connect a Plex server** with a name, its address and your Plex token. Matinee checks the server answers
   and the token works before it stores anything.
@@ -15,9 +15,10 @@ P1 is the foundation: servers and the sharing switch. Nothing plays yet.
   with everyone**.
 - **Manage it.** Verify the connection, change the name, address or token, remove the server. Admins see
   every server and can switch any of them off.
+- **Browse it** (see [Browsing](#browsing)). **Media** on the dashboard lists the servers you may browse, their
+  libraries, and each library's posters.
 
-Browsing and playing media, watch-together rooms and playlists come in later phases (see
-[Roadmap](#roadmap)). Until then the switch records who will get access; no one can open media through it.
+Playing media, watch-together rooms and playlists come in later phases (see [Roadmap](#roadmap)).
 
 ## Requirements
 
@@ -77,6 +78,26 @@ server, but can disable it.
 
 Once playback ships, everyone you share with browses and plays through your Plex, and Plex shows all of that
 playback as you.
+
+## Browsing
+
+Open **Media** in the dashboard sidebar. It lists every server you may browse: your own, plus every enabled
+server that is shared and whose owner is active. Pick a server to see its libraries (movies, shows, music,
+photos), then a library to see its items as a poster grid. Shows open into seasons and episodes, artists into
+albums and tracks.
+
+- **Paging.** 60 items a page, with Previous and Next links. A link past the end of a library that has shrunk
+  shows "Nothing to show here." and a link back to the first page.
+- **Posters are proxied.** Every image comes from Matinee, never from Plex directly, so the browser never sees
+  the Plex address or token. Posters come in two sizes (144 and 512 pixels), only as JPEG, PNG or WebP, and
+  the browser may cache them privately for an hour.
+- **Links are signed and personal.** Every library, item and poster link carries a signed reference that works
+  for you only and expires after an hour. Each use re-checks that you may still browse the server, so making a
+  server private, disabling it or deactivating a user cuts browsing off on the next click. Opening a library
+  also re-checks that Plex still has it.
+- **Failures** read "Could not reach that server." whatever went wrong; the stage goes to the Kanboard log.
+
+Admins browse only shared servers, like everyone else; an admin can't browse someone's private server.
 
 ## Admin settings
 
@@ -186,14 +207,19 @@ Deleting a user removes their servers.
 - **Authorization from the object.** Actions load the server row and decide from it, never from the caller's
   copy or anything else in the URL.
 - **Forms.** Every change is a POST with Kanboard's CSRF token. Anonymous users reach no Matinee page.
-- **Headers.** Matinee pages send `Referrer-Policy: same-origin`, refusals included.
+- **Headers.** Matinee pages send `Referrer-Policy: same-origin`, refusals included. Posters are sent with
+  `nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`, `Cross-Origin-Resource-Policy: same-origin`
+  and `Cache-Control: private`; a refused or failed poster is an empty 403 or 502.
+- **Signed references.** Browse and poster links are HMAC-SHA256 signed with a subkey of the root key, bound
+  to the viewer, the server and the library, and valid for at most an hour. Only two anchored Plex path shapes
+  can be signed or followed (a library or item listing, a poster), so a reference can't steer Matinee to any
+  other Plex endpoint.
 - **Plex sees one name per viewer.** Requests carry `X-Plex-Device-Name: Matinee (<username>)`. The username is
   the only Kanboard data sent to Plex.
 
 ## Roles
 
-What each role can do with a server. P1 builds the policy and the management pages; browsing, rooms and
-playlists arrive with P2–P5. Project roles play no part.
+What each role can do with a server. Browsing works today; rooms and playlists arrive with P4–P5. Project roles play no part.
 
 | Who | Can |
 |---|---|
@@ -215,13 +241,17 @@ server whose owner is deactivated.
 - **The owner's Plex sees all traffic as the owner.** Plex activity shows "Matinee (username)", so the owner
   can see who watched what.
 - **Transcoding load** will land on the owner's Plex (P3 adds stream caps).
+- **Browsing has no rate limit.** Each library page costs Plex two requests and each poster one, for anyone
+  the server is shared with. A user who keeps reloading adds load to the owner's Plex (never more than one
+  Plex call per Matinee request beyond those). Keep a server private if you don't trust everyone on the board.
+- **A poster stays in a viewer's browser cache for up to an hour** after the server is made private.
 
 ## Roadmap
 
 | Phase | Adds |
 |---|---|
-| P1 (this) | servers, the sharing switch, policy, settings |
-| P2 | signed media refs, browse pages, artwork |
+| P1 (done) | servers, the sharing switch, policy, settings |
+| P2 (done) | signed media refs, browse pages, artwork |
 | P3 | playback: audio with ranged responses, video through Plex HLS transcode, stream caps |
 | P4 | watch-together rooms, synced to within about 2 s |
 | P5 | playlists per server (Matinee's own; nothing is written to Plex) |
