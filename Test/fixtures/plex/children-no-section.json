@@ -1,0 +1,9 @@
+{
+  "MediaContainer": {
+    "size": 2,
+    "Metadata": [
+      { "ratingKey": "201", "type": "season", "title": "Season 1" },
+      { "ratingKey": "202", "type": "season", "title": "Season 2" }
+    ]
+  }
+}

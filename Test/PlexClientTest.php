@@ -10,8 +10,8 @@ use Kanboard\Plugin\Matinee\Test\FakeTransport;
 use PHPUnit\Framework\TestCase;
 
 /**
- * PlexClient's P1 surface (spec §3, §11 S9, S11, S14): headers, whitelisted parsing of /identity and
- * /library/sections, and fixed, scrubbed errors. No network: every byte comes from FakeTransport.
+ * PlexClient (spec §3, §11 S9, S11, S13, S14): headers, whitelisted parsing of /identity, /library/sections and
+ * browse listings (children), proxied art (art), and fixed, scrubbed errors. No network: every byte comes from FakeTransport.
  */
 class PlexClientTest extends TestCase
 {
@@ -538,12 +538,384 @@ class PlexClientTest extends TestCase
             PlexException::serverChanged(),
             PlexException::tooLarge(),
             PlexException::tokenInUri(),
+            PlexException::badType(),
         ];
         $this->assertSame(
-            ['plex.unreachable', 'plex.http_error', 'plex.token_rejected', 'plex.bad_json', 'plex.server_changed', 'plex.too_large', 'plex.token_in_uri'],
+            ['plex.unreachable', 'plex.http_error', 'plex.token_rejected', 'plex.bad_json', 'plex.server_changed', 'plex.too_large', 'plex.token_in_uri', 'plex.bad_type'],
             array_map(fn (PlexException $e) => $e->getMessage(), $all),
         );
-        $this->assertSame([0, 503, 401, 0, 0, 0, 0], array_map(fn (PlexException $e) => $e->status, $all));
+        $this->assertSame([0, 503, 401, 0, 0, 0, 0, 0], array_map(fn (PlexException $e) => $e->status, $all));
+    }
+
+    // ── children() (spec §3, S9, S13; ruling B4) ─────────────────────────────
+
+    /** Every field of a whitelisted item, with nulls/'' for what Plex left out or got wrong. */
+    private function item(string $rk, string $type, array $over = []): array
+    {
+        return array_merge([
+            'ratingKey' => $rk, 'type' => $type, 'title' => '', 'parentTitle' => '', 'grandparentTitle' => '',
+            'year' => null, 'index' => null, 'duration' => null, 'leafCount' => null, 'thumb' => null, 'key' => null,
+        ], $over);
+    }
+
+    public function testChildrenRequestsThePathWithOnlyThePagingParamsAndTheTokenOnlyInTheHeader(): void
+    {
+        $this->t->respond(200, $this->fixture('children-section'));
+        $this->client()->children('/library/sections/1/all', 120, 60);
+
+        $this->assertCount(1, $this->t->requests);
+        [$req] = $this->t->requests;
+        $this->assertSame(
+            self::BASE . '/library/sections/1/all?X-Plex-Container-Start=120&X-Plex-Container-Size=60',
+            $req['url'],
+        );
+        $this->assertStringNotContainsString(self::TOKEN, $req['url']);
+        $this->assertStringNotContainsStringIgnoringCase('token', $req['url']);
+        $hits = array_keys(array_filter($req['headers'], fn ($v) => str_contains((string) $v, self::TOKEN)));
+        $this->assertSame(['X-Plex-Token'], $hits);
+    }
+
+    public function testChildrenOfAMetadataPath(): void
+    {
+        $this->t->respond(200, $this->fixture('children-no-section'));
+        $this->client()->children('/library/metadata/102/children', 0, 1);
+        $this->assertSame(
+            self::BASE . '/library/metadata/102/children?X-Plex-Container-Start=0&X-Plex-Container-Size=1',
+            $this->t->requests[0]['url'],
+        );
+    }
+
+    public function testChildrenItemsAreWhitelisted(): void
+    {
+        $this->t->respond(200, $this->fixture('children-section'));
+        $out = $this->client()->children('/library/sections/1/all', 0, 60);
+
+        $this->assertSame('1', $out['section']);
+        $this->assertSame(250, $out['total']);
+        $this->assertSame([
+            $this->item('101', 'movie', ['title' => 'Fake Movie One', 'year' => 1999, 'duration' => 5400000,
+                'thumb' => '/library/metadata/101/thumb/1700000000']),
+            $this->item('102', 'show', ['title' => 'Fake Show', 'year' => 2004, 'leafCount' => 22,
+                'thumb' => '/library/metadata/102/thumb/1700000001', 'key' => '/library/metadata/102/children']),
+            $this->item('103', 'season', ['title' => 'Season 1', 'parentTitle' => 'Fake Show', 'index' => 1,
+                'leafCount' => 10, 'key' => '/library/metadata/103/children']),
+            $this->item('104', 'episode', ['title' => 'Pilot', 'parentTitle' => 'Season 1',
+                'grandparentTitle' => 'Fake Show', 'index' => 1, 'duration' => 1800000]),
+            $this->item('105', 'artist', ['title' => '42']),
+            $this->item('106', 'album', ['title' => 'Fake Album', 'parentTitle' => 'Fake Artist']),
+            $this->item('107', 'track', ['title' => 'Fake Track']),
+            $this->item('108', 'photo', ['title' => 'Fake Photo']),
+        ], $out['items']);
+        $this->assertStringNotContainsString('UPSTREAM-SUMMARY', print_r($out, true));
+        $this->assertStringNotContainsString('/data/movies', print_r($out, true));
+    }
+
+    /** @dataProvider badArtOrKeyShapes */
+    public function testAThumbOrKeyWithABadShapeIsDropped(mixed $value): void
+    {
+        $this->t->respondJson(['MediaContainer' => ['librarySectionID' => '1', 'Metadata' => [
+            ['ratingKey' => '1', 'type' => 'movie', 'title' => 'x', 'thumb' => $value, 'key' => $value],
+        ]]]);
+        $item = $this->client()->children('/library/sections/1/all', 0, 60)['items'][0];
+        $this->assertNull($item['thumb']);
+        $this->assertNull($item['key']);
+    }
+
+    public function badArtOrKeyShapes(): array
+    {
+        return [
+            'absolute url'    => ['https://evil.example.test/library/metadata/1/thumb/2'],
+            'protocol-rel'    => ['//evil.example.test/library/metadata/1/thumb/2'],
+            'dot dot'         => ['/library/metadata/1/../../x'],
+            'encoded dot'     => ['/library/metadata/%2e%2e/thumb/2'],
+            'query'           => ['/library/metadata/1/thumb/2?X-Plex-Token=abc'],
+            'trailing slash'  => ['/library/metadata/1/thumb/2/'],
+            'trailing LF'     => ["/library/metadata/1/thumb/2\n"],
+            'int'             => [12],
+            'array'           => [['/library/metadata/1/thumb/2']],
+            'null'            => [null],
+        ];
+    }
+
+    public function testAThumbIsNeverKeptAsAKeyNorAKeyAsAThumb(): void
+    {
+        $this->t->respondJson(['MediaContainer' => ['Metadata' => [
+            ['ratingKey' => '1', 'type' => 'show', 'thumb' => '/library/metadata/1/children', 'key' => '/library/metadata/1/thumb/2'],
+        ]]]);
+        $item = $this->client()->children('/library/metadata/1/children', 0, 60)['items'][0];
+        $this->assertNull($item['thumb']);
+        $this->assertNull($item['key']);
+    }
+
+    public function testChildrenTitlesAreCappedAt200Characters(): void
+    {
+        $long = str_repeat('é', 250);
+        $this->t->respondJson(['MediaContainer' => ['Metadata' => [
+            ['ratingKey' => '1', 'type' => 'episode', 'title' => $long, 'parentTitle' => $long, 'grandparentTitle' => $long],
+        ]]]);
+        $item = $this->client()->children('/library/metadata/1/children', 0, 60)['items'][0];
+        foreach (['title', 'parentTitle', 'grandparentTitle'] as $f) {
+            $this->assertSame(mb_substr($long, 0, 200, 'UTF-8'), $item[$f], $f);
+        }
+    }
+
+    public function testSectionIsNullWhenLibrarySectionIdIsAbsent(): void
+    {
+        $this->t->respond(200, $this->fixture('children-no-section'));
+        $out = $this->client()->children('/library/metadata/102/children', 0, 60);
+        $this->assertNull($out['section']);
+        $this->assertCount(2, $out['items']);
+    }
+
+    /** @dataProvider sectionIds */
+    public function testSectionIsStringifiedOrNull(mixed $raw, ?string $expected): void
+    {
+        $this->t->respondJson(['MediaContainer' => ['librarySectionID' => $raw, 'Metadata' => []]]);
+        $this->assertSame($expected, $this->client()->children('/library/sections/1/all', 0, 60)['section']);
+    }
+
+    public function sectionIds(): array
+    {
+        return [
+            'int'        => [7, '7'],
+            'string'     => ['12', '12'],
+            'null'       => [null, null],
+            'negative'   => [-1, null],
+            'float'      => [1.5, null],
+            'bool'       => [true, null],
+            'path'       => ['/library/sections/1', null],
+            'trailing LF' => ["1\n", null],
+            '21 digits'  => ['123456789012345678901', null],
+            'array'      => [['1'], null],
+        ];
+    }
+
+    /** @dataProvider totals */
+    public function testTotalIsTotalSizeElseStartPlusWhatCameBack(mixed $raw, int $start, int $expected): void
+    {
+        $mc = ['Metadata' => [['ratingKey' => '1', 'type' => 'movie'], ['ratingKey' => 'x', 'type' => 'movie']]];
+        if ($raw !== 'absent') {
+            $mc['totalSize'] = $raw;
+        }
+        $this->t->respondJson(['MediaContainer' => $mc]);
+        $this->assertSame($expected, $this->client()->children('/library/sections/1/all', $start, 60)['total']);
+    }
+
+    public function totals(): array
+    {
+        return [
+            'int'          => [250, 0, 250],
+            'digit string' => ['250', 0, 250],
+            'zero'         => [0, 0, 0],
+            'absent'       => ['absent', 0, 2],
+            'absent paged' => ['absent', 60, 62],
+            'negative'     => [-3, 0, 2],
+            'float'        => [2.5, 0, 2],
+            'junk'         => ['lots', 0, 2],
+            'huge'         => ['99999999999999999999', 0, 2],
+        ];
+    }
+
+    /** @dataProvider emptyMetadata */
+    public function testChildrenWithNoMetadataListIsEmpty(array $mc): void
+    {
+        $this->t->respondJson(['MediaContainer' => $mc]);
+        $out = $this->client()->children('/library/sections/1/all', 0, 60);
+        $this->assertSame([], $out['items']);
+        $this->assertSame(0, $out['total']);
+    }
+
+    public function emptyMetadata(): array
+    {
+        return [
+            'missing'  => [['size' => 0]],
+            'not list' => [['Metadata' => ['a' => ['ratingKey' => '1', 'type' => 'movie']]]],
+            'string'   => [['Metadata' => 'x']],
+            'empty'    => [['Metadata' => []]],
+        ];
+    }
+
+    /** @dataProvider badChildrenArgs */
+    public function testChildrenRefusesBadArgumentsWithNoRequest(string $path, int $start, int $size): void
+    {
+        try {
+            $this->client()->children($path, $start, $size);
+            $this->fail('expected refusal');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertMessageIsClean($e);
+            $this->assertStringNotContainsString('evil', $e->getMessage());
+        }
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function badChildrenArgs(): array
+    {
+        return [
+            'art path'      => ['/library/metadata/1/thumb/2', 0, 60],
+            'metadata leaf' => ['/library/metadata/1', 0, 60],
+            'sections list' => ['/library/sections', 0, 60],
+            'query'         => ['/library/sections/1/all?X-Plex-Token=evil', 0, 60],
+            'dot dot'       => ['/library/sections/1/../../evil', 0, 60],
+            'absolute'      => ['https://evil.example.test/library/sections/1/all', 0, 60],
+            'empty'         => ['', 0, 60],
+            'size 0'        => ['/library/sections/1/all', 0, 0],
+            'size 201'      => ['/library/sections/1/all', 0, 201],
+            'size negative' => ['/library/sections/1/all', 0, -1],
+            'start negative' => ['/library/sections/1/all', -1, 60],
+        ];
+    }
+
+    public function testChildrenAcceptsTheSizeBounds(): void
+    {
+        $this->t->respondJson(['MediaContainer' => []])->respondJson(['MediaContainer' => []]);
+        $c = $this->client();
+        $c->children('/library/sections/1/all', 0, 1);
+        $c->children('/library/sections/1/all', 1000000, 200);
+        $this->assertStringEndsWith('Start=1000000&X-Plex-Container-Size=200', $this->t->requests[1]['url']);
+    }
+
+    public function testChildrenFromADifferentServerThanThePinnedOneIsServerChanged(): void
+    {
+        $this->t->respond(200, $this->fixture('children-section'));
+        $this->expectPlexError(fn () => $this->client('ffff')->children('/library/sections/1/all', 0, 60), PlexException::SERVER_CHANGED);
+    }
+
+    public function testChildren401IsTokenRejected(): void
+    {
+        $this->t->respond(401, 'UPSTREAM-BODY');
+        $this->expectPlexError(fn () => $this->client()->children('/library/sections/1/all', 0, 60), PlexException::TOKEN_REJECTED);
+    }
+
+    public function testChildrenJunkIsBadJson(): void
+    {
+        $this->t->respond(200, '<html>UPSTREAM-BODY</html>');
+        $this->expectPlexError(fn () => $this->client()->children('/library/sections/1/all', 0, 60), PlexException::BAD_JSON);
+    }
+
+    // ── art() (spec §3, S11; rulings B1, B6) ─────────────────────────────────
+
+    private const PNG = "\x89PNG\r\n\x1a\nUPSTREAM-BYTES";
+
+    public function testArtRequestsTheVerandaTranscodeUrlWithTheTokenOnlyInTheHeader(): void
+    {
+        $this->t->respond(200, self::PNG, ['Content-Type' => 'image/png']);
+        $this->client()->art('/library/metadata/101/thumb/1700000000', 144);
+
+        $this->assertCount(1, $this->t->requests);
+        [$req] = $this->t->requests;
+        $this->assertSame(
+            self::BASE . '/photo/:/transcode?width=144&height=144&minSize=1&upscale=0'
+                . '&url=%2Flibrary%2Fmetadata%2F101%2Fthumb%2F1700000000',
+            $req['url'],
+        );
+        $this->assertStringNotContainsString(self::TOKEN, $req['url']);
+        $hits = array_keys(array_filter($req['headers'], fn ($v) => str_contains((string) $v, self::TOKEN)));
+        $this->assertSame(['X-Plex-Token'], $hits);
+    }
+
+    public function testArtAt512(): void
+    {
+        $this->t->respond(200, self::PNG, ['Content-Type' => 'image/png']);
+        $this->client()->art('/library/metadata/1/art/2', 512);
+        $this->assertStringContainsString('?width=512&height=512&', $this->t->requests[0]['url']);
+    }
+
+    /** @dataProvider imageTypes */
+    public function testArtReturnsTheRawBodyAndTheNormalisedType(string $header, string $type): void
+    {
+        $this->t->respond(200, self::PNG, ['Content-Type' => $header]);
+        $this->assertSame(['type' => $type, 'body' => self::PNG], $this->client()->art('/library/metadata/1/thumb/2', 144));
+    }
+
+    public function imageTypes(): array
+    {
+        return [
+            'jpeg'        => ['image/jpeg', 'image/jpeg'],
+            'png'         => ['image/png', 'image/png'],
+            'webp'        => ['image/webp', 'image/webp'],
+            'upper case'  => ['IMAGE/JPEG', 'image/jpeg'],
+            'parameters'  => ['image/png; charset=binary', 'image/png'],
+            'spaces'      => [' image/webp ;q=1', 'image/webp'],
+        ];
+    }
+
+    /** A JSON-looking image body is not decoded, and a pinned client does not inspect it. */
+    public function testArtDoesNotDecodeTheBodyOrCheckTheMachine(): void
+    {
+        $body = (string) json_encode(['MediaContainer' => ['machineIdentifier' => 'someone-else']]);
+        $this->t->respond(200, $body, ['Content-Type' => 'image/jpeg']);
+        $this->assertSame($body, $this->client(self::MACHINE)->art('/library/metadata/1/thumb/2', 144)['body']);
+    }
+
+    /** @dataProvider badImageTypes */
+    public function testArtWithANonImageTypeIsBadType(?string $header): void
+    {
+        $this->t->respond(200, '<svg onload="UPSTREAM-BODY"/>', $header === null ? [] : ['Content-Type' => $header]);
+        $this->expectPlexError(fn () => $this->client()->art('/library/metadata/1/thumb/2', 144), PlexException::BAD_TYPE);
+    }
+
+    public function badImageTypes(): array
+    {
+        return [
+            'svg'        => ['image/svg+xml'],
+            'html'       => ['text/html'],
+            'missing'    => [null],
+            'empty'      => [''],
+            'json'       => ['application/json'],
+            'gif'        => ['image/gif'],
+            'prefix'     => ['image/pngx'],
+            'jpeg,html'  => ['image/jpeg, text/html'],
+        ];
+    }
+
+    /** @dataProvider badArtArgs */
+    public function testArtRefusesBadArgumentsWithNoRequest(string $path, int $size): void
+    {
+        try {
+            $this->client()->art($path, $size);
+            $this->fail('expected refusal');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertMessageIsClean($e);
+            $this->assertStringNotContainsString('evil', $e->getMessage());
+        }
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function badArtArgs(): array
+    {
+        return [
+            'browse path' => ['/library/sections/1/all', 144],
+            'query'       => ['/library/metadata/1/thumb/2?X-Plex-Token=evil', 144],
+            'absolute'    => ['https://evil.example.test/library/metadata/1/thumb/2', 144],
+            'dot dot'     => ['/library/metadata/1/thumb/../../evil', 144],
+            'empty'       => ['', 144],
+            'size 1080'   => ['/library/metadata/1/thumb/2', 1080],
+            'size 143'    => ['/library/metadata/1/thumb/2', 143],
+            'size 0'      => ['/library/metadata/1/thumb/2', 0],
+        ];
+    }
+
+    /** @dataProvider statuses */
+    public function testArtStatusMapping(int $status, string $reason): void
+    {
+        $this->t->respond($status, 'UPSTREAM-BODY ' . self::TOKEN, ['Content-Type' => 'image/png']);
+        $e = $this->expectPlexError(fn () => $this->client()->art('/library/metadata/1/thumb/2', 144), $reason);
+        $this->assertSame($status, $e->status);
+    }
+
+    public function testArtTransportFailuresAreFixed(): void
+    {
+        $this->t->fail(new \RuntimeException('connect ' . self::BASE . '/photo?X-Plex-Token=' . self::TOKEN))
+            ->fail(PlexException::tooLarge());
+        $c = $this->client();
+        $this->expectPlexError(fn () => $c->art('/library/metadata/1/thumb/2', 144), PlexException::UNREACHABLE);
+        $this->expectPlexError(fn () => $c->art('/library/metadata/1/thumb/2', 144), PlexException::TOO_LARGE);
+    }
+
+    public function testArtOver2MiBIsTooLarge(): void
+    {
+        $this->t->respond(200, str_repeat('x', 2 * 1024 * 1024 + 1), ['Content-Type' => 'image/png']);
+        $this->expectPlexError(fn () => $this->client()->art('/library/metadata/1/thumb/2', 512), PlexException::TOO_LARGE);
     }
 
     // ── PlexResponse ─────────────────────────────────────────────────────────

@@ -3,7 +3,8 @@
 namespace Kanboard\Plugin\Matinee\Http;
 
 /**
- * Talks to one Plex server (spec §3, P1 surface): `identity()` and `sections()`, with whitelisted parsing.
+ * Talks to one Plex server (spec §3): `identity()`, `sections()`, `children()` (browse listings) and `art()`
+ * (posters through Plex's photo transcoder), with whitelisted parsing.
  *
  * - The token travels only in the `X-Plex-Token` header, never in a URL.
  * - Errors are PlexException with a fixed reason; upstream bodies and transport messages never surface (§11 S9).
@@ -14,6 +15,8 @@ namespace Kanboard\Plugin\Matinee\Http;
  *   `(array)` cast, get_object_vars and json_encode never see it; var_dump / print_r go through __debugInfo. A
  *   client cannot be serialized, unserialized or cloned.
  * - The device name is `Matinee` or exactly what deviceName() produces (S14).
+ * - `children()` and `art()` take only a path that matches PlexPaths (browse / art); anything else is refused
+ *   before a request is made. Paging and transcode params are built with http_build_query, never with the token.
  *
  * @package Kanboard\Plugin\Matinee\Http
  */
@@ -24,11 +27,18 @@ final class PlexClient
     public const JSON_DEPTH = 32;
     public const SECTION_TYPES = ['movie', 'show', 'artist', 'photo'];
     public const MAX_TITLE_CHARS = 200;
+    public const ITEM_TYPES = ['movie', 'show', 'season', 'episode', 'artist', 'album', 'track', 'photo'];
+    public const MAX_PAGE_SIZE = 200;
+    /** Ruling B1: 1080 waits for the P3 detail view. */
+    public const ART_SIZES = [144, 512];
+    public const ART_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
     private const MACHINE_ID = '/\A[A-Za-z0-9-]{1,64}\z/';
     private const VERSION = '/\A[A-Za-z0-9._+-]{1,64}\z/';
     private const SECTION_KEY = '/\A\d{1,20}\z/';
     private const DEVICE_NAME = '/\AMatinee( \([A-Za-z0-9._ #-]{1,40}\))?\z/';
+    /** A non-negative integer that fits an int on 64-bit PHP. */
+    private const UINT = '/\A\d{1,18}\z/';
 
     private readonly string $baseUrl;
 
@@ -148,26 +158,117 @@ final class PlexClient
         return $out;
     }
 
-    /** GET a path, check status, size and JSON, and return `MediaContainer` (after the pinned-server check). */
-    private function fetch(string $path): array
+    /**
+     * One page of a browse listing (`MediaContainer.Metadata`), whitelisted (§11 S9, S13).
+     *
+     * - `section` is `MediaContainer.librarySectionID` as a string, or null when absent or not a section key.
+     * - `total` is `MediaContainer.totalSize` when it is a non-negative integer; otherwise Plex did not page the
+     *   answer, so it is `start` + the number of entries that came back (no further page is implied).
+     * - Every kept item has every field: strings default to '', integers and paths to null. An item without a
+     *   digit `ratingKey` or an allowed `type` is dropped. `thumb` is kept only when it is an art path and `key`
+     *   only when it is a browse path.
+     *
+     * @return array{section: ?string, total: int, items: list<array{ratingKey: string, type: string, title: string,
+     *   parentTitle: string, grandparentTitle: string, year: ?int, index: ?int, duration: ?int, leafCount: ?int,
+     *   thumb: ?string, key: ?string}>}
+     */
+    public function children(string $path, int $start, int $size): array
     {
-        try {
-            $r = $this->transport->get($this->baseUrl . $path, $this->headers());
-        } catch (PlexException | UnsafeUrlException $e) {
-            throw $e;
-        } catch (\Throwable) {
-            throw PlexException::unreachable();
+        if (! PlexPaths::isBrowse($path)) {
+            throw new \InvalidArgumentException('A Plex listing path must be a browse path.');
+        }
+        if ($size < 1 || $size > self::MAX_PAGE_SIZE || $start < 0) {
+            throw new \InvalidArgumentException('A Plex listing page is out of range.');
         }
 
-        if ($r->status === 401) {
-            throw PlexException::tokenRejected();
+        $mc = $this->fetch($path, ['X-Plex-Container-Start' => $start, 'X-Plex-Container-Size' => $size]);
+
+        $section = $mc['librarySectionID'] ?? null;
+        $section = is_int($section) ? (string) $section : $section;
+        $section = is_string($section) && PlexPaths::isSectionKey($section) ? $section : null;
+
+        $raw = $mc['Metadata'] ?? null;
+        $raw = is_array($raw) && array_is_list($raw) ? $raw : [];
+
+        $items = [];
+        foreach ($raw as $m) {
+            if (is_array($m) && ($item = self::item($m)) !== null) {
+                $items[] = $item;
+            }
         }
-        if ($r->status < 200 || $r->status > 299) {
-            throw PlexException::httpError($r->status);
+
+        return [
+            'section' => $section,
+            'total'   => self::uint($mc['totalSize'] ?? null) ?? $start + count($raw),
+            'items'   => $items,
+        ];
+    }
+
+    /**
+     * A poster or backdrop at a fixed square size, through Plex's photo transcoder (Veranda's URL; ruling B6:
+     * buffered). The body is returned as is: it is never decoded, and the pinned-server check does not apply.
+     *
+     * @return array{type: string, body: string}
+     */
+    public function art(string $path, int $size): array
+    {
+        if (! PlexPaths::isArt($path)) {
+            throw new \InvalidArgumentException('A Plex art path must be an art path.');
         }
-        if (strlen($r->body) > self::MAX_BODY_BYTES) {
-            throw PlexException::tooLarge();
+        if (! in_array($size, self::ART_SIZES, true)) {
+            throw new \InvalidArgumentException('A Plex art size must be 144 or 512.');
         }
+
+        $r = $this->request('/photo/:/transcode', [
+            'width' => $size, 'height' => $size, 'minSize' => 1, 'upscale' => 0, 'url' => $path,
+        ]);
+
+        $type = strtolower(trim(explode(';', $r->headers['content-type'] ?? '', 2)[0]));
+        if (! in_array($type, self::ART_TYPES, true)) {
+            throw PlexException::badType();
+        }
+        return ['type' => $type, 'body' => $r->body];
+    }
+
+    /** One whitelisted listing item, or null to drop it. */
+    private static function item(array $m): ?array
+    {
+        $rk = $m['ratingKey'] ?? null;
+        $rk = is_int($rk) ? (string) $rk : $rk;
+        $type = $m['type'] ?? null;
+        if (! is_string($rk) || preg_match(self::SECTION_KEY, $rk) !== 1
+            || ! is_string($type) || ! in_array($type, self::ITEM_TYPES, true)) {
+            return null;
+        }
+
+        $item = ['ratingKey' => $rk, 'type' => $type];
+        foreach (['title', 'parentTitle', 'grandparentTitle'] as $f) {
+            $v = $m[$f] ?? '';
+            $item[$f] = mb_substr(is_scalar($v) ? (string) $v : '', 0, self::MAX_TITLE_CHARS, 'UTF-8');
+        }
+        foreach (['year', 'index', 'duration', 'leafCount'] as $f) {
+            $item[$f] = self::uint($m[$f] ?? null);
+        }
+        $thumb = $m['thumb'] ?? null;
+        $item['thumb'] = is_string($thumb) && PlexPaths::isArt($thumb) ? $thumb : null;
+        $key = $m['key'] ?? null;
+        $item['key'] = is_string($key) && PlexPaths::isBrowse($key) ? $key : null;
+        return $item;
+    }
+
+    /** A non-negative int from an int or a digit string, else null. */
+    private static function uint(mixed $v): ?int
+    {
+        if (is_int($v)) {
+            return $v >= 0 ? $v : null;
+        }
+        return is_string($v) && preg_match(self::UINT, $v) === 1 ? (int) $v : null;
+    }
+
+    /** GET a path, check status, size and JSON, and return `MediaContainer` (after the pinned-server check). */
+    private function fetch(string $path, array $query = []): array
+    {
+        $r = $this->request($path, $query);
 
         try {
             $data = json_decode($r->body, true, self::JSON_DEPTH, JSON_THROW_ON_ERROR);
@@ -184,5 +285,32 @@ final class PlexClient
             throw PlexException::serverChanged();
         }
         return $mc;
+    }
+
+    /**
+     * GET a path (with a query built by http_build_query, never holding the token) and check status and size.
+     * On a non-2xx the body is not read.
+     */
+    private function request(string $path, array $query = []): PlexResponse
+    {
+        $url = $this->baseUrl . $path . ($query === [] ? '' : '?' . http_build_query($query));
+        try {
+            $r = $this->transport->get($url, $this->headers());
+        } catch (PlexException | UnsafeUrlException $e) {
+            throw $e;
+        } catch (\Throwable) {
+            throw PlexException::unreachable();
+        }
+
+        if ($r->status === 401) {
+            throw PlexException::tokenRejected();
+        }
+        if ($r->status < 200 || $r->status > 299) {
+            throw PlexException::httpError($r->status);
+        }
+        if (strlen($r->body) > self::MAX_BODY_BYTES) {
+            throw PlexException::tooLarge();
+        }
+        return $r;
     }
 }

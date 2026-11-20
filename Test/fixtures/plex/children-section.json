@@ -1,0 +1,28 @@
+{
+  "MediaContainer": {
+    "size": 14,
+    "totalSize": 250,
+    "offset": 0,
+    "librarySectionID": 1,
+    "librarySectionTitle": "Movies",
+    "machineIdentifier": "0123456789abcdef0123456789abcdef01234567",
+    "Metadata": [
+      { "ratingKey": "101", "key": "/library/metadata/101", "type": "movie", "title": "Fake Movie One", "year": 1999, "duration": 5400000, "thumb": "/library/metadata/101/thumb/1700000000", "art": "/library/metadata/101/art/1700000000", "summary": "UPSTREAM-SUMMARY", "Media": [{ "Part": [{ "file": "/data/movies/one.mkv" }] }] },
+      { "ratingKey": 102, "key": "/library/metadata/102/children", "type": "show", "title": "Fake Show", "year": "2004", "leafCount": "22", "thumb": "/library/metadata/102/thumb/1700000001" },
+      { "ratingKey": "103", "type": "season", "title": "Season 1", "parentTitle": "Fake Show", "index": 1, "leafCount": 10, "key": "/library/metadata/103/children" },
+      { "ratingKey": "104", "type": "episode", "title": "Pilot", "parentTitle": "Season 1", "grandparentTitle": "Fake Show", "index": "1", "duration": "1800000" },
+      { "ratingKey": "105", "type": "artist", "title": 42 },
+      { "ratingKey": "106", "type": "album", "title": "Fake Album", "parentTitle": "Fake Artist", "year": -5, "duration": 1.5, "leafCount": true },
+      { "ratingKey": "107", "type": "track", "title": "Fake Track", "index": "01a", "thumb": "http://evil.example.test/x.png", "key": "/library/metadata/107" },
+      { "ratingKey": "108", "type": "photo", "title": "Fake Photo", "thumb": "/library/metadata/108/thumb/1?X-Plex-Token=abc", "key": "/library/sections/1/all?type=1" },
+      { "ratingKey": "109", "type": "clip", "title": "Wrong type" },
+      { "ratingKey": "110", "type": "Movie", "title": "Wrong case" },
+      { "ratingKey": "1a1", "type": "movie", "title": "Bad rating key" },
+      { "type": "movie", "title": "Missing rating key" },
+      { "ratingKey": ["111"], "type": "movie", "title": "Array rating key" },
+      { "ratingKey": "112", "title": "Missing type" },
+      "not an object",
+      null
+    ]
+  }
+}

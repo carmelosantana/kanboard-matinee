@@ -19,6 +19,8 @@ class PlexException extends \RuntimeException
     public const TOO_LARGE      = 'plex.too_large';
     /** PlexScrub found token-like text it could not strip, so the URI is refused (not reused). */
     public const TOKEN_IN_URI   = 'plex.token_in_uri';
+    /** An art response whose content-type is not image/jpeg, image/png or image/webp (§11 S11). */
+    public const BAD_TYPE       = 'plex.bad_type';
 
     private function __construct(public readonly string $reason, public readonly int $status = 0)
     {
@@ -58,5 +60,10 @@ class PlexException extends \RuntimeException
     public static function tokenInUri(): self
     {
         return new self(self::TOKEN_IN_URI);
+    }
+
+    public static function badType(): self
+    {
+        return new self(self::BAD_TYPE);
     }
 }
