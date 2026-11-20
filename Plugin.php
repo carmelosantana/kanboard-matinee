@@ -9,6 +9,7 @@ use Kanboard\Plugin\Matinee\Crypto\Subkeys;
 use Kanboard\Plugin\Matinee\Http\CurlTransport;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
+use Kanboard\Plugin\Matinee\Model\BrowseModel;
 use Kanboard\Plugin\Matinee\Model\MatineePolicy;
 use Kanboard\Plugin\Matinee\Model\ServerModel;
 use Kanboard\Plugin\Matinee\Model\Settings;
@@ -46,6 +47,8 @@ class Plugin extends Base
         $container['matineeServerModel'] = static fn ($c): ServerModel => new ServerModel($c);
         // The policy's lookups read the DB on every call; only the closures are shared.
         $container['matineePolicy'] = static fn ($c): MatineePolicy => MatineePolicy::fromContainer($c);
+        // Turns a verified ref into a listing or an image, re-authorizing on every use (spec §6).
+        $container['matineeBrowseModel'] = static fn ($c): BrowseModel => new BrowseModel($c);
 
         // ACL: any signed-in user reaches the server pages (each action then checks the loaded row); the admin pages
         // are admins only (each action checks again). Anonymous users reach neither.
