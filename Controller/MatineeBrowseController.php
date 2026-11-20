@@ -65,11 +65,15 @@ class MatineeBrowseController extends MatineeBaseController
             return;
         }
         $last = $page['start'] + $page['pageSize'];
+        // A start past the end (a stale link to a library that shrank) is not refused: the page says there is
+        // nothing here and links back to the first page, with no count and no Previous.
+        $pastEnd = $page['total'] > 0 && $page['start'] >= $page['total'];
         $this->render('Matinee:browse/listing', [
             'page' => $page,
             'ref' => $ref,
-            'prev' => $page['start'] > 0 ? max(0, $page['start'] - $page['pageSize']) : null,
-            'next' => $last < $page['total'] ? $last : null,
+            'pastEnd' => $pastEnd,
+            'prev' => ! $pastEnd && $page['start'] > 0 ? max(0, $page['start'] - $page['pageSize']) : null,
+            'next' => ! $pastEnd && $last < $page['total'] ? $last : null,
         ]);
     }
 
@@ -105,6 +109,12 @@ class MatineeBrowseController extends MatineeBaseController
         $this->response->withHeader('Content-Disposition', 'inline');
         $this->response->withHeader('Cross-Origin-Resource-Policy', 'same-origin');
         $this->response->withBody($image['body']);
+        // The session cache limiter already queued Expires and Pragma (no-cache); they contradict the S11
+        // Cache-Control, so drop them. Skipped once output has started (under CLI, nothing was queued anyway).
+        if (! headers_sent()) {
+            header_remove('Pragma');
+            header_remove('Expires');
+        }
         $this->response->send();
     }
 

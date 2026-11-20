@@ -127,6 +127,8 @@ class BrowseControllerTest extends Base
         $this->assertSame('', $r->body(), $label);
         $this->assertArrayNotHasKey('Content-Disposition', $r->headers(), $label);
         $this->assertStringNotContainsString('image/', (string) ($r->headers()['Content-Type'] ?? ''), $label);
+        $this->assertSame('no-store', $r->headers()['Cache-Control'] ?? null, $label);
+        $this->assertSame('nosniff', $r->headers()['X-Content-Type-Options'] ?? null, $label);
     }
 
     /** @return list<string> the public actions the controller declares */
@@ -149,6 +151,14 @@ class BrowseControllerTest extends Base
         $map = $this->container['applicationAccessMap'];
         $auth = $this->container['applicationAuthorization'];
         $this->assertSame(['art', 'index', 'listing', 'server'], self::actions());
+        // Core falls back to APP_USER for an action the map lacks, so the role checks below cannot see a missing
+        // entry: Plugin::ACL's row must name exactly the controller's actions.
+        $rows = array_values(array_filter(\Kanboard\Plugin\Matinee\Plugin::ACL, fn (array $row): bool => $row[0] === self::BRW));
+        $this->assertCount(1, $rows);
+        $acl = $rows[0][1];
+        sort($acl);
+        $this->assertSame(self::actions(), $acl);
+        $this->assertSame(Role::APP_USER, $rows[0][2]);
         foreach (self::actions() as $action) {
             $this->assertSame($map->getRoleHierarchy(Role::APP_USER), $map->getRoles(self::BRW, $action), $action);
             $this->assertTrue($auth->isAllowed(self::BRW, $action, Role::APP_USER), $action);
@@ -326,7 +336,83 @@ class BrowseControllerTest extends Base
         $this->assertStringContainsString('&lt;script&gt;x&lt;/script&gt;', $body);
     }
 
+    /** ServerModel stores any name without control characters: every page that shows it escapes it. */
+    public function testAHostileServerNameIsEscapedOnEveryPage(): void
+    {
+        $name = '<script>n</script>"><img src=x onerror=1>';
+        $this->queueOk(); // update re-checks the server
+        $this->container['matineeServerModel']->update($this->server, $this->owner, $name, self::BASE, null);
+        $this->share();
+        $this->loginAs($this->friend);
+        $this->t = new \Kanboard\Plugin\Matinee\Test\FakeTransport();
+        $this->queueSections();
+        $this->queueListing();
+        $pages = [
+            'index' => $this->get(self::BRW, 'index')->body(),
+            'server' => $this->get(self::BRW, 'server', ['server_id' => $this->server])->body(),
+            'listing' => $this->listing($this->browseRef($this->friend))->body(),
+        ];
+        foreach ($pages as $label => $body) {
+            $this->assertStringNotContainsString('<script>n', $body, $label);
+            $this->assertStringNotContainsString('<img src=x', $body, $label);
+            $this->assertStringContainsString('&lt;script&gt;n&lt;/script&gt;&quot;&gt;&lt;img src=x onerror=1&gt;', $body, $label);
+        }
+    }
+
+    /** The last crumb is the live section's title (from the sections fetch B3 already makes), escaped. */
+    public function testTheListingCrumbIsTheSectionTitleEscaped(): void
+    {
+        $sections = fn (string $title): array => ['MediaContainer' => ['Directory' => [['key' => '1', 'type' => 'movie', 'title' => $title]]]];
+
+        $this->queueListing();
+        $body = $this->listing($this->browseRef($this->owner))->body();
+        $this->assertMatchesRegularExpression('#›</span>\s*Movies\s*</h2>#', $body);
+        $this->assertCount(2, $this->t->requests, 'no extra Plex request for the title');
+
+        $this->t = new \Kanboard\Plugin\Matinee\Test\FakeTransport();
+        $this->t->respondJson($sections('<i>Films</i>"><img src=x onerror=2>'));
+        $this->t->respond(200, $this->fixture('children-section'));
+        $body = $this->listing($this->browseRef($this->owner))->body();
+        $this->assertStringNotContainsString('<i>Films', $body);
+        $this->assertStringNotContainsString('<img src=x onerror=2', $body);
+        $this->assertMatchesRegularExpression('#›</span>\s*&lt;i&gt;Films&lt;/i&gt;&quot;&gt;&lt;img src=x onerror=2&gt;\s*</h2>#', $body);
+        $this->assertCount(2, $this->t->requests, 'no extra Plex request for the title');
+
+        // A section with no title falls back to "Library".
+        $this->t = new \Kanboard\Plugin\Matinee\Test\FakeTransport();
+        $this->t->respondJson($sections(''));
+        $this->t->respond(200, $this->fixture('children-section'));
+        $this->assertMatchesRegularExpression('#›</span>\s*Library\s*</h2>#', $this->listing($this->browseRef($this->owner))->body());
+    }
+
     // ── paging ───────────────────────────────────────────────────────────────
+
+    /** A start past the end (a stale link to a library that shrank) shows no count and no Previous, only a way back. */
+    public function testAStartPastTheEndLinksBackToTheFirstPage(): void
+    {
+        $ref = $this->browseRef($this->owner);
+        foreach (['250', '300', '1000000'] as $start) {
+            $this->t = new \Kanboard\Plugin\Matinee\Test\FakeTransport();
+            $this->queueSections();
+            $this->t->respondJson(['MediaContainer' => ['totalSize' => 250, 'librarySectionID' => 1, 'Metadata' => []]]);
+            $r = $this->listing($ref, $start);
+            $body = $r->body();
+            $this->assertSame(200, $r->code(), $start);
+            $this->assertStringContainsString('Nothing to show here.', $body, $start);
+            $this->assertStringNotContainsString('matinee-page-count', $body, $start);
+            $this->assertStringNotContainsString(' of 250', $body, $start);
+            $this->assertStringNotContainsString('matinee-page-prev', $body, $start);
+            $this->assertStringNotContainsString('matinee-page-next', $body, $start);
+            $this->assertMatchesRegularExpression('#<a href="[^"?]*\?controller=MatineeBrowseController&amp;action=listing&amp;plugin=Matinee&amp;ref='.preg_quote($ref, '#').'&amp;start=0"[^>]*class="matinee-page-first"#', $body, $start);
+        }
+        // The last real page keeps its count and Previous, and has no way-back link.
+        $this->t = new \Kanboard\Plugin\Matinee\Test\FakeTransport();
+        $this->queueListing();
+        $body = $this->listing($ref, '240')->body();
+        $this->assertStringContainsString('241–250 of 250', $body);
+        $this->assertStringContainsString('matinee-page-prev', $body);
+        $this->assertStringNotContainsString('matinee-page-first', $body);
+    }
 
     public function testPagingLinksCarryTheRefAndStartAndNeverAPlexPath(): void
     {

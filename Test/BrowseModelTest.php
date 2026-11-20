@@ -312,10 +312,12 @@ class BrowseModelTest extends Base
 
         $this->assertSame(['id' => $this->serverId, 'name' => 'Living room'], $page['server']);
         $this->assertSame('1', $page['section']);
+        // The live section's title, from the sections fetch B3 already makes (the request list below has no third).
+        $this->assertSame('Movies', $page['sectionTitle']);
         $this->assertSame(250, $page['total']);
         $this->assertSame(0, $page['start']);
         $this->assertSame(60, $page['pageSize']);
-        $this->assertSame(['server', 'section', 'total', 'start', 'pageSize', 'items'], array_keys($page));
+        $this->assertSame(['server', 'section', 'sectionTitle', 'total', 'start', 'pageSize', 'items'], array_keys($page));
 
         $items = $page['items'];
         $this->assertSame(

@@ -4,11 +4,11 @@
         <span class="matinee-crumb-sep">›</span>
         <?= $this->url->link($this->text->e($page['server']['name']), 'MatineeBrowseController', 'server', ['plugin' => 'Matinee', 'server_id' => $page['server']['id']]) ?>
         <span class="matinee-crumb-sep">›</span>
-        <?= t('Library') ?>
+        <?= $page['sectionTitle'] === '' ? t('Library') : $this->text->e($page['sectionTitle']) ?>
     </h2>
 </div>
 
-<?php if (empty($page['items'])): ?>
+<?php if ($pastEnd || empty($page['items'])): ?>
     <p class="alert"><?= t('Nothing to show here.') ?></p>
 <?php else: ?>
     <ul class="matinee-grid">
@@ -41,7 +41,9 @@
     <?php if ($prev !== null): ?>
     <a href="<?= $this->url->href('MatineeBrowseController', 'listing', ['plugin' => 'Matinee', 'ref' => $ref, 'start' => $prev]) ?>" class="matinee-page-prev"><?= t('Previous') ?></a>
     <?php endif ?>
-    <?php if ($page['total'] > 0): ?>
+    <?php if ($pastEnd): ?>
+    <a href="<?= $this->url->href('MatineeBrowseController', 'listing', ['plugin' => 'Matinee', 'ref' => $ref, 'start' => 0]) ?>" class="matinee-page-first"><?= t('Back to the first page') ?></a>
+    <?php elseif ($page['total'] > 0): ?>
     <span class="matinee-page-count"><?= t('%d–%d of %d', $page['start'] + 1, min($page['start'] + $page['pageSize'], $page['total']), $page['total']) ?></span>
     <?php endif ?>
     <?php if ($next !== null): ?>

@@ -49,8 +49,8 @@ final class BrowseModel extends Base
     /**
      * One page (PAGE_SIZE items from $start) of the listing a browse ref names.
      *
-     * @return array{server: array{id: int, name: string}, section: string, total: int, start: int, pageSize: int,
-     *   items: list<array{title: string, subtitle: string, year: ?int, type: string, index: ?int, leafCount: ?int,
+     * @return array{server: array{id: int, name: string}, section: string, sectionTitle: string, total: int,
+     *   start: int, pageSize: int, items: list<array{title: string, subtitle: string, year: ?int, type: string, index: ?int, leafCount: ?int,
      *   browseRef: ?string, artRef: ?string}>}
      */
     public function listing(int $userId, string $ref, int $start): array
@@ -61,8 +61,17 @@ final class BrowseModel extends Base
         $p = $this->verify($ref, $userId, 'browse');
         $server = $this->authorize($userId, $p['sv']);
 
-        if (! $this->policy()->sectionAllowed($this->live($server, 'sections'), $p['s'])) {
+        $live = $this->live($server, 'sections');
+        if (! $this->policy()->sectionAllowed($live, $p['s'])) {
             throw new MatineeForbiddenException();
+        }
+        // The breadcrumb's title comes from the same live fetch: no extra Plex request.
+        $sectionTitle = '';
+        foreach ($live as $s) {
+            if ($s['key'] === $p['s']) {
+                $sectionTitle = $s['title'];
+                break;
+            }
         }
         $page = $this->plex($server, 'children', fn (PlexClient $c) => $c->children($p['r'], $start, self::PAGE_SIZE));
         if ($page['section'] === null || $page['section'] !== $p['s']) {
@@ -91,6 +100,7 @@ final class BrowseModel extends Base
         return [
             'server' => ['id' => (int) $server['id'], 'name' => (string) $server['name']],
             'section' => $p['s'],
+            'sectionTitle' => $sectionTitle,
             'total' => $page['total'],
             'start' => $start,
             'pageSize' => self::PAGE_SIZE,
