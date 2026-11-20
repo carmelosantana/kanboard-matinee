@@ -9,10 +9,9 @@ use Kanboard\Plugin\Matinee\Controller\MatineeAdminController;
 use Kanboard\Plugin\Matinee\Controller\MatineeServerController;
 use Kanboard\Plugin\Matinee\Crypto\KeyStore;
 use Kanboard\Plugin\Matinee\Model\Settings;
-use Kanboard\Plugin\Matinee\Model\SharePolicy;
 
 /**
- * The user and admin controllers, templates, hooks and ACL (plan Task 9; spec §4, §5, §11 S1, S5, S6, S9).
+ * The user and admin controllers, templates, hooks and ACL (plan Tasks 9 and 11; spec §4, §5, §11 S1, S6, S9).
  * Plex is FakeTransport behind the client factory; responses are recorded, never sent.
  */
 class ControllerTest extends Base
@@ -57,28 +56,12 @@ class ControllerTest extends Base
         return $this->container['db']->table('matinee_servers')->count();
     }
 
-    private function shareCount(): int
-    {
-        return $this->container['db']->table('matinee_shares')->count();
-    }
-
-    /** A project the owner manages, and a whole-server share of $serverId with it. */
-    private function projectShare(int $serverId, ?int $projectId = null): int
-    {
-        $projectId ??= $this->project('Movie night');
-        if ($this->container['projectUserRoleModel']->getUserRole($projectId, $this->owner) !== Role::PROJECT_MANAGER) {
-            $this->role($projectId, $this->owner, Role::PROJECT_MANAGER);
-        }
-        return $this->container['matineeShareModel']->create($this->owner, $serverId, SharePolicy::AUDIENCE_PROJECT, $projectId, true, []);
-    }
-
     // ── CSRF ─────────────────────────────────────────────────────────────────
 
     public function testEveryPostWithoutACsrfTokenIsForbiddenAndChangesNothing(): void
     {
         $server = $this->server($this->owner);
-        $share = $this->projectShare($server);
-        $before = [$this->serverCount(), $this->shareCount(), $this->container['matineeServerModel']->get($server)];
+        $before = [$this->serverCount(), $this->container['matineeServerModel']->get($server)];
         $plexCalls = count($this->t->requests);
 
         $posts = [
@@ -86,8 +69,6 @@ class ControllerTest extends Base
             [self::SRV, 'save', [], ['server_id' => $server, 'name' => 'Renamed', 'url' => self::BASE, 'token' => '']],
             [self::SRV, 'verify', ['server_id' => $server], []],
             [self::SRV, 'remove', ['server_id' => $server], []],
-            [self::SRV, 'shareSave', ['server_id' => $server], ['audience' => 'everyone', 'whole_server' => '1']],
-            [self::SRV, 'shareUnlink', ['share_id' => $share], []],
         ];
         foreach ($posts as [$controller, $action, $get, $post]) {
             $this->forbidden(fn () => $this->call($controller, $action, $get, $post, false), $action);
@@ -100,13 +81,12 @@ class ControllerTest extends Base
             [self::ADM, 'save', [], ['matinee_connect_policy' => 'admins', 'matinee_private_targets' => '', 'matinee_allowed_hosts' => '', 'matinee_attempt_limit' => '5', 'matinee_max_servers' => '1']],
             [self::ADM, 'toggle', ['server_id' => $server], ['enabled' => '0']],
             [self::SRV, 'remove', ['server_id' => $server], []],
-            [self::SRV, 'shareUnlink', ['share_id' => $share], []],
         ];
         foreach ($admin as [$controller, $action, $get, $post]) {
             $this->forbidden(fn () => $this->call($controller, $action, $get, $post, false), $action);
         }
 
-        $this->assertSame($before, [$this->serverCount(), $this->shareCount(), $this->container['matineeServerModel']->get($server)]);
+        $this->assertSame($before, [$this->serverCount(), $this->container['matineeServerModel']->get($server)]);
         $this->assertSame(Settings::POLICY_EVERYONE, (new Settings($this->container))->connectPolicy());
         $this->assertCount($plexCalls, $this->t->requests, 'no Plex call');
     }
@@ -118,8 +98,7 @@ class ControllerTest extends Base
     public function testEveryStateChangeSentAsAGetIsForbiddenEvenWithAValidToken(): void
     {
         $server = $this->server($this->owner);
-        $share = $this->projectShare($server);
-        $before = [$this->serverCount(), $this->shareCount(), $this->container['matineeServerModel']->get($server)];
+        $before = [$this->serverCount(), $this->container['matineeServerModel']->get($server)];
         $plexCalls = count($this->t->requests);
         $getWithToken = function (string $controller, string $action, array $get, array $post): void {
             $token = $this->container['token']->getCSRFToken();
@@ -131,8 +110,6 @@ class ControllerTest extends Base
             ['save', [], ['name' => 'Den', 'url' => 'https://den.example.test:32400', 'token' => self::TOKEN]],
             ['save', [], ['server_id' => $server, 'name' => 'Renamed', 'url' => self::BASE, 'token' => '']],
             ['verify', ['server_id' => $server], []],
-            ['shareSave', ['server_id' => $server], ['audience' => 'everyone', 'whole_server' => '1']],
-            ['shareUnlink', ['share_id' => $share], []],
             ['remove', ['server_id' => $server], []],
         ] as [$action, $get, $post]) {
             $this->forbidden(fn () => $getWithToken(self::SRV, $action, $get, $post), $action);
@@ -141,7 +118,7 @@ class ControllerTest extends Base
         $this->forbidden(fn () => $getWithToken(self::ADM, 'save', [], ['matinee_connect_policy' => 'admins', 'matinee_private_targets' => '', 'matinee_allowed_hosts' => '', 'matinee_attempt_limit' => '5', 'matinee_max_servers' => '1']), 'admin save');
         $this->forbidden(fn () => $getWithToken(self::ADM, 'toggle', ['server_id' => $server], ['enabled' => '0']), 'toggle');
 
-        $this->assertSame($before, [$this->serverCount(), $this->shareCount(), $this->container['matineeServerModel']->get($server)]);
+        $this->assertSame($before, [$this->serverCount(), $this->container['matineeServerModel']->get($server)]);
         $this->assertSame(Settings::POLICY_EVERYONE, (new Settings($this->container))->connectPolicy());
         $this->assertCount($plexCalls, $this->t->requests, 'no Plex call');
     }
@@ -186,7 +163,7 @@ class ControllerTest extends Base
     {
         $map = $this->container['applicationAccessMap'];
         $auth = $this->container['applicationAuthorization'];
-        $this->assertSame(['create', 'edit', 'index', 'remove', 'save', 'shareCreate', 'shareSave', 'shareUnlink', 'show', 'verify'], self::actions(MatineeServerController::class));
+        $this->assertSame(['create', 'edit', 'index', 'remove', 'save', 'show', 'verify'], self::actions(MatineeServerController::class));
         $this->assertSame(['save', 'show', 'toggle'], self::actions(MatineeAdminController::class));
 
         foreach (self::actions(MatineeServerController::class) as $action) {
@@ -235,7 +212,7 @@ class ControllerTest extends Base
         $this->assertSame(1, (int) $this->container['matineeServerModel']->get($server)['is_enabled']);
     }
 
-    // ── IDOR and S5 ──────────────────────────────────────────────────────────
+    // ── IDOR ─────────────────────────────────────────────────────────────
 
     public function testAnotherUsersServerIsForbidden(): void
     {
@@ -244,56 +221,26 @@ class ControllerTest extends Base
         $id = ['server_id' => $server];
         $this->forbidden(fn () => $this->get(self::SRV, 'show', $id), 'show');
         $this->forbidden(fn () => $this->get(self::SRV, 'edit', $id), 'edit');
-        $this->forbidden(fn () => $this->get(self::SRV, 'shareCreate', $id), 'shareCreate');
         $this->forbidden(fn () => $this->call(self::SRV, 'verify', $id), 'verify');
         $this->forbidden(fn () => $this->call(self::SRV, 'remove', $id), 'remove');
         $this->forbidden(fn () => $this->call(self::SRV, 'save', [], ['server_id' => $server, 'name' => 'Mine now', 'url' => self::BASE, 'token' => '']), 'save');
-        $this->forbidden(fn () => $this->call(self::SRV, 'shareSave', $id, ['audience' => 'everyone', 'whole_server' => '1']), 'shareSave');
         // An id that does not exist reads the same.
         $this->forbidden(fn () => $this->get(self::SRV, 'show', ['server_id' => $server + 100]), 'missing');
 
         $this->assertSame('Living room', $this->container['matineeServerModel']->get($server)['name']);
         $this->assertSame(1, $this->serverCount());
-        $this->assertSame(0, $this->shareCount());
         // The outsider's list shows only their own servers.
         $this->assertStringNotContainsString('Living room', $this->get(self::SRV, 'index')->body());
     }
 
-    public function testAnAdminMayOpenAndRemoveAnyServerButNotEditOrShareIt(): void
+    public function testAnAdminMayOpenAndRemoveAnyServerButNotEditIt(): void
     {
         $server = $this->server($this->owner);
         $this->loginAs(self::ADMIN);
         $this->assertStringContainsString('Living room', $this->get(self::SRV, 'show', ['server_id' => $server])->body());
         $this->forbidden(fn () => $this->get(self::SRV, 'edit', ['server_id' => $server]), 'edit');
-        $this->forbidden(fn () => $this->get(self::SRV, 'shareCreate', ['server_id' => $server]), 'shareCreate');
         $this->call(self::SRV, 'remove', ['server_id' => $server]);
         $this->assertSame(0, $this->serverCount());
-    }
-
-    public function testAnOutsiderCannotUnlinkAnotherServersShareWhateverProjectTheUrlNames(): void
-    {
-        $server = $this->server($this->owner);
-        $share = $this->projectShare($server);
-        // The outsider manages a project of their own: naming it in the URL or the form grants nothing (S5).
-        $theirs = $this->project('Oscar project');
-        $this->role($theirs, $this->outsider, Role::PROJECT_MANAGER);
-        $this->loginAs($this->outsider);
-        $this->forbidden(fn () => $this->call(self::SRV, 'shareUnlink', ['share_id' => $share, 'project_id' => $theirs], ['project_id' => $theirs]));
-        $this->forbidden(fn () => $this->call(self::SRV, 'shareUnlink', ['share_id' => $share + 100]));
-        $this->assertSame(1, $this->shareCount());
-    }
-
-    public function testTheSharesProjectManagerUnlinksFromTheRowsProject(): void
-    {
-        $server = $this->server($this->owner);
-        $project = $this->project('Movie night');
-        $share = $this->projectShare($server, $project);
-        $this->role($project, $this->outsider, Role::PROJECT_MANAGER);
-        $this->loginAs($this->outsider);
-        $response = $this->call(self::SRV, 'shareUnlink', ['share_id' => $share]);
-        $this->assertSame(0, $this->shareCount());
-        $this->assertSame('Share removed.', $this->flash('success'));
-        $this->assertArrayHasKey('Location', $response->headers());
     }
 
     // ── forms ────────────────────────────────────────────────────────────────
@@ -418,146 +365,6 @@ class ControllerTest extends Base
         $this->assertSame('reconnect', $this->container['matineeServerModel']->get($server)['status']);
     }
 
-    public function testTheShareFormListsLiveSectionsAndManagedProjectsOnly(): void
-    {
-        $server = $this->server($this->owner);
-        $direct = $this->project('Direct managed');
-        $this->role($direct, $this->owner, Role::PROJECT_MANAGER);
-        $viaGroup = $this->project('Group managed');
-        $this->groupRole($viaGroup, $this->owner, Role::PROJECT_MANAGER);
-        $member = $this->project('Only member');
-        $this->role($member, $this->owner, Role::PROJECT_MEMBER);
-        $custom = $this->project('Custom role');
-        $this->role($custom, $this->owner, 'Curator');
-
-        $this->queueSections();
-        $body = $this->get(self::SRV, 'shareCreate', ['server_id' => $server])->body();
-        $this->assertStringContainsString('<option value="'.$direct.'">Direct managed</option>', $body);
-        $this->assertStringContainsString('<option value="'.$viaGroup.'">Group managed</option>', $body);
-        $this->assertStringNotContainsString('>Only member</option>', $body);
-        $this->assertStringNotContainsString('>Custom role</option>', $body);
-        $this->assertStringNotContainsString('value="everyone"', $body);
-        $this->assertStringContainsString('name="whole_server"', $body);
-        $this->assertStringContainsString('name="sections[]" value="1"', $body);
-        $this->assertStringContainsString('TV Shows', $body);
-        $this->assertStringNotContainsString('Clips', $body);
-    }
-
-    public function testEveryoneIsOfferedToActiveAppAdminsOnly(): void
-    {
-        $admin = $this->user('ada', Role::APP_ADMIN);
-        $server = $this->server($admin);
-        $this->loginAs($admin);
-        $this->queueSections();
-        $this->assertStringContainsString('value="everyone"', $this->get(self::SRV, 'shareCreate', ['server_id' => $server])->body());
-
-        $this->call(self::SRV, 'shareSave', ['server_id' => $server], ['audience' => 'everyone', 'whole_server' => '1']);
-        $this->assertSame('Share saved.', $this->flash('success'));
-        $this->assertSame(SharePolicy::AUDIENCE_EVERYONE, $this->container['db']->table('matinee_shares')->findOneColumn('audience'));
-    }
-
-    public function testTheShareFormShowsTheGenericMessageWhenSectionsFail(): void
-    {
-        $server = $this->server($this->owner);
-        $this->role($this->project('Movie night'), $this->owner, Role::PROJECT_MANAGER);
-        $this->t->respond(500, 'upstream says '.self::TOKEN);
-        $body = $this->get(self::SRV, 'shareCreate', ['server_id' => $server])->body();
-        $this->assertStringContainsString(self::CONNECT_FAILED, $body);
-        $this->assertStringNotContainsString('name="sections[]"', $body);
-        $this->assertStringContainsString('name="whole_server"', $body);
-        $this->assertStringNotContainsString(self::TOKEN, $body);
-    }
-
-    /**
-     * The share form makes a live Plex call and records an attempt, so a GET from another site (an <img>, say) must
-     * not reach it: it needs the reusable CSRF token that the Share link carries.
-     */
-    public function testTheShareFormNeedsTheLinksCsrfToken(): void
-    {
-        $server = $this->server($this->owner);
-        $this->role($this->project('Movie night'), $this->owner, Role::PROJECT_MANAGER);
-        $attempts = fn (): int => $this->container['db']->table('matinee_attempts')->count();
-        $before = [count($this->t->requests), $attempts()];
-        foreach ([[], ['csrf_token' => 'forged'], ['csrf_token' => $this->container['token']->getCSRFToken()]] as $extra) {
-            $this->forbidden(fn () => $this->call(self::SRV, 'shareCreate', ['server_id' => $server] + $extra, [], false, 'GET'), json_encode($extra));
-        }
-        $this->assertSame($before, [count($this->t->requests), $attempts()]);
-
-        // The Share link on the server page carries a token that opens the form.
-        $show = $this->get(self::SRV, 'show', ['server_id' => $server])->body();
-        $this->assertSame(1, preg_match('#href="([^"]*action=shareCreate[^"]*)"#', $show, $m), 'Share link');
-        parse_str((string) parse_url(html_entity_decode($m[1]), PHP_URL_QUERY), $query);
-        $this->assertNotEmpty($query['csrf_token'] ?? '');
-        $this->queueSections();
-        $body = $this->call(self::SRV, 'shareCreate', ['server_id' => $server, 'csrf_token' => $query['csrf_token']], [], false, 'GET')->body();
-        $this->assertStringContainsString('name="sections[]" value="1"', $body);
-        $this->assertSame($before[1] + 1, $attempts());
-    }
-
-    /** A failed share save sends the owner back to the form with a token that opens it. */
-    public function testAFailedShareSaveRedirectsWithAWorkingToken(): void
-    {
-        $server = $this->server($this->owner);
-        $response = $this->call(self::SRV, 'shareSave', ['server_id' => $server], ['audience' => 'nonsense', 'whole_server' => '1']);
-        $location = html_entity_decode($response->headers()['Location'] ?? '');
-        parse_str((string) parse_url($location, PHP_URL_QUERY), $query);
-        $this->assertSame('shareCreate', $query['action'] ?? null, $location);
-        $this->assertTrue($this->container['token']->validateReusableCSRFToken($query['csrf_token'] ?? ''));
-    }
-
-    /** The share form's live sections call counts toward the attempt limit: over it, no Plex request is made. */
-    public function testTheShareFormCountsTowardTheAttemptLimit(): void
-    {
-        $this->setConfig(Settings::ATTEMPT_LIMIT_KEY, '1');
-        $server = $this->server($this->owner); // the connect used the one attempt
-        $this->role($this->project('Movie night'), $this->owner, Role::PROJECT_MANAGER);
-        $this->queueSections();
-        $plexCalls = count($this->t->requests);
-        $body = $this->get(self::SRV, 'shareCreate', ['server_id' => $server])->body();
-        $this->assertStringContainsString(self::CONNECT_FAILED, $body);
-        $this->assertStringNotContainsString('name="sections[]"', $body);
-        $this->assertCount($plexCalls, $this->t->requests, 'no Plex call over the limit');
-    }
-
-    public function testSharingSectionsWithAManagedProject(): void
-    {
-        $server = $this->server($this->owner);
-        $project = $this->project('Movie night');
-        $this->role($project, $this->owner, Role::PROJECT_MANAGER);
-        $this->queueSections();
-        $response = $this->call(self::SRV, 'shareSave', ['server_id' => $server], ['audience' => (string) $project, 'sections' => ['1', '2']]);
-        $this->assertSame('Share saved.', $this->flash('success'));
-        $this->assertStringContainsString('server_id='.$server, $response->headers()['Location']);
-        $share = $this->container['matineeShareModel']->listForServer($server, $this->owner)[0];
-        $this->assertSame(['1', '2'], $share['sections']);
-        $this->assertSame($project, (int) $share['project_id']);
-
-        $show = $this->get(self::SRV, 'show', ['server_id' => $server])->body();
-        $this->assertStringContainsString('Movie night', $show);
-        $this->assertStringContainsString($this->container['helper']->url->href(self::SRV, 'shareUnlink', ['plugin' => 'Matinee', 'share_id' => $share['id']]), $show);
-    }
-
-    public function testAnInvalidShareFlashesTheFixedMessage(): void
-    {
-        $server = $this->server($this->owner);
-        $project = $this->project('Movie night');
-        $this->role($project, $this->owner, Role::PROJECT_MANAGER);
-        foreach ([
-            ['audience' => (string) $project, 'whole_server' => '1', 'sections' => ['1']],
-            ['audience' => (string) $project, 'sections' => ['<script>']],
-            ['audience' => 'somebody', 'whole_server' => '1'],
-            ['audience' => (string) $project],
-        ] as $post) {
-            session_set('flash', []);
-            $this->call(self::SRV, 'shareSave', ['server_id' => $server], $post);
-            $this->assertSame(['failure' => self::INVALID_SHARE], $this->flashes(), json_encode($post));
-        }
-        $this->assertSame(0, $this->shareCount());
-        // A project the owner does not manage is refused outright.
-        $other = $this->project('Not mine');
-        $this->forbidden(fn () => $this->call(self::SRV, 'shareSave', ['server_id' => $server], ['audience' => (string) $other, 'whole_server' => '1']));
-    }
-
     /** Every string a user or a Plex server controls is escaped on every page that shows it. */
     public function testUserControlledStringsAreEscaped(): void
     {
@@ -565,16 +372,11 @@ class ControllerTest extends Base
         $this->loginAs($owner);
         $this->queueOk();
         $server = $this->container['matineeServerModel']->connect($owner, '<b>x</b>"\'', self::BASE, self::TOKEN);
-        $project = $this->project('<i>p</i>');
-        $this->role($project, $owner, Role::PROJECT_MANAGER);
-        $this->container['matineeShareModel']->create($owner, $server, SharePolicy::AUDIENCE_PROJECT, $project, true, []);
-        $this->t->respondJson(['MediaContainer' => ['Directory' => [['key' => '1', 'type' => 'movie', 'title' => '<script>alert(1)</script>']]]]);
 
         $pages = [
             'index' => $this->get(self::SRV, 'index')->body(),
             'show' => $this->get(self::SRV, 'show', ['server_id' => $server])->body(),
             'edit' => $this->get(self::SRV, 'edit', ['server_id' => $server])->body(),
-            'shareCreate' => $this->get(self::SRV, 'shareCreate', ['server_id' => $server])->body(),
         ];
         $this->loginAs(self::ADMIN);
         $pages['admin'] = $this->get(self::ADM, 'show')->body();
@@ -584,14 +386,11 @@ class ControllerTest extends Base
             // Core's project switcher carries project names as JSON in a data attribute, read by its own script: not
             // Matinee's output, so it is left out of the raw-string check.
             $body = (string) preg_replace("/ data-params='[^']*'/", '', $body);
-            foreach (['<script>alert', '<b>x', '<i>p', '<u>own', '&lt;/b&gt;"\''] as $raw) {
+            foreach (['<b>x', '<u>own', '&lt;/b&gt;"\''] as $raw) {
                 $this->assertStringNotContainsString($raw, $body, "$page shows $raw");
             }
             $this->assertStringContainsString($name, $body, $page);
         }
-        $this->assertStringContainsString('&lt;script&gt;alert(1)&lt;/script&gt;', $pages['shareCreate']);
-        $this->assertStringContainsString('&lt;i&gt;p&lt;/i&gt;', $pages['shareCreate']);
-        $this->assertStringContainsString('&lt;i&gt;p&lt;/i&gt;', $pages['show']);
         $this->assertStringContainsString('&lt;u&gt;own&quot;er', $pages['admin']);
     }
 
@@ -746,17 +545,15 @@ class ControllerTest extends Base
         $this->assertStringContainsString('192.168.1.20:32401', $page);
     }
 
-    public function testTheAdminListShowsOwnerHostStatusAndShareCountAndToggles(): void
+    public function testTheAdminListShowsOwnerHostStatusAndToggles(): void
     {
         $server = $this->server($this->owner);
-        $this->projectShare($server);
         $this->loginAs(self::ADMIN);
         $page = $this->get(self::ADM, 'show')->body();
         $this->assertStringContainsString('Living room', $page);
         $this->assertStringContainsString('olive', $page);
         $this->assertStringContainsString('plex.example.test', $page);
         $this->assertStringNotContainsString(self::BASE, $page);
-        $this->assertMatchesRegularExpression('#<td[^>]*>\s*1\s*</td>#', $page);
         $this->assertStringNotContainsString(self::TOKEN, $page);
 
         $this->call(self::ADM, 'toggle', ['server_id' => $server], ['enabled' => '0']);

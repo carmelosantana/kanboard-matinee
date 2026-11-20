@@ -4,7 +4,6 @@ require_once __DIR__.'/support/FakeTransport.php';
 
 use KanboardTests\units\Base;
 use Kanboard\Core\Security\Role;
-use Kanboard\Model\ProjectModel;
 use Kanboard\Model\UserModel;
 use Kanboard\Plugin\Matinee\Crypto\CryptoException;
 use Kanboard\Plugin\Matinee\Crypto\KeyStore;
@@ -255,7 +254,7 @@ class ServerModelTest extends Base
         $this->expectFailure(fn () => $this->model()->connect($alice, 'X', 'https://other.example.test', self::TOKEN));
 
         $tables = $this->matineeTables();
-        $this->assertSame(['matinee_attempts', 'matinee_servers', 'matinee_share_sections', 'matinee_shares'], $tables);
+        $this->assertSame(['matinee_attempts', 'matinee_servers'], $tables);
         $scanned = 0;
         foreach (array_merge($tables, ['settings']) as $table) {
             foreach ($this->db()->table($table)->findAll() as $row) {
@@ -453,19 +452,6 @@ class ServerModelTest extends Base
         $before = count($this->t->requests);
         $this->expectFailure(fn () => $this->model()->verify($id, $alice));
         $this->assertSame($before, count($this->t->requests));
-    }
-
-    /** recordAttempt() is the limit for callers outside the model (the share form's live sections call). */
-    public function testRecordAttemptCountsTowardTheLimitAndThrowsTheGenericFailureOverIt(): void
-    {
-        $alice = $this->user('alice');
-        $this->setConfig(Settings::ATTEMPT_LIMIT_KEY, '2');
-        $this->model()->recordAttempt($alice);
-        $this->assertSame(1, $this->db()->table('matinee_attempts')->eq('user_id', $alice)->count());
-        $this->model()->recordAttempt($alice);
-        $this->expectFailure(fn () => $this->model()->recordAttempt($alice));
-        $this->assertSame(2, $this->db()->table('matinee_attempts')->eq('user_id', $alice)->count());
-        $this->assertStringContainsString('failed at rate_limit', implode("\n", $this->log->lines));
     }
 
     public function testOldAttemptsDoNotCountAndArePruned(): void
@@ -742,16 +728,12 @@ class ServerModelTest extends Base
         $alice = $this->user('alice');
         $bob = $this->user('bob');
         $id = $this->connect($alice);
-        $project = (int) (new ProjectModel($this->container))->create(['name' => 'Movies']);
-        $this->db()->table('matinee_shares')->insert(['server_id' => $id, 'created_by' => $alice, 'audience' => 'project',
-            'project_id' => $project, 'whole_server' => 1, 'is_enabled' => 1, 'created_at' => 1]);
 
         $this->expectForbidden(fn () => $this->model()->remove($id, $bob));
         $this->assertNotNull($this->model()->get($id));
 
         $this->model()->remove($id, $alice);
         $this->assertNull($this->model()->get($id));
-        $this->assertSame(0, $this->db()->table('matinee_shares')->count());
 
         $other = $this->connect($bob);
         $this->model()->remove($other, $this->user('root2', Role::APP_ADMIN));

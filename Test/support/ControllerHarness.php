@@ -6,12 +6,6 @@ if (!in_array(PHP_SAPI, ['cli', 'cli-server'], true)) { http_response_code(404);
 use Kanboard\Core\Http\Request;
 use Kanboard\Core\Http\Response;
 use Kanboard\Core\Security\Role;
-use Kanboard\Model\GroupMemberModel;
-use Kanboard\Model\GroupModel;
-use Kanboard\Model\ProjectGroupRoleModel;
-use Kanboard\Model\ProjectModel;
-use Kanboard\Model\ProjectRoleModel;
-use Kanboard\Model\ProjectUserRoleModel;
 use Kanboard\Model\UserModel;
 use Kanboard\Plugin\Matinee\Crypto\KeyStore;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
@@ -58,7 +52,6 @@ trait MatineeControllerHarness
     private const OTHER_MACHINE = 'fedcba9876543210fedcba9876543210fedcba98';
     private const CONNECT_FAILED = 'Could not connect to that server with that token.';
     private const TOKEN_REQUIRED = 'Enter the token again to change the server address.';
-    private const INVALID_SHARE = 'That share could not be saved.';
 
     private FakeTransport $t;
     private MatineeLineLogger $log;
@@ -100,26 +93,6 @@ trait MatineeControllerHarness
         $id = (int) (new UserModel($this->container))->create(['username' => $name, 'name' => ucfirst($name), 'role' => $role]);
         $this->assertGreaterThan(1, $id);
         return $id;
-    }
-
-    private function project(string $name): int
-    {
-        return (int) (new ProjectModel($this->container))->create(['name' => $name]);
-    }
-
-    private function role(int $projectId, int $userId, string $role): void
-    {
-        if (! in_array($role, [Role::PROJECT_MANAGER, Role::PROJECT_MEMBER, Role::PROJECT_VIEWER], true)) {
-            (new ProjectRoleModel($this->container))->create($projectId, $role);
-        }
-        $this->assertTrue((new ProjectUserRoleModel($this->container))->addUser($projectId, $userId, $role));
-    }
-
-    private function groupRole(int $projectId, int $userId, string $role): void
-    {
-        $groupId = (int) (new GroupModel($this->container))->create('group-'.$projectId.'-'.$userId);
-        $this->assertTrue((new GroupMemberModel($this->container))->addUser($groupId, $userId));
-        $this->assertTrue((new ProjectGroupRoleModel($this->container))->addGroup($projectId, $groupId, $role));
     }
 
     private function loginAs(int $userId): void
@@ -177,10 +150,10 @@ trait MatineeControllerHarness
         return $response;
     }
 
-    /** A GET as a link on a Matinee page makes it: with the session's reusable CSRF token, as the share link has. */
+    /** A plain GET, as a link on a Matinee page makes it. */
     private function get(string $controller, string $action, array $get = []): MatineeTestResponse
     {
-        return $this->call($controller, $action, $get + ['csrf_token' => $this->container['token']->getReusableCSRFToken()], [], false, 'GET');
+        return $this->call($controller, $action, $get, [], false, 'GET');
     }
 
     /** The flash messages now in the session (left in place). */

@@ -6,13 +6,9 @@ use PDO;
 const VERSION = 2;
 
 /**
- * Spec §1 P1 tables. Syntax follows core app/Schema/Mssql.php.
+ * Spec §1 P1 tables, light scope. Syntax follows core app/Schema/Mssql.php.
  * Untested: the dev stack and CI have no SQL Server. CREATE TABLE has no IF NOT EXISTS, following core
  * app/Schema/Mssql.php (T-SQL has no such clause; migrations run once per version anyway).
- * At most one everyone-share (project_id IS NULL) per server: UNIQUE(server_id, audience, project_id)
- * lets NULLs repeat, so a partial unique index (or, on MySQL, ShareModel) closes the gap.
- * matinee_shares.created_by deliberately has no FK: S6 treats a dangling creator as non-admin, and a cascade from
- * users would give Mssql a second cascade path to matinee_shares (users -> servers -> shares).
  */
 function version_1(PDO $pdo)
 {
@@ -34,30 +30,6 @@ function version_1(PDO $pdo)
         );
     ');
     $pdo->exec('CREATE INDEX matinee_servers_owner_idx ON dbo.matinee_servers(owner_user_id)');
-
-    $pdo->exec('
-        CREATE TABLE dbo.matinee_shares (
-            id int identity PRIMARY KEY
-          , server_id int NOT NULL REFERENCES dbo.matinee_servers(id) ON DELETE CASCADE
-          , created_by int NOT NULL
-          , audience nvarchar(16) NOT NULL
-          , project_id int NULL REFERENCES dbo.projects(id) ON DELETE CASCADE
-          , whole_server smallint NOT NULL DEFAULT 0
-          , is_enabled smallint NOT NULL DEFAULT 1
-          , created_at bigint NOT NULL DEFAULT 0
-          , CONSTRAINT matinee_shares_audience_uq UNIQUE (server_id, audience, project_id)
-        );
-    ');
-    $pdo->exec('CREATE INDEX matinee_shares_project_idx ON dbo.matinee_shares(project_id)');
-    $pdo->exec('CREATE UNIQUE INDEX matinee_shares_everyone_uq ON dbo.matinee_shares(server_id) WHERE project_id IS NULL');
-
-    $pdo->exec('
-        CREATE TABLE dbo.matinee_share_sections (
-            share_id int NOT NULL REFERENCES dbo.matinee_shares(id) ON DELETE CASCADE
-          , section_key nvarchar(20) NOT NULL
-          , PRIMARY KEY (share_id, section_key)
-        );
-    ');
 }
 
 /** Spec §11 S1: one row per connect or verify attempt, for the per-user rate limit. ServerModel prunes rows over 1 h old. */

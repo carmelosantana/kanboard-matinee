@@ -191,7 +191,7 @@ final class ServerModel extends Base
         return self::STATUS_OK;
     }
 
-    /** Owner or admin. Shares and their sections cascade. */
+    /** Owner or admin. */
     public function remove(int $serverId, int $actorId): void
     {
         $server = $this->get($serverId);
@@ -288,17 +288,6 @@ final class ServerModel extends Base
         $token = $this->tokenFor($row);
         $owner = $this->activeUser((int) $row['owner_user_id']) ?? throw new MatineeForbiddenException();
         return $this->makeClient($row['base_url'], $token, $row['machine_id'], $owner);
-    }
-
-    /**
-     * Counts one attempt toward the actor's limit for a live Plex call made outside this model (the share form's
-     * sections lookup); over the limit it throws the generic MatineeConnectException and records nothing.
-     */
-    public function recordAttempt(int $actorId): void
-    {
-        if (! $this->tryAttempt($actorId)) {
-            $this->fail('sections', 'rate_limit');
-        }
     }
 
     // ── internals ────────────────────────────────────────────────────────────

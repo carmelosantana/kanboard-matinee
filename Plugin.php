@@ -8,7 +8,6 @@ use Kanboard\Plugin\Matinee\Http\CurlTransport;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 use Kanboard\Plugin\Matinee\Model\ServerModel;
-use Kanboard\Plugin\Matinee\Model\ShareModel;
 use Kanboard\Plugin\Matinee\Model\SharePolicy;
 use Kanboard\Plugin\Matinee\Model\Settings;
 
@@ -43,7 +42,6 @@ class Plugin extends Base
         $container['matineeServerModel'] = static fn ($c): ServerModel => new ServerModel($c);
         // The policy's lookups read the DB on every call; only the closures are shared.
         $container['matineeSharePolicy'] = static fn ($c): SharePolicy => SharePolicy::fromContainer($c);
-        $container['matineeShareModel'] = static fn ($c): ShareModel => new ShareModel($c);
 
         // ACL: any signed-in user reaches the server pages (each action then checks the loaded row); the admin pages
         // are admins only (each action checks again). Anonymous users reach neither.
@@ -62,7 +60,7 @@ class Plugin extends Base
 
     /** [controller, actions, lowest application role]: every Matinee action. */
     public const ACL = [
-        ['MatineeServerController', ['index', 'create', 'edit', 'save', 'show', 'verify', 'remove', 'shareCreate', 'shareSave', 'shareUnlink'], Role::APP_USER],
+        ['MatineeServerController', ['index', 'create', 'edit', 'save', 'show', 'verify', 'remove'], Role::APP_USER],
         ['MatineeAdminController', ['show', 'save', 'toggle'], Role::APP_ADMIN],
     ];
 
@@ -75,9 +73,6 @@ class Plugin extends Base
         ['matinee/servers/:server_id/edit', 'MatineeServerController', 'edit'],
         ['matinee/servers/:server_id/verify', 'MatineeServerController', 'verify'],
         ['matinee/servers/:server_id/remove', 'MatineeServerController', 'remove'],
-        ['matinee/servers/:server_id/shares/new', 'MatineeServerController', 'shareCreate'],
-        ['matinee/servers/:server_id/shares/save', 'MatineeServerController', 'shareSave'],
-        ['matinee/shares/:share_id/unlink', 'MatineeServerController', 'shareUnlink'],
         ['matinee/admin', 'MatineeAdminController', 'show'],
         ['matinee/admin/save', 'MatineeAdminController', 'save'],
         ['matinee/admin/servers/:server_id/toggle', 'MatineeAdminController', 'toggle'],

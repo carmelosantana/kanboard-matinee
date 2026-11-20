@@ -4,10 +4,8 @@ require_once __DIR__.'/support/ControllerHarness.php';
 
 use KanboardTests\units\Base;
 use Kanboard\Core\Controller\AccessForbiddenException;
-use Kanboard\Core\Security\Role;
 use Kanboard\Plugin\Matinee\Http\PlexException;
 use Kanboard\Plugin\Matinee\Model\Settings;
-use Kanboard\Plugin\Matinee\Model\SharePolicy;
 use Kanboard\Plugin\Matinee\Test\FakeTransport;
 
 /**
@@ -26,9 +24,7 @@ class NoTokenLeakTest extends Base
 
     private int $owner;
     private int $outsider;
-    private int $project;
     private int $server;
-    private int $share;
 
     /** @var list<string> everything Matinee showed or said */
     private array $seen = [];
@@ -40,11 +36,7 @@ class NoTokenLeakTest extends Base
         $this->bootMatinee();
         $this->owner = $this->user('olive');
         $this->outsider = $this->user('oscar');
-        $this->project = $this->project('Movie night');
-        $this->role($this->project, $this->owner, Role::PROJECT_MANAGER);
         $this->server = $this->server($this->owner);
-        $this->queueSections();
-        $this->share = $this->container['matineeShareModel']->create($this->owner, $this->server, SharePolicy::AUDIENCE_PROJECT, $this->project, false, ['1']);
         $this->loginAs($this->owner);
     }
 
@@ -74,11 +66,6 @@ class NoTokenLeakTest extends Base
         $this->pages++;
     }
 
-    private function sections(): callable
-    {
-        return fn () => $this->queueSections();
-    }
-
     /** The token in no form: literal, any case, HTML-decoded, URL-decoded, or split by markup. */
     private function assertNoTokenAnywhere(): void
     {
@@ -103,7 +90,6 @@ class NoTokenLeakTest extends Base
             [self::SRV, 'create', []],
             [self::SRV, 'edit', $server],
             [self::SRV, 'show', $server],
-            [self::SRV, 'shareCreate', $server],
             [self::ADM, 'show', []],
         ];
     }
@@ -113,13 +99,13 @@ class NoTokenLeakTest extends Base
         foreach ([$this->owner, self::ADMIN, $this->outsider] as $userId) {
             $this->loginAs($userId);
             foreach ($this->pages() as [$controller, $action, $get]) {
-                $this->capture(fn () => $this->get($controller, $action, $get), $this->sections());
+                $this->capture(fn () => $this->get($controller, $action, $get));
             }
             $hook = $this->container['helper']->hook;
             $this->seen[] = $hook->render('template:user:sidebar:actions', ['user' => $this->container['userModel']->getById($userId)]);
             $this->seen[] = $hook->render('template:config:sidebar');
         }
-        $this->assertSame(18, $this->pages);
+        $this->assertSame(15, $this->pages);
         // The owner's pages did render the server, so the sweep looked at real content.
         $this->assertStringContainsString('Living room', implode("\n", $this->seen));
         $this->assertNoTokenAnywhere();
@@ -179,8 +165,6 @@ class NoTokenLeakTest extends Base
         $this->capture(fn () => $this->call(self::SRV, 'verify', ['server_id' => $this->server]));
         $this->assertSame(self::CONNECT_FAILED, $this->flash('failure'));
         $this->assertSame('reconnect', $this->container['matineeServerModel']->get($this->server)['status']);
-        $this->capture(fn () => $this->get(self::SRV, 'shareCreate', ['server_id' => $this->server]));
-        $this->capture(fn () => $this->call(self::SRV, 'shareSave', ['server_id' => $this->server], ['audience' => 'everyone', 'sections' => ['2']]));
         $this->capture(fn () => $this->call(self::SRV, 'save', [], ['server_id' => $this->server, 'name' => 'Den', 'url' => self::BASE, 'token' => '']));
         $this->capture(fn () => $this->get(self::SRV, 'show', ['server_id' => $this->server]));
         $this->capture(fn () => $this->get(self::SRV, 'index'));
@@ -189,21 +173,11 @@ class NoTokenLeakTest extends Base
         $this->assertNoTokenAnywhere();
     }
 
-    public function testEveryShareErrorPath(): void
+    public function testRemoveErrorPaths(): void
     {
-        $other = $this->project('Not mine');
-        $save = fn (array $post) => fn () => $this->call(self::SRV, 'shareSave', ['server_id' => $this->server], $post);
-        $this->capture($save(['audience' => (string) $this->project, 'whole_server' => '1'])); // duplicate
-        $this->capture($save(['audience' => (string) $other, 'whole_server' => '1']));
-        $this->capture($save(['audience' => 'everyone', 'whole_server' => '1']));
-        $this->capture($save(['audience' => self::TOKEN, 'sections' => [self::TOKEN]]));
-        $this->capture($save(['audience' => (string) $other, 'sections' => ['2']]), fn () => $this->t->respond(401, self::TOKEN));
-        $this->capture(fn () => $this->get(self::SRV, 'shareCreate', ['server_id' => $this->server]), fn () => $this->t->respond(500, self::TOKEN));
         $this->loginAs($this->outsider);
-        $this->capture(fn () => $this->call(self::SRV, 'shareUnlink', ['share_id' => $this->share]));
         $this->capture(fn () => $this->call(self::SRV, 'remove', ['server_id' => $this->server]));
         $this->loginAs($this->owner);
-        $this->capture(fn () => $this->call(self::SRV, 'shareUnlink', ['share_id' => $this->share]));
         $this->capture(fn () => $this->call(self::SRV, 'remove', ['server_id' => $this->server]));
         $this->assertNoTokenAnywhere();
     }
