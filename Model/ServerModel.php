@@ -218,7 +218,7 @@ final class ServerModel extends Base
     public function setShared(int $serverId, int $actorId, bool $on): void
     {
         $server = $this->get($serverId);
-        if ($server === null || ! $this->policy()->canToggleShared($actorId, $server)) {
+        if ($server === null || ! $this->policy()->canToggleShared($actorId, $server, $on)) {
             throw new MatineeForbiddenException();
         }
         $this->db->table(self::TABLE)->eq('id', $serverId)->update(['is_shared' => $on ? 1 : 0, 'updated_at' => time()]);

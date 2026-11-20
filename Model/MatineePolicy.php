@@ -54,10 +54,14 @@ final class MatineePolicy
             && ((int) $live['owner_user_id'] === $userId || $this->isActiveAdmin($userId));
     }
 
-    public function canToggleShared(int $userId, array $server): bool
+    /**
+     * Share ($on) or make private: only the active owner. Sharing also needs the server enabled; making it private
+     * only narrows access, so the owner may do it while an admin has the server disabled.
+     */
+    public function canToggleShared(int $userId, array $server, bool $on = true): bool
     {
         $live = $this->live($server);
-        return $live !== null && (int) $live['is_enabled'] === 1
+        return $live !== null && ($on === false || (int) $live['is_enabled'] === 1)
             && (int) $live['owner_user_id'] === $userId && $this->activeUser($userId) !== null;
     }
 

@@ -425,6 +425,22 @@ class ControllerTest extends Base
         $this->assertSame(0, $this->isShared($server));
     }
 
+    /** Making a server private only narrows access, so the owner may do it while an admin has it disabled. */
+    public function testTheOwnerCanMakeADisabledServerPrivate(): void
+    {
+        $server = $this->server($this->owner);
+        $this->call(self::SRV, 'share', ['server_id' => $server], ['shared' => '1']);
+        $this->container['matineeServerModel']->setEnabled($server, false, self::ADMIN);
+        $this->loginAs($this->owner);
+        $this->assertStringContainsString('Make private', $this->shareForm($this->get(self::SRV, 'show', ['server_id' => $server])->body()));
+        $this->call(self::SRV, 'share', ['server_id' => $server], ['shared' => '0']);
+        $this->assertSame(0, $this->isShared($server));
+        $this->forbidden(fn () => $this->call(self::SRV, 'share', ['server_id' => $server], ['shared' => '1']));
+        $this->assertSame(0, $this->isShared($server));
+        $this->loginAs(self::ADMIN);
+        $this->forbidden(fn () => $this->call(self::SRV, 'share', ['server_id' => $server], ['shared' => '0']));
+    }
+
     /** Every string a user or a Plex server controls is escaped on every page that shows it. */
     public function testUserControlledStringsAreEscaped(): void
     {

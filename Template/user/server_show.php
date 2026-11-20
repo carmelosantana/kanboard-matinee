@@ -28,7 +28,7 @@
 </div>
 
 
-<?php if ($is_owner && $server['is_enabled']): ?>
+<?php if ($is_owner && ($server['is_enabled'] || $server['is_shared'])): ?>
 <h3><?= t('Shared with everyone') ?></h3>
 <p class="form-help"><?= t('Sharing lets every Kanboard user browse and play this whole server, every library on it, once playback arrives in Matinee. Plex will show all of their playback as you, the owner.') ?></p>
 <form method="post" action="<?= $this->url->href('MatineeServerController', 'share', ['plugin' => 'Matinee', 'server_id' => $server['id']]) ?>" class="form-inline">
