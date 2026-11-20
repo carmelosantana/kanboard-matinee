@@ -5,7 +5,13 @@ use PDO;
 
 const VERSION = 1;
 
-/** Spec §1 P1 tables. Deleting a user, project or server takes its servers, shares and sections with it. */
+/**
+ * Spec §1 P1 tables. Deleting a user, project or server takes its servers, shares and sections with it.
+ * At most one everyone-share (project_id IS NULL) per server: UNIQUE(server_id, audience, project_id)
+ * lets NULLs repeat, so a partial unique index (or, on MySQL, ShareModel) closes the gap.
+ * matinee_shares.created_by deliberately has no FK: S6 treats a dangling creator as non-admin, and a cascade from
+ * users would give Mssql a second cascade path to matinee_shares (users -> servers -> shares).
+ */
 function version_1(PDO $pdo)
 {
     $pdo->exec('CREATE TABLE IF NOT EXISTS matinee_servers (
@@ -40,6 +46,7 @@ function version_1(PDO $pdo)
         FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
     )');
     $pdo->exec('CREATE INDEX matinee_shares_project_idx ON matinee_shares(project_id)');
+    $pdo->exec('CREATE UNIQUE INDEX matinee_shares_everyone_uq ON matinee_shares(server_id) WHERE project_id IS NULL');
 
     $pdo->exec('CREATE TABLE IF NOT EXISTS matinee_share_sections (
         share_id INTEGER NOT NULL,

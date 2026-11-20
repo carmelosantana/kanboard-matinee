@@ -1,6 +1,5 @@
 <?php
 require_once 'tests/units/Base.php';
-require_once __DIR__.'/../Schema/Sqlite.php';
 
 use KanboardTests\units\Base;
 use Kanboard\Model\ProjectModel;
@@ -13,6 +12,8 @@ class SchemaTest extends Base
     protected function setUp(): void
     {
         parent::setUp();
+        $driver = ['sqlite' => 'Sqlite', 'mysql' => 'Mysql', 'postgres' => 'Postgres'][DB_DRIVER];
+        require_once __DIR__."/../Schema/$driver.php";
         \Kanboard\Plugin\Matinee\Schema\version_1($this->container['db']->getConnection());
     }
 
@@ -73,6 +74,9 @@ class SchemaTest extends Base
 
     public function testForeignKeysAreEnforced(): void
     {
+        if (DB_DRIVER !== 'sqlite') {
+            $this->markTestSkipped('PRAGMA foreign_keys is SQLite-only; MySQL and Postgres always enforce them.');
+        }
         // The cascade tests below only mean something if SQLite enforces foreign keys (PicoDb turns them on).
         $this->assertSame(1, (int) $this->db()->getConnection()->query('PRAGMA foreign_keys')->fetchColumn());
     }
@@ -189,5 +193,24 @@ class SchemaTest extends Base
             $dup = false;
         }
         $this->assertFalse($dup);
+    }
+
+    // At most one everyone-share per server: UNIQUE(server_id, audience, project_id) alone lets NULL project_ids repeat.
+    public function testDuplicateEveryoneShareRefused(): void
+    {
+        if (DB_DRIVER === 'mysql') {
+            $this->markTestSkipped('MySQL has no partial unique index; ShareModel enforces one everyone-share per server.');
+        }
+        $serverId = $this->server($this->user('alice'));
+        $otherServer = $this->server($this->user('bob'));
+        $this->assertNotFalse($this->share($serverId, 'everyone', null));
+        try {
+            $dup = @$this->share($serverId, 'everyone', null);
+        } catch (\PicoDb\SQLException) {
+            $dup = false;
+        }
+        $this->assertFalse($dup);
+        $this->assertSame(1, $this->rows('matinee_shares'));
+        $this->assertNotFalse($this->share($otherServer, 'everyone', null));
     }
 }
