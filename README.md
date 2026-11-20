@@ -135,6 +135,10 @@ Plex tokens are sealed with a 32-byte root key.
 Moving from the key file to `MATINEE_KEY` (or back) is safe while both keys are present: a token sealed under
 the other key still opens and is re-sealed under the active one on next use.
 
+**Admin settings → Matinee** shows where the active key comes from (the env var or the key file) and its
+8-character key id. When the key can't be loaded, it shows one fixed notice instead. The notice never
+includes key bytes or paths.
+
 ## What is stored and where
 
 | Table | Holds |
