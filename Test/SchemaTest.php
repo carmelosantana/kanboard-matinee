@@ -14,7 +14,9 @@ class SchemaTest extends Base
         parent::setUp();
         $driver = ['sqlite' => 'Sqlite', 'mysql' => 'Mysql', 'postgres' => 'Postgres'][DB_DRIVER];
         require_once __DIR__."/../Schema/$driver.php";
-        \Kanboard\Plugin\Matinee\Schema\version_1($this->container['db']->getConnection());
+        $pdo = $this->container['db']->getConnection();
+        \Kanboard\Plugin\Matinee\Schema\version_1($pdo);
+        \Kanboard\Plugin\Matinee\Schema\version_2($pdo);
     }
 
     private function db(): \PicoDb\Database
@@ -212,5 +214,44 @@ class SchemaTest extends Base
         $this->assertFalse($dup);
         $this->assertSame(1, $this->rows('matinee_shares'));
         $this->assertNotFalse($this->share($otherServer, 'everyone', null));
+    }
+
+    public function testSchemaVersionIsTwo(): void
+    {
+        $this->assertSame(2, \Kanboard\Plugin\Matinee\Schema\VERSION);
+    }
+
+    // v2: matinee_attempts backs the connect/verify rate limit (spec §11 S1).
+    public function testAttemptsTableStoresUserAndTime(): void
+    {
+        $alice = $this->user('alice');
+        $this->assertTrue($this->db()->table('matinee_attempts')->insert(['user_id' => $alice, 'created_at' => 1234]));
+        $this->assertSame([['user_id' => $alice, 'created_at' => 1234]], array_map(
+            fn ($r) => ['user_id' => (int) $r['user_id'], 'created_at' => (int) $r['created_at']],
+            $this->db()->table('matinee_attempts')->findAll(),
+        ));
+    }
+
+    public function testAttemptsNeedARealUser(): void
+    {
+        try {
+            $ok = @$this->db()->table('matinee_attempts')->insert(['user_id' => 9999, 'created_at' => 1]);
+        } catch (\PicoDb\SQLException) {
+            $ok = false;
+        }
+        $this->assertFalse($ok);
+    }
+
+    public function testUserDeleteCascadesAttempts(): void
+    {
+        $alice = $this->user('alice');
+        $bob = $this->user('bob');
+        foreach ([$alice, $alice, $bob] as $user) {
+            $this->assertTrue($this->db()->table('matinee_attempts')->insert(['user_id' => $user, 'created_at' => 5]));
+        }
+
+        $this->assertTrue((new UserModel($this->container))->remove($alice));
+
+        $this->assertSame([$bob], array_map('intval', $this->db()->table('matinee_attempts')->findAllByColumn('user_id')));
     }
 }

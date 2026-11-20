@@ -3,7 +3,7 @@ namespace Kanboard\Plugin\Matinee\Schema;
 
 use PDO;
 
-const VERSION = 1;
+const VERSION = 2;
 
 /**
  * Spec §1 P1 tables. Deleting a user, project or server takes its servers, shares and sections with it.
@@ -56,5 +56,16 @@ function version_1(PDO $pdo)
         section_key VARCHAR(20) NOT NULL,
         PRIMARY KEY(share_id, section_key),
         FOREIGN KEY(share_id) REFERENCES matinee_shares(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci');
+}
+
+/** Spec §11 S1: one row per connect or verify attempt, for the per-user rate limit. ServerModel prunes rows over 1 h old. */
+function version_2(PDO $pdo)
+{
+    $pdo->exec('CREATE TABLE IF NOT EXISTS matinee_attempts (
+        user_id INT NOT NULL,
+        created_at BIGINT NOT NULL,
+        INDEX matinee_attempts_user_time_idx (user_id, created_at),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci');
 }

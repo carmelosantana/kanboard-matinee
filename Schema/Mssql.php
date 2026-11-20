@@ -3,7 +3,7 @@ namespace Kanboard\Plugin\Matinee\Schema;
 
 use PDO;
 
-const VERSION = 1;
+const VERSION = 2;
 
 /**
  * Spec §1 P1 tables. Syntax follows core app/Schema/Mssql.php.
@@ -58,4 +58,16 @@ function version_1(PDO $pdo)
           , PRIMARY KEY (share_id, section_key)
         );
     ');
+}
+
+/** Spec §11 S1: one row per connect or verify attempt, for the per-user rate limit. ServerModel prunes rows over 1 h old. */
+function version_2(PDO $pdo)
+{
+    $pdo->exec('
+        CREATE TABLE dbo.matinee_attempts (
+            user_id int NOT NULL REFERENCES dbo.users(id) ON DELETE CASCADE
+          , created_at bigint NOT NULL
+        );
+    ');
+    $pdo->exec('CREATE INDEX matinee_attempts_user_time_idx ON dbo.matinee_attempts(user_id, created_at)');
 }
