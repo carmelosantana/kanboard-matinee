@@ -1,0 +1,9 @@
+{
+  "MediaContainer": {
+    "size": 1,
+    "machineIdentifier": "0123456789abcdef0123456789abcdef01234567",
+    "Directory": [
+      { "key": "1", "type": "movie", "title": "Movies" }
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "MediaContainer": {
+    "size": 13,
+    "allowSync": false,
+    "title1": "Plex Library",
+    "Directory": [
+      { "key": "1", "type": "movie", "title": "Movies", "uuid": "aaaa", "Location": [{ "id": 1, "path": "/data/movies" }] },
+      { "key": "2", "type": "show", "title": "TV Shows", "uuid": "bbbb" },
+      { "key": "3", "type": "clip", "title": "Clips" },
+      { "key": "4", "type": "Movie", "title": "Wrong case type" },
+      { "key": "5", "type": "artist", "title": "Music", "uuid": "cccc" },
+      { "key": "6a", "type": "movie", "title": "Bad key" },
+      { "key": "", "type": "movie", "title": "Empty key" },
+      { "key": "-7", "type": "movie", "title": "Negative key" },
+      { "key": "/library/sections/8", "type": "movie", "title": "Path key" },
+      { "key": "9", "type": "photo", "title": "Family Photos", "uuid": "eeee" },
+      { "key": "10", "title": "Missing type" },
+      { "type": "movie", "title": "Missing key" },
+      { "key": "11", "type": ["movie"], "title": "Array type" },
+      { "key": 12, "type": "movie", "title": 42 },
+      { "key": 1.5, "type": "movie", "title": "Float key" },
+      { "key": true, "type": "movie", "title": "Bool key" },
+      { "key": "123456789012345678901", "type": "movie", "title": "Twenty-one digits" },
+      { "key": "99999999999999999999", "type": "show", "title": "Twenty digits" },
+      { "key": "13\n", "type": "movie", "title": "Trailing newline key" },
+      "not an object",
+      null
+    ]
+  }
+}
