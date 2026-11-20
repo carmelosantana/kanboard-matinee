@@ -1,0 +1,94 @@
+<?php
+
+namespace Kanboard\Plugin\Matinee\Controller;
+
+use Kanboard\Controller\BaseController;
+use Kanboard\Core\Controller\AccessForbiddenException;
+use Kanboard\Core\Security\Role;
+use Kanboard\Plugin\Matinee\Model\MatineeConnectException;
+use Kanboard\Plugin\Matinee\Model\ServerModel;
+use Kanboard\Plugin\Matinee\Model\ShareModel;
+use Kanboard\Plugin\Matinee\Model\SharePolicy;
+use Pimple\Container;
+
+/**
+ * What every Matinee page shares: `Referrer-Policy: same-origin` on every response (§11 S9), set before any check so a
+ * refusal carries it too; POST-and-CSRF for every state change; and the fixed, translated text for model failures.
+ * Nothing a model throws is shown: its message is a key, mapped here to one fixed sentence.
+ */
+abstract class MatineeBaseController extends BaseController
+{
+    public function __construct(Container $container)
+    {
+        parent::__construct($container);
+        $this->response->withHeader('Referrer-Policy', 'same-origin');
+    }
+
+    /** A POST with this form's single-use CSRF token, or 403. Read the fields with getRawValue() afterwards. */
+    protected function checkPost(): void
+    {
+        if (! $this->request->isPost()) {
+            throw new AccessForbiddenException();
+        }
+        $this->checkCSRFForm();
+    }
+
+    protected function actorId(): int
+    {
+        return (int) $this->userSession->getId();
+    }
+
+    /** A posted field as a string; anything else (an array, nothing) is ''. */
+    protected function field(string $name): string
+    {
+        $value = $this->request->getRawValue($name);
+        return is_scalar($value) ? (string) $value : '';
+    }
+
+    /** The live users row decides, not the session: an active app admin. */
+    protected function isActiveAdmin(int $userId): bool
+    {
+        $user = $this->userModel->getById($userId);
+        return $user && $user['role'] === Role::APP_ADMIN && (int) $user['is_active'] === 1;
+    }
+
+    protected static function connectMessage(MatineeConnectException $e): string
+    {
+        return $e->getMessage() === MatineeConnectException::TOKEN_REQUIRED
+            ? t('Enter the token again to change the server address.')
+            : t('Could not connect to that server with that token.');
+    }
+
+    protected function statusLabel(array $server): string
+    {
+        if ((int) $server['is_enabled'] !== 1) {
+            return t('Disabled by an admin');
+        }
+        return match ($server['status']) {
+            ServerModel::STATUS_OK => t('Connected'),
+            ServerModel::STATUS_RECONNECT => t('Needs the token again'),
+            default => t('Unreachable'),
+        };
+    }
+
+    /** The host of a stored base URL: pages never show the full address. */
+    protected static function host(array $server): string
+    {
+        return (string) parse_url((string) $server['base_url'], PHP_URL_HOST);
+    }
+
+    protected function servers(): ServerModel
+    {
+        return $this->container['matineeServerModel'];
+    }
+
+    protected function shares(): ShareModel
+    {
+        return $this->container['matineeShareModel'];
+    }
+
+    protected function policy(): SharePolicy
+    {
+        return $this->container['matineeSharePolicy'];
+    }
+}

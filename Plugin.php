@@ -2,6 +2,7 @@
 namespace Kanboard\Plugin\Matinee;
 
 use Kanboard\Core\Plugin\Base;
+use Kanboard\Core\Security\Role;
 use Kanboard\Plugin\Matinee\Crypto\KeyStore;
 use Kanboard\Plugin\Matinee\Http\CurlTransport;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
@@ -43,7 +44,41 @@ class Plugin extends Base
         // The policy's lookups read the DB on every call; only the closures are shared.
         $container['matineeSharePolicy'] = static fn ($c): SharePolicy => SharePolicy::fromContainer($c);
         $container['matineeShareModel'] = static fn ($c): ShareModel => new ShareModel($c);
+
+        // ACL: any signed-in user reaches the server pages (each action then checks the loaded row); the admin pages
+        // are admins only (each action checks again). Anonymous users reach neither.
+        foreach (self::ACL as [$controller, $actions, $role]) {
+            $this->applicationAccessMap->add($controller, $actions, $role);
+        }
+        foreach (self::ROUTES as [$path, $controller, $action]) {
+            $this->route->addRoute($path, $controller, $action, 'Matinee');
+        }
+        $this->hook->on('template:user:sidebar:actions', ['template' => 'Matinee:user/sidebar']);
+        $this->hook->on('template:config:sidebar', ['template' => 'Matinee:config/sidebar']);
     }
+
+    /** [controller, actions, lowest application role]: every Matinee action. */
+    public const ACL = [
+        ['MatineeServerController', ['index', 'create', 'edit', 'save', 'show', 'verify', 'remove', 'shareCreate', 'shareSave', 'shareUnlink'], Role::APP_USER],
+        ['MatineeAdminController', ['show', 'save', 'toggle'], Role::APP_ADMIN],
+    ];
+
+    /** [path, controller, action]. Fixed paths come before `:server_id` ones: the first match wins. */
+    public const ROUTES = [
+        ['matinee/servers', 'MatineeServerController', 'index'],
+        ['matinee/servers/new', 'MatineeServerController', 'create'],
+        ['matinee/servers/save', 'MatineeServerController', 'save'],
+        ['matinee/servers/:server_id', 'MatineeServerController', 'show'],
+        ['matinee/servers/:server_id/edit', 'MatineeServerController', 'edit'],
+        ['matinee/servers/:server_id/verify', 'MatineeServerController', 'verify'],
+        ['matinee/servers/:server_id/remove', 'MatineeServerController', 'remove'],
+        ['matinee/servers/:server_id/shares/new', 'MatineeServerController', 'shareCreate'],
+        ['matinee/servers/:server_id/shares/save', 'MatineeServerController', 'shareSave'],
+        ['matinee/shares/:share_id/unlink', 'MatineeServerController', 'shareUnlink'],
+        ['matinee/admin', 'MatineeAdminController', 'show'],
+        ['matinee/admin/save', 'MatineeAdminController', 'save'],
+        ['matinee/admin/servers/:server_id/toggle', 'MatineeAdminController', 'toggle'],
+    ];
 
     /** $loaded defaults to extension_loaded; tests pass a stand-in. */
     public static function isSupported(?callable $loaded = null): bool
