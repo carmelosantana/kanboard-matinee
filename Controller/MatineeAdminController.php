@@ -130,7 +130,7 @@ class MatineeAdminController extends MatineeBaseController
 
     private function assertAdmin(): void
     {
-        if (! $this->userSession->isAdmin() || ! $this->isActiveAdmin($this->actorId())) {
+        if (! $this->userSession->isAdmin() || ! $this->policy()->isActiveAdmin($this->actorId())) {
             throw new AccessForbiddenException();
         }
     }

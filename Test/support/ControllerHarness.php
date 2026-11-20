@@ -157,16 +157,13 @@ trait MatineeControllerHarness
     }
 
     /**
-     * Calls Controller::$action as the signed-in user. $get are the route params, $post the form; with $csrf a fresh
-     * form token is added.
+     * Calls Controller::$action as the signed-in user. $get are the route params, $post the form (sent whatever
+     * $method says, so a GET can carry a body); with $csrf a fresh form token is added.
      */
     private function call(string $controller, string $action, array $get = [], array $post = [], bool $csrf = true, string $method = 'POST'): MatineeTestResponse
     {
         if ($csrf) {
             $post['csrf_token'] = $this->container['token']->getCSRFToken();
-        }
-        if ($method === 'GET') {
-            $post = [];
         }
         unset($this->container['request']);
         $this->container['request'] = new Request($this->container, ['REQUEST_METHOD' => $method],

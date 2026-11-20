@@ -4,7 +4,6 @@ namespace Kanboard\Plugin\Matinee\Controller;
 
 use Kanboard\Controller\BaseController;
 use Kanboard\Core\Controller\AccessForbiddenException;
-use Kanboard\Core\Security\Role;
 use Kanboard\Plugin\Matinee\Model\MatineeConnectException;
 use Kanboard\Plugin\Matinee\Model\ServerModel;
 use Kanboard\Plugin\Matinee\Model\ShareModel;
@@ -13,7 +12,8 @@ use Pimple\Container;
 
 /**
  * What every Matinee page shares: `Referrer-Policy: same-origin` on every response (§11 S9), set before any check so a
- * refusal carries it too; POST-and-CSRF for every state change; and the fixed, translated text for model failures.
+ * refusal carries it too (Plugin::sendReferrerPolicy covers the refusals core makes before a controller exists);
+ * POST-and-CSRF for every state change; and the fixed, translated text for model failures.
  * Nothing a model throws is shown: its message is a key, mapped here to one fixed sentence.
  */
 abstract class MatineeBaseController extends BaseController
@@ -43,13 +43,6 @@ abstract class MatineeBaseController extends BaseController
     {
         $value = $this->request->getRawValue($name);
         return is_scalar($value) ? (string) $value : '';
-    }
-
-    /** The live users row decides, not the session: an active app admin. */
-    protected function isActiveAdmin(int $userId): bool
-    {
-        $user = $this->userModel->getById($userId);
-        return $user && $user['role'] === Role::APP_ADMIN && (int) $user['is_active'] === 1;
     }
 
     protected static function connectMessage(MatineeConnectException $e): string

@@ -53,6 +53,9 @@ class Plugin extends Base
         foreach (self::ROUTES as [$path, $controller, $action]) {
             $this->route->addRoute($path, $controller, $action, 'Matinee');
         }
+        // Referrer-Policy on every request routed to Matinee, set on app.bootstrap (the router has dispatched by then)
+        // so a refusal core's ACL middleware makes before any Matinee controller is built carries it too (§11 S9).
+        $this->dispatcher->addListener('app.bootstrap', [$this, 'sendReferrerPolicy']);
         $this->hook->on('template:user:sidebar:actions', ['template' => 'Matinee:user/sidebar']);
         $this->hook->on('template:config:sidebar', ['template' => 'Matinee:config/sidebar']);
     }
@@ -79,6 +82,14 @@ class Plugin extends Base
         ['matinee/admin/save', 'MatineeAdminController', 'save'],
         ['matinee/admin/servers/:server_id/toggle', 'MatineeAdminController', 'toggle'],
     ];
+
+    /** On app.bootstrap: `Referrer-Policy: same-origin` when the routed plugin is Matinee. */
+    public function sendReferrerPolicy(): void
+    {
+        if ($this->router->getPlugin() === 'Matinee') {
+            $this->response->withHeader('Referrer-Policy', 'same-origin');
+        }
+    }
 
     /** $loaded defaults to extension_loaded; tests pass a stand-in. */
     public static function isSupported(?callable $loaded = null): bool

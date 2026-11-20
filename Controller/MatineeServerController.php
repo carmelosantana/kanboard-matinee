@@ -123,14 +123,17 @@ class MatineeServerController extends MatineeBaseController
     }
 
     /**
-     * The owner's share form: whole server or sections from a live sections() call, and an audience of the projects
-     * they manage (direct or group, never a custom role), plus Everyone for an active app admin.
+     * The owner's share form: whole server or sections from a live sections() call (one attempt toward the limit),
+     * and an audience of the projects they manage (direct or group, never a custom role), plus Everyone for an active
+     * app admin.
      */
     public function shareCreate(): void
     {
         $server = $this->ownedServer();
         $me = $this->actorId();
         try {
+            // A live Plex call: it counts toward the attempt limit like connect and verify.
+            $this->servers()->recordAttempt($me);
             $sections = $this->servers()->clientFor($server)->sections();
         } catch (\Throwable) {
             $this->logger->info('Matinee: share form sections lookup failed (server '.(int) $server['id'].')');
@@ -141,7 +144,7 @@ class MatineeServerController extends MatineeBaseController
             'sections' => $sections,
             'section_error' => $sections === null ? t('Could not connect to that server with that token.') : '',
             'projects' => $this->managedProjects($me),
-            'can_share_everyone' => $this->isActiveAdmin($me),
+            'can_share_everyone' => $this->policy()->isActiveAdmin($me),
         ]);
     }
 

@@ -110,6 +110,41 @@ class ControllerTest extends Base
         $this->assertCount($plexCalls, $this->t->requests, 'no Plex call');
     }
 
+    /**
+     * Every state change is POST only: a GET carrying a valid single-use token (in the query and in a body, so only
+     * the method check stands in the way) is refused and changes nothing.
+     */
+    public function testEveryStateChangeSentAsAGetIsForbiddenEvenWithAValidToken(): void
+    {
+        $server = $this->server($this->owner);
+        $share = $this->projectShare($server);
+        $before = [$this->serverCount(), $this->shareCount(), $this->container['matineeServerModel']->get($server)];
+        $plexCalls = count($this->t->requests);
+        $getWithToken = function (string $controller, string $action, array $get, array $post): void {
+            $token = $this->container['token']->getCSRFToken();
+            $this->call($controller, $action, $get + ['csrf_token' => $token], $post + ['csrf_token' => $token], false, 'GET');
+        };
+
+        $this->queueOk();
+        foreach ([
+            ['save', [], ['name' => 'Den', 'url' => 'https://den.example.test:32400', 'token' => self::TOKEN]],
+            ['save', [], ['server_id' => $server, 'name' => 'Renamed', 'url' => self::BASE, 'token' => '']],
+            ['verify', ['server_id' => $server], []],
+            ['shareSave', ['server_id' => $server], ['audience' => 'everyone', 'whole_server' => '1']],
+            ['shareUnlink', ['share_id' => $share], []],
+            ['remove', ['server_id' => $server], []],
+        ] as [$action, $get, $post]) {
+            $this->forbidden(fn () => $getWithToken(self::SRV, $action, $get, $post), $action);
+        }
+        $this->loginAs(self::ADMIN);
+        $this->forbidden(fn () => $getWithToken(self::ADM, 'save', [], ['matinee_connect_policy' => 'admins', 'matinee_private_targets' => '', 'matinee_allowed_hosts' => '', 'matinee_attempt_limit' => '5', 'matinee_max_servers' => '1']), 'admin save');
+        $this->forbidden(fn () => $getWithToken(self::ADM, 'toggle', ['server_id' => $server], ['enabled' => '0']), 'toggle');
+
+        $this->assertSame($before, [$this->serverCount(), $this->shareCount(), $this->container['matineeServerModel']->get($server)]);
+        $this->assertSame(Settings::POLICY_EVERYONE, (new Settings($this->container))->connectPolicy());
+        $this->assertCount($plexCalls, $this->t->requests, 'no Plex call');
+    }
+
     // ── ACL ──────────────────────────────────────────────────────────────────
 
     /** @return list<string> the public actions a controller declares */
@@ -157,6 +192,25 @@ class ControllerTest extends Base
         }
         $this->assertSame(1, (int) $this->container['matineeServerModel']->get($server)['is_enabled']);
         $this->assertSame(Settings::POLICY_EVERYONE, (new Settings($this->container))->connectPolicy());
+    }
+
+    /** The live users row decides, not the session: a demoted or deactivated admin is refused without signing in again. */
+    public function testAnAdminDemotedOrDeactivatedSinceSignInIsRefused(): void
+    {
+        $server = $this->server($this->owner);
+        $settingsBefore = [Settings::CONNECT_POLICY => (new Settings($this->container))->connectPolicy(), 'limit' => (new Settings($this->container))->attemptLimit()];
+        foreach ([['role' => Role::APP_USER], ['is_active' => 0]] as $change) {
+            $this->loginAs(self::ADMIN);
+            $this->container['db']->table('users')->eq('id', self::ADMIN)->update($change);
+            $this->assertTrue($this->container['userSession']->isAdmin(), 'the session still says admin');
+            $this->forbidden(fn () => $this->call(self::ADM, 'save', [], ['matinee_connect_policy' => 'admins', 'matinee_private_targets' => '', 'matinee_allowed_hosts' => '', 'matinee_attempt_limit' => '5', 'matinee_max_servers' => '1']), 'save '.json_encode($change));
+            $this->forbidden(fn () => $this->call(self::ADM, 'toggle', ['server_id' => $server], ['enabled' => '0']), 'toggle '.json_encode($change));
+            $this->forbidden(fn () => $this->get(self::ADM, 'show'), 'show '.json_encode($change));
+            $this->container['db']->table('users')->eq('id', self::ADMIN)->update(['role' => Role::APP_ADMIN, 'is_active' => 1]);
+        }
+        $this->container['memoryCache']->flush();
+        $this->assertSame($settingsBefore, [Settings::CONNECT_POLICY => (new Settings($this->container))->connectPolicy(), 'limit' => (new Settings($this->container))->attemptLimit()]);
+        $this->assertSame(1, (int) $this->container['matineeServerModel']->get($server)['is_enabled']);
     }
 
     // ── IDOR and S5 ──────────────────────────────────────────────────────────
@@ -377,6 +431,20 @@ class ControllerTest extends Base
         $this->assertStringNotContainsString(self::TOKEN, $body);
     }
 
+    /** The share form's live sections call counts toward the attempt limit: over it, no Plex request is made. */
+    public function testTheShareFormCountsTowardTheAttemptLimit(): void
+    {
+        $this->setConfig(Settings::ATTEMPT_LIMIT_KEY, '1');
+        $server = $this->server($this->owner); // the connect used the one attempt
+        $this->role($this->project('Movie night'), $this->owner, Role::PROJECT_MANAGER);
+        $this->queueSections();
+        $plexCalls = count($this->t->requests);
+        $body = $this->get(self::SRV, 'shareCreate', ['server_id' => $server])->body();
+        $this->assertStringContainsString(self::CONNECT_FAILED, $body);
+        $this->assertStringNotContainsString('name="sections[]"', $body);
+        $this->assertCount($plexCalls, $this->t->requests, 'no Plex call over the limit');
+    }
+
     public function testSharingSectionsWithAManagedProject(): void
     {
         $server = $this->server($this->owner);
@@ -414,6 +482,69 @@ class ControllerTest extends Base
         // A project the owner does not manage is refused outright.
         $other = $this->project('Not mine');
         $this->forbidden(fn () => $this->call(self::SRV, 'shareSave', ['server_id' => $server], ['audience' => (string) $other, 'whole_server' => '1']));
+    }
+
+    /** Every string a user or a Plex server controls is escaped on every page that shows it. */
+    public function testUserControlledStringsAreEscaped(): void
+    {
+        $owner = $this->user('<u>own"er');
+        $this->loginAs($owner);
+        $this->queueOk();
+        $server = $this->container['matineeServerModel']->connect($owner, '<b>x</b>"\'', self::BASE, self::TOKEN);
+        $project = $this->project('<i>p</i>');
+        $this->role($project, $owner, Role::PROJECT_MANAGER);
+        $this->container['matineeShareModel']->create($owner, $server, SharePolicy::AUDIENCE_PROJECT, $project, true, []);
+        $this->t->respondJson(['MediaContainer' => ['Directory' => [['key' => '1', 'type' => 'movie', 'title' => '<script>alert(1)</script>']]]]);
+
+        $pages = [
+            'index' => $this->get(self::SRV, 'index')->body(),
+            'show' => $this->get(self::SRV, 'show', ['server_id' => $server])->body(),
+            'edit' => $this->get(self::SRV, 'edit', ['server_id' => $server])->body(),
+            'shareCreate' => $this->get(self::SRV, 'shareCreate', ['server_id' => $server])->body(),
+        ];
+        $this->loginAs(self::ADMIN);
+        $pages['admin'] = $this->get(self::ADM, 'show')->body();
+
+        $name = '&lt;b&gt;x&lt;/b&gt;&quot;&#039;';
+        foreach ($pages as $page => $body) {
+            // Core's project switcher carries project names as JSON in a data attribute, read by its own script: not
+            // Matinee's output, so it is left out of the raw-string check.
+            $body = (string) preg_replace("/ data-params='[^']*'/", '', $body);
+            foreach (['<script>alert', '<b>x', '<i>p', '<u>own', '&lt;/b&gt;"\''] as $raw) {
+                $this->assertStringNotContainsString($raw, $body, "$page shows $raw");
+            }
+            $this->assertStringContainsString($name, $body, $page);
+        }
+        $this->assertStringContainsString('&lt;script&gt;alert(1)&lt;/script&gt;', $pages['shareCreate']);
+        $this->assertStringContainsString('&lt;i&gt;p&lt;/i&gt;', $pages['shareCreate']);
+        $this->assertStringContainsString('&lt;i&gt;p&lt;/i&gt;', $pages['show']);
+        $this->assertStringContainsString('&lt;u&gt;own&quot;er', $pages['admin']);
+    }
+
+    /**
+     * A refusal that core's ACL middleware makes before any Matinee controller is built still carries the header:
+     * the plugin sets it on app.bootstrap for any request routed to Matinee. Runs core's Runner, sessions aside.
+     */
+    public function testARefusalBeforeTheControllerCarriesReferrerPolicy(): void
+    {
+        $this->container['sessionManager'] = new class($this->container) extends \Kanboard\Core\Session\SessionManager {
+            public function open() {}
+        };
+        $this->loginAs($this->owner);
+        foreach ([[self::ADM, 'show', 'Matinee', 'same-origin'], ['DashboardController', 'show', '', null]] as [$controller, $action, $plugin, $expected]) {
+            unset($this->container['request'], $this->container['response']);
+            $this->container['request'] = new \Kanboard\Core\Http\Request($this->container, ['REQUEST_METHOD' => 'GET'],
+                ['controller' => $controller, 'action' => $action, 'plugin' => $plugin], [], [], []);
+            $this->container['response'] = $response = new MatineeTestResponse($this->container);
+            $this->container['router']->dispatch();
+            if ($expected !== null) {
+                (new \Kanboard\Core\Controller\Runner($this->container))->execute();
+                $this->assertSame(403, $response->code());
+            } else {
+                $this->container['dispatcher']->dispatch(new \Symfony\Contracts\EventDispatcher\Event(), 'app.bootstrap');
+            }
+            $this->assertSame($expected, $response->headers()['Referrer-Policy'] ?? null, $controller);
+        }
     }
 
     // ── S9 ───────────────────────────────────────────────────────────────────
