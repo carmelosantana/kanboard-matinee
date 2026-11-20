@@ -1,0 +1,13 @@
+{
+  "MediaContainer": {
+    "size": 2,
+    "totalSize": 2,
+    "offset": 0,
+    "librarySectionID": 1,
+    "librarySectionTitle": "<i>Movies</i>",
+    "Metadata": [
+      { "ratingKey": "201", "key": "/library/metadata/201/children", "type": "show", "title": "<script>alert('t')</script>", "parentTitle": "\"><img src=x onerror=alert(1)>", "grandparentTitle": "<b>gp</b>&amp;", "year": 2001, "thumb": "/library/metadata/201/thumb/1700000002" },
+      { "ratingKey": "202", "type": "movie", "title": "Tom & Jerry's \"Big\" <Night>", "year": 1990 }
+    ]
+  }
+}

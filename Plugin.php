@@ -50,8 +50,8 @@ class Plugin extends Base
         // Turns a verified ref into a listing or an image, re-authorizing on every use (spec §6).
         $container['matineeBrowseModel'] = static fn ($c): BrowseModel => new BrowseModel($c);
 
-        // ACL: any signed-in user reaches the server pages (each action then checks the loaded row); the admin pages
-        // are admins only (each action checks again). Anonymous users reach neither.
+        // ACL: any signed-in user reaches the server and browse pages (each action then checks the loaded row or the
+        // signed ref); the admin pages are admins only (each action checks again). Anonymous users reach neither.
         foreach (self::ACL as [$controller, $actions, $role]) {
             $this->applicationAccessMap->add($controller, $actions, $role);
         }
@@ -63,11 +63,15 @@ class Plugin extends Base
         $this->dispatcher->addListener('app.bootstrap', [$this, 'sendReferrerPolicy']);
         $this->hook->on('template:user:sidebar:actions', ['template' => 'Matinee:user/sidebar']);
         $this->hook->on('template:config:sidebar', ['template' => 'Matinee:config/sidebar']);
+        // Browse is reached from the dashboard (ruling B5); its pages are styled by one stylesheet, no inline CSS.
+        $this->hook->on('template:dashboard:sidebar', ['template' => 'Matinee:dashboard/sidebar']);
+        $this->hook->on('template:layout:css', ['template' => 'plugins/Matinee/Assets/css/matinee.css']);
     }
 
     /** [controller, actions, lowest application role]: every Matinee action. */
     public const ACL = [
         ['MatineeServerController', ['index', 'create', 'edit', 'save', 'show', 'verify', 'remove', 'share'], Role::APP_USER],
+        ['MatineeBrowseController', ['index', 'server', 'listing', 'art'], Role::APP_USER],
         ['MatineeAdminController', ['show', 'save', 'toggle'], Role::APP_ADMIN],
     ];
 
@@ -81,6 +85,10 @@ class Plugin extends Base
         ['matinee/servers/:server_id/verify', 'MatineeServerController', 'verify'],
         ['matinee/servers/:server_id/remove', 'MatineeServerController', 'remove'],
         ['matinee/servers/:server_id/share', 'MatineeServerController', 'share'],
+        ['matinee/browse', 'MatineeBrowseController', 'index'],
+        ['matinee/browse/list', 'MatineeBrowseController', 'listing'],
+        ['matinee/browse/:server_id', 'MatineeBrowseController', 'server'],
+        ['matinee/art', 'MatineeBrowseController', 'art'],
         ['matinee/admin', 'MatineeAdminController', 'show'],
         ['matinee/admin/save', 'MatineeAdminController', 'save'],
         ['matinee/admin/servers/:server_id/toggle', 'MatineeAdminController', 'toggle'],

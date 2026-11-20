@@ -20,6 +20,7 @@ class NoTokenLeakTest extends Base
 
     private const SRV = 'MatineeServerController';
     private const ADM = 'MatineeAdminController';
+    private const BRW = 'MatineeBrowseController';
     private const ADMIN = 1;
 
     private int $owner;
@@ -142,6 +143,49 @@ class NoTokenLeakTest extends Base
 
         $this->capture($connect(), fn () => $this->t->respond(401, ''));
         $this->assertSame(self::CONNECT_FAILED, $this->failureOf($this->container['response']));
+        $this->assertNoTokenAnywhere();
+    }
+
+    /**
+     * P2 Task 4: every browse page and the art endpoint, as the owner, a shared user and an outsider, on success and on
+     * every failure (an upstream body, a status or an exception message holding the token), headers and bodies.
+     */
+    public function testEveryBrowsePageAndArtResponse(): void
+    {
+        $sections = fn () => $this->t->respond(200, (string) file_get_contents(__DIR__.'/fixtures/plex/sections.json'));
+        $listing = fn () => $sections() && $this->t->respond(200, (string) file_get_contents(__DIR__.'/fixtures/plex/children-section.json'));
+        $jpeg = fn () => $this->t->respond(200, "\xFF\xD8fake-jpeg", ['content-type' => 'image/jpeg']);
+        $signer = $this->container['matineeRefSigner'];
+        $this->container['matineeServerModel']->setShared($this->server, $this->owner, true);
+        $friend = $this->user('fern');
+
+        foreach ([$this->owner, $friend, $this->outsider] as $userId) {
+            $this->loginAs($userId);
+            $browse = $signer->sign($userId, $this->server, '1', 'browse', '/library/sections/1/all', 3600);
+            $art = $signer->sign($userId, $this->server, '1', 'art', '/library/metadata/101/thumb/1700000000', 3600);
+            $this->capture(fn () => $this->get(self::BRW, 'index'));
+            $this->capture(fn () => $this->get(self::BRW, 'server', ['server_id' => $this->server]), $sections);
+            $this->capture(fn () => $this->get(self::BRW, 'listing', ['ref' => $browse]), $listing);
+            $this->capture(fn () => $this->get(self::BRW, 'listing', ['ref' => $browse, 'start' => '60']), $listing);
+            $this->capture(fn () => $this->get(self::BRW, 'art', ['ref' => $art, 'size' => '144']), $jpeg);
+            // Failures: the token in an exception message, an upstream error body and a non-image body.
+            $this->capture(fn () => $this->get(self::BRW, 'server', ['server_id' => $this->server]), fn () => $this->t->fail(new \RuntimeException('curl said '.self::TOKEN)));
+            $this->capture(fn () => $this->get(self::BRW, 'listing', ['ref' => $browse]), fn () => $sections() && $this->t->respond(500, '<html>'.self::TOKEN.'</html>'));
+            $this->capture(fn () => $this->get(self::BRW, 'art', ['ref' => $art, 'size' => '512']), fn () => $this->t->respond(401, self::TOKEN));
+            $this->capture(fn () => $this->get(self::BRW, 'art', ['ref' => $art, 'size' => '144']), fn () => $this->t->respond(200, self::TOKEN, ['content-type' => 'text/html']));
+            $this->capture(fn () => $this->get(self::BRW, 'art', ['ref' => self::TOKEN, 'size' => '144']));
+            $this->seen[] = $this->container['helper']->hook->render('template:dashboard:sidebar', ['user' => $this->container['userModel']->getById($userId)]);
+        }
+        $this->container['matineeServerModel']->setShared($this->server, $this->owner, false);
+        $this->loginAs($friend);
+        $this->capture(fn () => $this->get(self::BRW, 'server', ['server_id' => $this->server]));
+
+        $this->assertSame(31, $this->pages);
+        $all = implode("\n", $this->seen);
+        // The sweep looked at real content: sections, a listing and the art bytes.
+        foreach (['TV Shows', 'Fake Show', "\xFF\xD8fake-jpeg"] as $shown) {
+            $this->assertStringContainsString($shown, $all);
+        }
         $this->assertNoTokenAnywhere();
     }
 
