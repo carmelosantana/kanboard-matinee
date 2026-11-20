@@ -8,6 +8,7 @@ use Kanboard\Plugin\Matinee\Model\MatineeConnectException;
 use Kanboard\Plugin\Matinee\Model\ServerModel;
 use Kanboard\Plugin\Matinee\Model\ShareModel;
 use Kanboard\Plugin\Matinee\Model\SharePolicy;
+use Kanboard\Plugin\Matinee\Plugin;
 use Pimple\Container;
 
 /**
@@ -22,6 +23,16 @@ abstract class MatineeBaseController extends BaseController
     {
         parent::__construct($container);
         $this->response->withHeader('Referrer-Policy', 'same-origin');
+        // Without sodium or curl the plugin registers no routes, but ?controller=…&plugin=Matinee still reaches here.
+        if (! static::supported()) {
+            throw new AccessForbiddenException();
+        }
+    }
+
+    /** Plugin::isSupported(); tests override it, as they do Plugin's. */
+    protected static function supported(): bool
+    {
+        return Plugin::isSupported();
     }
 
     /** A POST with this form's single-use CSRF token, or 403. Read the fields with getRawValue() afterwards. */

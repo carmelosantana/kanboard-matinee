@@ -160,6 +160,27 @@ class ControllerTest extends Base
         return $out;
     }
 
+    /** Without sodium or curl no route is registered, but a query string still names the controller: it refuses. */
+    public function testEveryControllerRefusesWhenTheExtensionsAreMissing(): void
+    {
+        $make = [
+            self::SRV => fn () => new class($this->container) extends MatineeServerController {
+                protected static function supported(): bool { return false; }
+            },
+            self::ADM => fn () => new class($this->container) extends MatineeAdminController {
+                protected static function supported(): bool { return false; }
+            },
+        ];
+        foreach ($make as $label => $fn) {
+            $this->call(self::SRV, 'index'); // a fresh recorded response
+            $this->forbidden($fn, $label);
+            $this->assertSame('same-origin', $this->container['response']->headers()['Referrer-Policy'] ?? null, $label);
+        }
+        // The real check is Plugin::isSupported().
+        $supported = new ReflectionMethod(MatineeServerController::class, 'supported');
+        $this->assertSame(\Kanboard\Plugin\Matinee\Plugin::isSupported(), $supported->invoke(null));
+    }
+
     public function testEveryActionHasAnAclRuleAndAnonymousUsersAreRefused(): void
     {
         $map = $this->container['applicationAccessMap'];
