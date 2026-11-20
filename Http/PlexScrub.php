@@ -3,36 +3,53 @@
 namespace Kanboard\Plugin\Matinee\Http;
 
 /**
- * Removes Plex tokens from a Plex-returned URI before Matinee reuses it (spec §3).
+ * Removes Plex tokens from a Plex-returned URI before Matinee reuses it (spec §3), and refuses the URI when it
+ * cannot be sure none is left.
  *
- * A query pair is dropped when its key, percent-decoded once (`+` as space, the way a server reads it) and with
- * any trailing `[...]` (PHP's array form) removed, equals `x-plex-token` ignoring case. So `X-PLEX-TOKEN`,
- * `X%2DPlex%2DToken` and `X-Plex-Token[]` all go, while `X-Plex-Token2` or a value of `X-Plex-Token` stay. The
- * same rule runs over the fragment, in case a token was parked there. Every other pair is kept byte for byte, in
- * order. When nothing is removed the URI comes back unchanged; when something is, empty pairs are dropped too,
- * and a query or fragment left empty loses its `?` / `#`.
+ * Query and fragment pairs are split on `&` and `;`. A pair is dropped when its key, normalised, is `xplextoken`.
+ * Normalising means: percent-decode (`+` as space) until stable, at most three rounds; lowercase; keep only
+ * `a`–`z`. So `X-PLEX-TOKEN`, `X%252DPlex%252DToken`, `X_Plex_Token`, `X-Plex-Token[]`, `X-Plex-Token%00` and
+ * ` X-Plex-Token+` all go. Every other pair is kept byte for byte, in order, each with the separator it came with.
+ * When nothing is removed the URI comes back unchanged; when something is, empty pairs are dropped too, and a query
+ * or fragment left empty loses its `?` / `#`.
+ *
+ * Then the whole remaining URI is normalised the same way. If `xplextoken` still appears anywhere (a token nested
+ * in a value such as `?url=%2Fx%3FX-Plex-Token%3D…`, a longer key, the path), or the URI is still changing after
+ * three decoding rounds, `stripToken` throws `PlexException::tokenInUri()` rather than guess. This fails closed:
+ * harmless text that merely spells the name is refused too. Callers drop a refused URI; they never fall back to
+ * the input.
  *
  * @package Kanboard\Plugin\Matinee\Http
  */
 final class PlexScrub
 {
-    public static function stripToken(string $url): string
+    private const NEEDLE = 'xplextoken';
+    private const DECODE_ROUNDS = 3;
+
+    /** @throws PlexException `plex.token_in_uri` when token-like text survives stripping */
+    public static function stripToken(string $uri): string
     {
         $fragment = null;
-        $hash = strpos($url, '#');
+        $hash = strpos($uri, '#');
         if ($hash !== false) {
-            $fragment = substr($url, $hash + 1);
-            $url = substr($url, 0, $hash);
+            $fragment = substr($uri, $hash + 1);
+            $uri = substr($uri, 0, $hash);
         }
 
         $query = null;
-        $q = strpos($url, '?');
+        $q = strpos($uri, '?');
         if ($q !== false) {
-            $query = substr($url, $q + 1);
-            $url = substr($url, 0, $q);
+            $query = substr($uri, $q + 1);
+            $uri = substr($uri, 0, $q);
         }
 
-        return $url . self::part('?', $query) . self::part('#', $fragment);
+        $out = $uri . self::part('?', $query) . self::part('#', $fragment);
+
+        $all = self::letters($out);
+        if ($all === null || str_contains($all, self::NEEDLE)) {
+            throw PlexException::tokenInUri();
+        }
+        return $out;
     }
 
     private static function part(string $sigil, ?string $pairs): string
@@ -40,18 +57,46 @@ final class PlexScrub
         if ($pairs === null) {
             return '';
         }
-        $all = explode('&', $pairs);
-        $kept = array_values(array_filter($all, fn (string $pair) => ! self::isToken($pair)));
-        if (count($kept) === count($all)) {
+        // [pair, sep, pair, sep, pair, …]: every pair after the first is preceded by its own separator.
+        $bits = preg_split('/([&;])/', $pairs, -1, PREG_SPLIT_DELIM_CAPTURE);
+        $kept = [];
+        $dropped = false;
+        foreach ($bits as $i => $bit) {
+            if ($i % 2 === 1) {
+                continue;
+            }
+            if (self::letters(explode('=', $bit, 2)[0]) === self::NEEDLE) {
+                $dropped = true;
+                continue;
+            }
+            $kept[] = [$i === 0 ? '' : $bits[$i - 1], $bit];
+        }
+        if (! $dropped) {
             return $sigil . $pairs;
         }
-        $kept = array_filter($kept, fn (string $pair) => $pair !== '');
-        return $kept === [] ? '' : $sigil . implode('&', $kept);
+
+        $out = '';
+        foreach ($kept as [$sep, $pair]) {
+            if ($pair !== '') {
+                $out .= ($out === '' ? '' : $sep) . $pair;
+            }
+        }
+        return $out === '' ? '' : $sigil . $out;
     }
 
-    private static function isToken(string $pair): bool
+    /** Decode until stable (≤ 3 rounds), lowercase, letters only; null when still changing after the last round. */
+    private static function letters(string $s): ?string
     {
-        $key = urldecode(explode('=', $pair, 2)[0]);
-        return preg_match('/\Ax-plex-token(\[[^\]]*\])?\z/i', $key) === 1;
+        for ($i = 0; $i < self::DECODE_ROUNDS; $i++) {
+            $next = urldecode($s);
+            if ($next === $s) {
+                break;
+            }
+            $s = $next;
+        }
+        if (urldecode($s) !== $s) {
+            return null;
+        }
+        return (string) preg_replace('/[^a-z]/', '', strtolower($s));
     }
 }

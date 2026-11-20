@@ -10,6 +10,10 @@ namespace Kanboard\Plugin\Matinee\Http;
  * - Bodies over 2 MiB are refused and JSON is decoded with depth 32 (§11 S11).
  * - With a pinned `machineId`, any response whose `MediaContainer.machineIdentifier` differs is
  *   `plex.server_changed`.
+ * - The header set (with the token) is kept outside the object, in a class-private WeakMap, so var_export, an
+ *   `(array)` cast, get_object_vars and json_encode never see it; var_dump / print_r go through __debugInfo. A
+ *   client cannot be serialized, unserialized or cloned.
+ * - The device name is `Matinee` or exactly what deviceName() produces (S14).
  *
  * @package Kanboard\Plugin\Matinee\Http
  */
@@ -24,11 +28,12 @@ final class PlexClient
     private const MACHINE_ID = '/\A[A-Za-z0-9-]{1,64}\z/';
     private const VERSION = '/\A[A-Za-z0-9._+-]{1,64}\z/';
     private const SECTION_KEY = '/\A\d{1,20}\z/';
+    private const DEVICE_NAME = '/\AMatinee( \([A-Za-z0-9._ #-]{1,40}\))?\z/';
 
     private readonly string $baseUrl;
 
-    /** @var array<string, string> */
-    private readonly array $headers;
+    /** @var \WeakMap<self, array<string, string>>|null header sets by client; never a property of the client */
+    private static ?\WeakMap $headers = null;
 
     public function __construct(
         string $baseUrl,
@@ -41,14 +46,18 @@ final class PlexClient
         if (strpbrk($baseUrl, '?#') !== false) {
             throw new \InvalidArgumentException('The Plex base URL must not carry a query string or fragment.');
         }
-        foreach ([$token, $clientId, $deviceName] as $value) {
+        foreach ([$token, $clientId] as $value) {
             if ($value === '' || preg_match('/[\x00-\x1f\x7f]/', $value) === 1) {
                 throw new \InvalidArgumentException('A Plex header value is empty or holds a control character.');
             }
         }
+        if (preg_match(self::DEVICE_NAME, $deviceName) !== 1) {
+            throw new \InvalidArgumentException('The Plex device name must be Matinee or come from deviceName().');
+        }
 
         $this->baseUrl = rtrim($baseUrl, '/');
-        $this->headers = [
+        self::$headers ??= new \WeakMap();
+        self::$headers[$this] = [
             'X-Plex-Token'             => $token,
             'X-Plex-Client-Identifier' => $clientId,
             'X-Plex-Product'           => self::PRODUCT,
@@ -63,8 +72,29 @@ final class PlexClient
         return [
             'baseUrl'   => $this->baseUrl,
             'machineId' => $this->machineId,
-            'headers'   => ['X-Plex-Token' => '[redacted]'] + $this->headers,
+            'headers'   => ['X-Plex-Token' => '[redacted]'] + $this->headers(),
         ];
+    }
+
+    public function __serialize(): array
+    {
+        throw new \LogicException('A PlexClient holds a token and cannot be serialized.');
+    }
+
+    public function __unserialize(array $data): void
+    {
+        throw new \LogicException('A PlexClient cannot be unserialized.');
+    }
+
+    /** A clone would have no header set; build a new client instead. */
+    private function __clone()
+    {
+    }
+
+    /** @return array<string, string> */
+    private function headers(): array
+    {
+        return self::$headers[$this];
     }
 
     /** S14:`Matinee (<username filtered to [A-Za-z0-9._ -], ≤40>)`, or `Matinee (user #<id>)` when nothing is left. */
@@ -122,10 +152,10 @@ final class PlexClient
     private function fetch(string $path): array
     {
         try {
-            $r = $this->transport->get($this->baseUrl . $path, $this->headers);
+            $r = $this->transport->get($this->baseUrl . $path, $this->headers());
         } catch (PlexException | UnsafeUrlException $e) {
             throw $e;
-        } catch (\Exception) {
+        } catch (\Throwable) {
             throw PlexException::unreachable();
         }
 

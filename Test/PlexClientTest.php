@@ -164,6 +164,44 @@ class PlexClientTest extends TestCase
         ];
     }
 
+    /**
+     * Only deviceName()'s output or the bare default is a device name (S14).
+     *
+     * @dataProvider badDeviceNames
+     */
+    public function testADeviceNameNotShapedLikeDeviceNamesOutputIsRefused(string $device): void
+    {
+        try {
+            new PlexClient(self::BASE, self::TOKEN, self::CLIENT_ID, $this->t, null, $device);
+            $this->fail('expected refusal');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertMessageIsClean($e);
+            $this->assertStringNotContainsString('Evil', $e->getMessage());
+        }
+    }
+
+    public function badDeviceNames(): array
+    {
+        return [
+            'NEL (C1 control)'  => ["Evil\xc2\x85"],
+            'LF in parentheses' => ["Matinee (a\nb)"],
+            'other product'     => ['Evil'],
+            'empty'             => [''],
+            'empty parentheses' => ['Matinee ()'],
+            'trailing newline'  => ["Matinee\n"],
+            'too long'          => ['Matinee (' . str_repeat('x', 41) . ')'],
+            'unicode'           => ['Matinee (José)'],
+        ];
+    }
+
+    /** @dataProvider deviceNames */
+    public function testEveryDeviceNameOutputIsAccepted(string $username, int $id, string $expected): void
+    {
+        $this->t->respond(200, $this->fixture('identity'));
+        (new PlexClient(self::BASE, self::TOKEN, self::CLIENT_ID, $this->t, null, PlexClient::deviceName($username, $id)))->identity();
+        $this->assertSame($expected, $this->t->requests[0]['headers']['X-Plex-Device-Name']);
+    }
+
     // ── identity() ───────────────────────────────────────────────────────────
 
     public function testIdentityReturnsOnlyTheWhitelistedFields(): void
@@ -414,15 +452,69 @@ class PlexClientTest extends TestCase
         $this->client()->identity();
     }
 
+    /** Error throwables (TypeError, ValueError, …) are reported like any other transport failure. */
+    public function testATransportErrorIsUnreachableWithNothingChained(): void
+    {
+        $this->t->fail(new \TypeError('x ?X-Plex-Token=' . self::TOKEN));
+        $e = $this->expectPlexError(fn () => $this->client()->identity(), PlexException::UNREACHABLE);
+        $this->assertNull($e->getPrevious());
+    }
+
+    /**
+     * With argument capture switched on (production php.ini often has `zend.exception_ignore_args=On`, which
+     * would make this pass vacuously), the token argument in the constructor frame is a SensitiveParameterValue.
+     */
     public function testTheTokenIsHiddenFromStackTraces(): void
     {
+        $was = ini_set('zend.exception_ignore_args', '0');
         try {
             new PlexClient(self::BASE . '/?q', self::TOKEN, self::CLIENT_ID, $this->t);
             $this->fail('expected refusal');
         } catch (\InvalidArgumentException $e) {
+            $frame = $e->getTrace()[0];
+            $this->assertSame('__construct', $frame['function']);
+            $this->assertArrayHasKey('args', $frame);
+            $this->assertInstanceOf(\SensitiveParameterValue::class, $frame['args'][1]);
+            $this->assertStringNotContainsString(self::TOKEN, print_r($frame['args'], true));
             $this->assertStringNotContainsString(self::TOKEN, $e->getTraceAsString());
-            $this->assertStringNotContainsString(self::TOKEN, print_r($e->getTrace(), true));
+        } finally {
+            ini_set('zend.exception_ignore_args', (string) $was);
         }
+    }
+
+    public function testTheTokenIsNotInVarExportOrAnArrayCast(): void
+    {
+        $c = $this->client(self::MACHINE);
+        $this->t->respond(200, $this->fixture('identity'));
+        $c->identity();
+        $this->t->requests = []; // the double's own log holds the headers; the client must not
+        $this->assertStringNotContainsString(self::TOKEN, var_export($c, true));
+        $this->assertStringNotContainsString(self::TOKEN, print_r((array) $c, true));
+        $this->assertStringNotContainsString(self::TOKEN, var_export((array) $c, true));
+        $this->assertStringNotContainsString(self::TOKEN, print_r(get_object_vars($c), true));
+        $this->assertStringNotContainsString(self::TOKEN, (string) json_encode($c));
+        ob_start();
+        var_dump((array) $c);
+        $this->assertStringNotContainsString(self::TOKEN, (string) ob_get_clean());
+    }
+
+    public function testAClientCannotBeSerialized(): void
+    {
+        $this->expectException(\LogicException::class);
+        serialize($this->client());
+    }
+
+    public function testAClientCannotBeUnserialized(): void
+    {
+        $this->expectException(\LogicException::class);
+        unserialize('O:' . strlen(PlexClient::class) . ':"' . PlexClient::class . '":0:{}');
+    }
+
+    public function testAClientCannotBeCloned(): void
+    {
+        $this->expectException(\Error::class);
+        $c = $this->client();
+        clone $c;
     }
 
     public function testDebugOutputRedactsTheToken(): void
@@ -445,12 +537,13 @@ class PlexClientTest extends TestCase
             PlexException::badJson(),
             PlexException::serverChanged(),
             PlexException::tooLarge(),
+            PlexException::tokenInUri(),
         ];
         $this->assertSame(
-            ['plex.unreachable', 'plex.http_error', 'plex.token_rejected', 'plex.bad_json', 'plex.server_changed', 'plex.too_large'],
+            ['plex.unreachable', 'plex.http_error', 'plex.token_rejected', 'plex.bad_json', 'plex.server_changed', 'plex.too_large', 'plex.token_in_uri'],
             array_map(fn (PlexException $e) => $e->getMessage(), $all),
         );
-        $this->assertSame([0, 503, 401, 0, 0, 0], array_map(fn (PlexException $e) => $e->status, $all));
+        $this->assertSame([0, 503, 401, 0, 0, 0, 0], array_map(fn (PlexException $e) => $e->status, $all));
     }
 
     // ── PlexResponse ─────────────────────────────────────────────────────────

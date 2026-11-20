@@ -17,6 +17,8 @@ class PlexException extends \RuntimeException
     public const BAD_JSON       = 'plex.bad_json';
     public const SERVER_CHANGED = 'plex.server_changed';
     public const TOO_LARGE      = 'plex.too_large';
+    /** PlexScrub found token-like text it could not strip, so the URI is refused (not reused). */
+    public const TOKEN_IN_URI   = 'plex.token_in_uri';
 
     private function __construct(public readonly string $reason, public readonly int $status = 0)
     {
@@ -51,5 +53,10 @@ class PlexException extends \RuntimeException
     public static function tooLarge(): self
     {
         return new self(self::TOO_LARGE);
+    }
+
+    public static function tokenInUri(): self
+    {
+        return new self(self::TOKEN_IN_URI);
     }
 }
