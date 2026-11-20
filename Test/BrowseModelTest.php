@@ -53,6 +53,9 @@ class BrowseModelTest extends Base
     private int $bob;
     private int $serverId;
 
+    /** The production matineeRefSigner closure, kept so a test can put it back over a broken key store. */
+    private \Closure $productionSigner;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -69,6 +72,7 @@ class BrowseModelTest extends Base
 
         // A signer on a test clock, so a ref can be aged past its TTL.
         $this->now = 1_800_000_000;
+        $this->productionSigner = $this->container->raw('matineeRefSigner');
         $this->container->offsetUnset('matineeRefSigner');
         $this->container['matineeRefSigner'] = fn ($c): RefSigner => new RefSigner(
             Subkeys::refs($c['matineeKeyStore']->rootKey()),
@@ -190,6 +194,17 @@ class BrowseModelTest extends Base
         $this->assertStringNotContainsString('plex.example.test', $log);
         $this->assertStringNotContainsString('/library', $log);
         return $log;
+    }
+
+    /** A malformed MATINEE_KEY: every rootKey()/allKeys() call throws KeyStoreException. */
+    private function breakKeyStore(bool $productionSigner): void
+    {
+        $this->container->offsetUnset('matineeKeyStore');
+        $this->container['matineeKeyStore'] = new KeyStore($this->keyDir, 'not-a-valid-key');
+        if ($productionSigner) {
+            $this->container->offsetUnset('matineeRefSigner');
+            $this->container['matineeRefSigner'] = $this->productionSigner;
+        }
     }
 
     private function assertNoToken(mixed $result): void
@@ -332,6 +347,14 @@ class BrowseModelTest extends Base
             $this->verify($items[0]['artRef'], $this->alice)
         );
         $this->assertSame('/library/metadata/102/thumb/1700000001', $this->verify($items[1]['artRef'], $this->alice)['r']);
+
+        // Child and art refs last the full hour and no longer.
+        $this->now += 3599;
+        $this->assertSame('1', $this->verify($items[1]['browseRef'], $this->alice)['s']);
+        $this->assertSame('1', $this->verify($items[0]['artRef'], $this->alice)['s']);
+        $this->now += 1;
+        $this->expectForbidden(fn () => $this->verify($items[1]['browseRef'], $this->alice), true);
+        $this->expectForbidden(fn () => $this->verify($items[0]['artRef'], $this->alice), true);
 
         $this->assertSame(
             [self::BASE.'/library/sections', self::BASE.'/library/sections/1/all?X-Plex-Container-Start=0&X-Plex-Container-Size=60'],
@@ -554,5 +577,63 @@ class BrowseModelTest extends Base
         $this->t->respond(404, 'not found '.self::TOKEN);
         $log = $this->expectConnectFailure(fn () => $this->model()->art($this->alice, $this->artRef($this->alice), 144));
         $this->assertStringContainsString('at art (server '.$this->serverId.', plex.http_error)', $log);
+    }
+
+    // ── key store and client construction ───────────────────────────────────
+
+    public function testABrokenKeyStoreAtTheRefsStageIsTheConnectFailureBeforeAnyClient(): void
+    {
+        // Refs minted while the key store worked; then MATINEE_KEY goes bad and the production signer is back.
+        $browse = $this->browseRef($this->alice);
+        $art = $this->artRef($this->alice);
+        $this->breakKeyStore(true);
+        $this->queueListing();
+        $this->queueJpeg();
+
+        foreach ([
+            fn () => $this->model()->listing($this->alice, $browse, 0),
+            fn () => $this->model()->art($this->alice, $art, 144),
+            fn () => $this->model()->sections($this->alice, $this->serverId),
+        ] as $call) {
+            $this->log->lines = [];
+            $log = $this->expectConnectFailure($call);
+            $this->assertStringContainsString('at refs', $log);
+            $this->assertStringContainsString('key store', $log);
+            $this->assertSame('info Matinee: browse failed at refs (key store)', $log);
+            $this->assertSame([], $this->factoryCalls, 'a client was built with no signer');
+            $this->assertSame([], $this->t->requests, 'Plex was asked with no signer');
+        }
+    }
+
+    public function testABrokenKeyStoreAtTheClientStageIsTheConnectFailureLoggedAsKeyStore(): void
+    {
+        $this->signer(); // resolved while the key store worked
+        $this->breakKeyStore(false);
+        $this->t->respond(200, $this->fixture('sections'));
+        $log = $this->expectConnectFailure(fn () => $this->model()->sections($this->alice, $this->serverId));
+        $this->assertStringContainsString('at client (server '.$this->serverId.', key store)', $log);
+        $this->assertSame([], $this->t->requests);
+        // Configuration, not this row: the status is left alone.
+        $this->assertSame('ok', $this->container['db']->table('matinee_servers')->eq('id', $this->serverId)->findOneColumn('status'));
+    }
+
+    public function testAClientThatWillNotBuildIsTheConnectFailureAtTheClientStage(): void
+    {
+        $this->container->offsetUnset('matineePlexClientFactory');
+        $this->container['matineePlexClientFactory'] = $this->container->protect(
+            function (string $baseUrl, #[\SensitiveParameter] string $token, ?string $machineId, string $deviceName): PlexClient {
+                $this->factoryCalls[] = ['baseUrl' => $baseUrl, 'machineId' => $machineId];
+                throw new \InvalidArgumentException('plex: bad base url '.$baseUrl);
+            }
+        );
+        $this->t->respond(200, $this->fixture('sections'));
+        $log = $this->expectConnectFailure(fn () => $this->model()->sections($this->alice, $this->serverId));
+        $this->assertStringContainsString('at client (server '.$this->serverId.', invalid)', $log);
+        $this->assertSame([], $this->t->requests);
+
+        $this->log->lines = [];
+        $this->expectConnectFailure(fn () => $this->model()->listing($this->alice, $this->browseRef($this->alice), 0));
+        $this->log->lines = [];
+        $this->expectConnectFailure(fn () => $this->model()->art($this->alice, $this->artRef($this->alice), 144));
     }
 }

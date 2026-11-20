@@ -17,9 +17,11 @@ use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
  *
  * - Every refusal is the one MatineeForbiddenException: a bad, expired, other-user or wrong-kind ref, a missing
  *   server, `canBrowse` false (live rows), a section no longer live, a container from another section or none, a
- *   `start` outside 0..MAX_START, an art size off the allow-list. Refusals are decided before any client is built.
- * - Every Plex or token failure is one MatineeConnectException('matinee.connect_failed'); the stage, the server id
- *   and a fixed reason code go to the log (never a message, URL or token).
+ *   `start` outside 0..MAX_START, an art size off the allow-list. Refusals are decided before any client is built,
+ *   except the live-section and container checks, which need Plex.
+ * - Every Plex, token, key-store or client-build failure is one MatineeConnectException('matinee.connect_failed');
+ *   the stage, the server id (when there is one) and a fixed reason code go to the log (never a message, URL or
+ *   token). A key-store failure leaves the server's status alone.
  * - A listing re-fetches the live sections (B3); art does not (B2).
  * - Refs are minted for 3600 s and carry the server and section of the ref they came from.
  */
@@ -36,7 +38,7 @@ final class BrowseModel extends Base
     public function sections(int $userId, int $serverId): array
     {
         $server = $this->authorize($userId, $serverId);
-        $signer = $this->signer();
+        $signer = $this->signer(); // before any Plex call
         $out = [];
         foreach ($this->live($server, 'sections') as $s) {
             $out[] = $s + ['ref' => $signer->sign($userId, $serverId, $s['key'], 'browse', PlexPaths::sectionAll($s['key']), self::REF_TTL)];
@@ -140,9 +142,10 @@ final class BrowseModel extends Base
     }
 
     /**
-     * Builds the client, then runs $call. Plex, URL-guard and token failures become the one connect failure, logged
-     * by stage; Forbidden passes through; an InvalidArgumentException (a path or size the client refused, which the
-     * ref checks should already rule out) reads as Forbidden, never as a 500.
+     * Builds the client, then runs $call. Plex, URL-guard, token and key-store failures become the one connect
+     * failure, logged by stage; Forbidden passes through. An InvalidArgumentException while building the client (a
+     * stored base URL PlexClient refuses) is a connect failure too; one from $call (a path or size the client
+     * refused, which the ref checks should already rule out) reads as Forbidden, never as a 500.
      */
     private function plex(array $server, string $stage, callable $call): mixed
     {
@@ -153,8 +156,12 @@ final class BrowseModel extends Base
             return $call($client);
         } catch (MatineeForbiddenException $e) {
             throw $e;
-        } catch (\InvalidArgumentException) {
-            throw new MatineeForbiddenException();
+        } catch (\InvalidArgumentException $e) {
+            if ($at !== 'client') {
+                throw new MatineeForbiddenException();
+            }
+            $this->logger->info(sprintf('Matinee: browse failed at client (server %d, %s)', (int) $server['id'], self::reason($e)));
+            throw new MatineeConnectException();
         } catch (PlexException | UnsafeUrlException | CryptoException $e) {
             $this->logger->info(sprintf('Matinee: browse failed at %s (server %d, %s)', $at, (int) $server['id'], self::reason($e)));
             throw new MatineeConnectException();
@@ -167,6 +174,7 @@ final class BrowseModel extends Base
         return match (true) {
             $e instanceof PlexException, $e instanceof UnsafeUrlException => $e->reason,
             $e instanceof KeyStoreException => 'key store',
+            $e instanceof \InvalidArgumentException => 'invalid',
             default => 'token unopenable',
         };
     }
@@ -176,9 +184,18 @@ final class BrowseModel extends Base
         return $kind === 'browse' ? PlexPaths::isBrowse($path) : PlexPaths::isArt($path);
     }
 
+    /**
+     * The ref signer, built lazily from the key store. A key-store or ref-key failure (a malformed MATINEE_KEY, an
+     * unsafe or unreadable key dir) is configuration: the one connect failure, logged at the refs stage.
+     */
     private function signer(): RefSigner
     {
-        return $this->container['matineeRefSigner'];
+        try {
+            return $this->container['matineeRefSigner'];
+        } catch (CryptoException $e) {
+            $this->logger->info(sprintf('Matinee: browse failed at refs (%s)', self::reason($e)));
+            throw new MatineeConnectException();
+        }
     }
 
     private function policy(): MatineePolicy
