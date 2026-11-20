@@ -20,7 +20,8 @@ namespace Kanboard\Plugin\Matinee\Http;
  *    6to4) is judged as that IPv4. fec0::/10 is blocked. In 64:ff9b:1::/48 the IPv4 is the last 4 bytes only
  *    when bytes 6–11 are zero; any other address in that prefix is blocked. IPv4 targets cover the mapped,
  *    SIIT and NAT64 forms of their addresses, not the 6to4 form (a 6to4 address routes through a relay, not
- *    to the IPv4 host): a 6to4 address needs an IPv6 target such as 2002::/16.
+ *    to the IPv4 host): a 6to4 address needs an IPv6 target such as 2002::/16. An IPv6 CIDR target over
+ *    mapped, SIIT or NAT64 space must be /104 or longer, so it cannot admit all of IPv4 in that form.
  *
  * Every resolved address must pass. check() returns the address to pin the connection to; the transport runs
  * it on every request, so a DNS answer that changes between requests is judged afresh.
@@ -49,6 +50,13 @@ final class UrlGuard
         '0.0.0.0/8', '169.254.0.0/16', '100.100.100.200/32', '192.0.0.0/24', '224.0.0.0/4', '240.0.0.0/4',
         '::/128', 'fe80::/10', 'fec0::/10', 'fd00:ec2::254/128', 'ff00::/8', '2001::/32', '::/96', '64:ff9b:1::/48',
     ];
+
+    /**
+     * IPv6 /96 prefixes whose last 32 bits are an IPv4 address: mapped, SIIT, NAT64 and the embedded form of
+     * local NAT64. An IPv6 CIDR target overlapping one must be /104 or longer (an IPv4 /8 at most), or it would
+     * be a blanket opt-in for every private IPv4 in that form.
+     */
+    private const EMBEDDED_IPV4_PREFIXES = ['::ffff:0:0', '::ffff:0:0:0', '64:ff9b::', '64:ff9b:1::'];
 
     /** Shortest CIDR prefix a private target may use, by address length in bytes. */
     private const MIN_TARGET_BITS = [4 => 8, 16 => 16];
@@ -285,6 +293,7 @@ final class UrlGuard
             $netBin = filter_var($net, FILTER_VALIDATE_IP) !== false ? inet_pton($net) : false;
             if ($netBin === false || preg_match('/^[0-9]{1,3}$/', $bits) !== 1 || (int) $bits > 8 * strlen($netBin)
                 || (int) $bits < self::MIN_TARGET_BITS[strlen($netBin)]
+                || (strlen($netBin) === 16 && (int) $bits < 104 && self::overlapsEmbeddedIpv4($netBin, (int) $bits))
             ) {
                 return null;
             }
@@ -334,6 +343,17 @@ final class UrlGuard
             }
         }
         return $out;
+    }
+
+    /** True when the IPv6 CIDR $netBin/$bits contains, or lies inside, one of the embedded-IPv4 /96 prefixes. */
+    private static function overlapsEmbeddedIpv4(string $netBin, int $bits): bool
+    {
+        foreach (self::EMBEDDED_IPV4_PREFIXES as $prefix) {
+            if (self::inCidr((string) inet_pton($prefix), $netBin, min($bits, 96))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** @param list<array{host:?string, net:?string, bits:int, port:?int}> $targets */

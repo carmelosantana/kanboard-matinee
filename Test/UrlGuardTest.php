@@ -192,6 +192,21 @@ class UrlGuardTest extends TestCase
         $this->assertRefused($guard, 'http://plex6.lan:32400', UnsafeUrlException::PRIVATE_NETWORK);
     }
 
+    public function testAnIpv6TargetOverEmbeddedIpv4NeedsAtLeastAnIpv4Slash8(): void
+    {
+        // A /96 over mapped, SIIT or NAT64 space would admit every private IPv4 in its embedded form.
+        $blanket = new UrlGuard([], ['::ffff:0:0/96', '::ffff:0:0:0/96', '64:ff9b::/96', '64:ff9b:1::/48', '::/64', '::ffff:0:0/100']);
+        foreach (['::ffff:a00:1', '::ffff:0:a00:1', '64:ff9b::a00:1', '64:ff9b:1::a00:1', '::ffff:c0a8:1'] as $ip) {
+            $this->assertRefused($blanket, "http://[$ip]:32400", UnsafeUrlException::PRIVATE_NETWORK);
+        }
+
+        $this->assertTrue(UrlGuard::isValidTargetEntry('::ffff:10.0.0.0/104'));
+        $this->assertTrue(UrlGuard::isValidTargetEntry('64:ff9b::a00:0/104'));
+        $narrow = new UrlGuard([], ['::ffff:10.0.0.0/104']);
+        $this->assertSame('::ffff:10.0.0.1', $narrow->check('http://[::ffff:10.0.0.1]:32400')['ip']);
+        $this->assertRefused($narrow, 'http://[::ffff:192.168.0.1]:32400', UnsafeUrlException::PRIVATE_NETWORK);
+    }
+
     public function testA6to4AddressIsNotMatchedByItsEmbeddedIpv4(): void
     {
         // 2002:a00:1:: carries 10.0.0.1: judged private by it, but a 10/8 target does not cover the 6to4 address.
@@ -226,16 +241,16 @@ class UrlGuardTest extends TestCase
             'this network'             => ['0.0.0.0', ['0.0.0.0/8']],
             'multicast v4'             => ['224.0.0.1', ['224.0.0.0/8']],
             'broadcast'                => ['255.255.255.255', ['255.0.0.0/8']],
-            'unspecified v6'           => ['::', ['::/16']],
+            'unspecified v6'           => ['::', ['::/104']],
             'link-local v6'            => ['fe80::1', ['fe80::/16']],
             'site-local v6 (fec0::/10)' => ['fec0::1', ['fec0::/16']],
             'multicast v6'             => ['ff02::1', ['ff02::/16']],
             'AWS metadata v6'          => ['fd00:ec2::254', ['fd00::/16']],
-            'v4-mapped metadata'       => ['::ffff:169.254.169.254', ['169.254.0.0/16', '::ffff:0:0/96']],
-            'v4-translated metadata'   => ['::ffff:0:169.254.169.254', ['169.254.0.0/16', '::ffff:0:0:0/96']],
-            'NAT64 metadata'           => ['64:ff9b::a9fe:a9fe', ['169.254.0.0/16', '64:ff9b::/96']],
-            'NAT64 local-use metadata' => ['64:ff9b:1::a9fe:a9fe', ['169.254.0.0/16', '64:ff9b:1::/48']],
-            'NAT64 local-use, non-zero middle' => ['64:ff9b:1:a00:0:100:808:808', ['10.0.0.0/8', '8.0.0.0/8', '64:ff9b:1::/48']],
+            'v4-mapped metadata'       => ['::ffff:169.254.169.254', ['169.254.0.0/16', '::ffff:169.0.0.0/104']],
+            'v4-translated metadata'   => ['::ffff:0:169.254.169.254', ['169.254.0.0/16', '::ffff:0:169.0.0.0/104']],
+            'NAT64 metadata'           => ['64:ff9b::a9fe:a9fe', ['169.254.0.0/16', '64:ff9b::a900:0/104']],
+            'NAT64 local-use metadata' => ['64:ff9b:1::a9fe:a9fe', ['169.254.0.0/16', '64:ff9b:1::a900:0/104']],
+            'NAT64 local-use, non-zero middle' => ['64:ff9b:1:a00:0:100:808:808', ['10.0.0.0/8', '8.0.0.0/8', '64:ff9b:1:a00::/64']],
             '6to4 metadata'            => ['2002:a9fe:a9fe::1', ['169.254.0.0/16', '2002::/16']],
             'unparseable answer'       => ['not-an-ip', ['10.0.0.0/8']],
         ];
@@ -456,6 +471,14 @@ class UrlGuardTest extends TestCase
             'v4 shorter than /8' => ['10.0.0.0/7'],
             'v6 shorter than /16' => ['::/15'],
             'ULA /7 (use /16 or longer)' => ['fc00::/7'],
+            'all v4-mapped'    => ['::ffff:0:0/96'],
+            'v4-mapped /100'   => ['::ffff:0:0/100'],
+            'all v4-translated' => ['::ffff:0:0:0/96'],
+            'all NAT64'        => ['64:ff9b::/96'],
+            'all local NAT64'  => ['64:ff9b:1::/48'],
+            'local NAT64 /96'  => ['64:ff9b:1::/96'],
+            'contains v4-mapped' => ['::/64'],
+            'v4-mapped /96 port' => ['[::ffff:0:0/96]:32400'],
             'v4 short cidr port' => ['0.0.0.0/0:32400'],
             'bad cidr net'     => ['plex.lan/24'],
             'numeric shorthand' => ['127.1'],
