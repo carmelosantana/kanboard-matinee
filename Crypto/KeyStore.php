@@ -14,7 +14,8 @@ namespace Kanboard\Plugin\Matinee\Crypto;
  * - An existing key dir that is a symlink or group/world-writable is refused, otherwise it is tightened
  *   to 0700. A symlinked key file or lock file is refused; a key file readable by others is tightened to 0600.
  *
- * Exception messages are fixed strings and never carry key bytes or paths.
+ * Every failure is a KeyStoreException (configuration, not a token) with a fixed message that never carries key
+ * bytes or paths.
  */
 final class KeyStore
 {
@@ -85,11 +86,11 @@ final class KeyStore
             try {
                 $key = sodium_base642bin($this->envValue, SODIUM_BASE64_VARIANT_ORIGINAL, " \t\r\n");
             } catch (\SodiumException) {
-                throw new CryptoException('keystore: bad env key');
+                throw new KeyStoreException('keystore: bad env key');
             }
             if (strlen($key) !== self::KEY_BYTES) {
                 sodium_memzero($key);
-                throw new CryptoException('keystore: bad env key');
+                throw new KeyStoreException('keystore: bad env key');
             }
             $this->envKey = $key;
         }
@@ -113,7 +114,7 @@ final class KeyStore
         $path = $this->dir.'/'.self::FILE;
         // fopen 'x' and file_get_contents would follow a planted symlink.
         if (is_link($path)) {
-            throw new CryptoException('keystore: unsafe key file');
+            throw new KeyStoreException('keystore: unsafe key file');
         }
         if (!$create) {
             return file_exists($path) ? $this->fileKey = $this->readKeyFile($path) : null;
@@ -124,7 +125,7 @@ final class KeyStore
         // fopen 'c' follows a symlink and would create its target.
         $lock = is_link($lockPath) ? false : @fopen($lockPath, 'c');
         if ($lock === false || !flock($lock, LOCK_EX)) {
-            throw new CryptoException('keystore: cannot lock key dir');
+            throw new KeyStoreException('keystore: cannot lock key dir');
         }
         try {
             if (!file_exists($path)) {
@@ -144,19 +145,19 @@ final class KeyStore
     private function ensureDir(): void
     {
         if (is_link($this->dir)) {
-            throw new CryptoException('keystore: unsafe key dir');
+            throw new KeyStoreException('keystore: unsafe key dir');
         }
         if (is_dir($this->dir)) {
             if ((fileperms($this->dir) & 0022) !== 0 || !@chmod($this->dir, 0700)) {
-                throw new CryptoException('keystore: unsafe key dir');
+                throw new KeyStoreException('keystore: unsafe key dir');
             }
             return;
         }
         if (!@mkdir($this->dir, 0700, true) && !is_dir($this->dir)) {
-            throw new CryptoException('keystore: cannot create key dir');
+            throw new KeyStoreException('keystore: cannot create key dir');
         }
         if (!@chmod($this->dir, 0700)) {
-            throw new CryptoException('keystore: cannot create key dir');
+            throw new KeyStoreException('keystore: cannot create key dir');
         }
     }
 
@@ -170,7 +171,7 @@ final class KeyStore
             if (file_exists($path)) {
                 return; // Someone else created it; the caller reads what is on disk.
             }
-            throw new CryptoException('keystore: cannot create key file');
+            throw new KeyStoreException('keystore: cannot create key file');
         }
         // fopen's mode is 0666 filtered by the umask; narrow it before any key byte is written.
         $ok = @chmod($path, 0600);
@@ -182,7 +183,7 @@ final class KeyStore
         $ok = fclose($fh) && $ok;
         if (!$ok) {
             @unlink($path);
-            throw new CryptoException('keystore: cannot create key file');
+            throw new KeyStoreException('keystore: cannot create key file');
         }
     }
 
@@ -190,14 +191,14 @@ final class KeyStore
     {
         $mode = @fileperms($path);
         if ($mode !== false && ($mode & 0077) !== 0 && !@chmod($path, 0600)) {
-            throw new CryptoException('keystore: unsafe key file');
+            throw new KeyStoreException('keystore: unsafe key file');
         }
         $key = @file_get_contents($path);
         if ($key === false || strlen($key) !== self::KEY_BYTES) {
             if (is_string($key)) {
                 sodium_memzero($key);
             }
-            throw new CryptoException('keystore: bad key file');
+            throw new KeyStoreException('keystore: bad key file');
         }
         return $key;
     }

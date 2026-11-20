@@ -25,7 +25,8 @@ class Plugin extends Base
         $container = $this->container;
         // The root key: MATINEE_KEY when set, else DATA_DIR/matinee/secret.key (spec §2). Tests swap in a temp dir.
         $container['matineeKeyStore'] = static fn (): KeyStore => new KeyStore(DATA_DIR.'/matinee', getenv('MATINEE_KEY') ?: null);
-        // Builds a Plex client over the guarded, pinned CurlTransport. Tests swap in FakeTransport.
+        // Builds a Plex client over the guarded, pinned CurlTransport. Tests swap in FakeTransport. It only reads the
+        // client id (ServerModel ensures it first), so building a client never writes.
         $container['matineePlexClientFactory'] = $container->protect(
             static function (string $baseUrl, #[\SensitiveParameter] string $token, ?string $machineId, string $deviceName) use ($container): PlexClient {
                 return new PlexClient(

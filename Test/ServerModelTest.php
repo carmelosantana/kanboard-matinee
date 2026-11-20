@@ -8,6 +8,9 @@ use Kanboard\Model\ProjectModel;
 use Kanboard\Model\UserModel;
 use Kanboard\Plugin\Matinee\Crypto\CryptoException;
 use Kanboard\Plugin\Matinee\Crypto\KeyStore;
+use Kanboard\Plugin\Matinee\Crypto\KeyStoreException;
+use Kanboard\Plugin\Matinee\Crypto\Subkeys;
+use Kanboard\Plugin\Matinee\Crypto\TokenBox;
 use Kanboard\Plugin\Matinee\Http\CurlTransport;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
 use Kanboard\Plugin\Matinee\Http\PlexException;
@@ -44,6 +47,7 @@ class ServerModelTest extends Base
     private const OTHER_MACHINE = 'fedcba9876543210fedcba9876543210fedcba98';
     private const CLIENT_ID = 'c0ffee00-1111-4222-8333-444455556666';
     private const FAILED = 'matinee.connect_failed';
+    private const UUID = '/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/';
 
     private FakeTransport $t;
     private MatineeTestLogger $log;
@@ -191,6 +195,14 @@ class ServerModelTest extends Base
         (new Plugin($this->container))->initialize();
         $this->assertInstanceOf(ServerModel::class, $this->container['matineeServerModel']);
         $this->assertInstanceOf(KeyStore::class, $this->container['matineeKeyStore']);
+        // The factory only reads the client id: without one it refuses, and writes nothing.
+        try {
+            $this->container['matineePlexClientFactory'](self::BASE, self::TOKEN, null, 'Matinee');
+            $this->fail('expected the factory to refuse a missing client id');
+        } catch (\InvalidArgumentException) {
+        }
+        $this->assertFalse($this->container['configModel']->exists(Settings::CLIENT_ID));
+        (new Settings($this->container))->ensureClientId();
         $client = $this->container['matineePlexClientFactory'](self::BASE, self::TOKEN, null, 'Matinee');
         $this->assertInstanceOf(PlexClient::class, $client);
         $transport = (new \ReflectionProperty(PlexClient::class, 'transport'))->getValue($client);
@@ -538,7 +550,8 @@ class ServerModelTest extends Base
         $alice = $this->user('alice');
         $id = $this->connect($alice);
 
-        $this->queueOk(self::OTHER_MACHINE);
+        // Pinned to the stored machine, the probe stops at identity().
+        $this->t->respondJson(['MediaContainer' => ['machineIdentifier' => self::OTHER_MACHINE, 'version' => '1.0']]);
         $this->expectFailure(fn () => $this->model()->update($id, $alice, 'Den', self::BASE, null), 'matinee.token_required');
         $this->assertSame(self::MACHINE, $this->model()->get($id)['machine_id']);
         $this->assertSame('Living room', $this->model()->get($id)['name']);
@@ -566,6 +579,49 @@ class ServerModelTest extends Base
         $id = $this->connect($alice, 'https://b.example.test');
         $this->expectFailure(fn () => $this->model()->update($id, $alice, 'B', 'https://a.example.test:443', self::TOKEN2));
         $this->assertStringContainsString('at duplicate', $this->lastLog());
+    }
+
+    public function testADisabledServerCannotBeUpdatedByItsOwner(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $this->model()->setEnabled($id, false, $this->user('root2', Role::APP_ADMIN));
+        $this->t->requests = [];
+
+        $this->queueOk();
+        $this->expectFailure(fn () => $this->model()->update($id, $alice, 'Den', self::BASE, self::TOKEN2));
+        $this->assertStringContainsString('at disabled', $this->lastLog());
+        $this->assertSame([], $this->t->requests);
+        $this->assertSame('Living room', $this->model()->get($id)['name']);
+    }
+
+    public function testUpdateWithoutATokenPinsTheStoredMachine(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $this->t->requests = [];
+        $this->factoryCalls = [];
+
+        $this->queueOk(self::OTHER_MACHINE);
+        $this->expectFailure(fn () => $this->model()->update($id, $alice, 'Den', self::BASE, null), 'matinee.token_required');
+        // identity() refuses the other machine, so the stored token never reaches its sections endpoint.
+        $this->assertSame([self::BASE.'/identity'], array_column($this->t->requests, 'url'));
+        $this->assertSame(self::MACHINE, $this->factoryCalls[0]['machineId']);
+        $this->assertSame('ok', $this->model()->get($id)['status']);
+    }
+
+    public function testUpdateCountsTowardTheAttemptLimit(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $this->setConfig(Settings::ATTEMPT_LIMIT_KEY, '1');
+        $this->t->requests = [];
+
+        $this->queueOk();
+        $this->expectFailure(fn () => $this->model()->update($id, $alice, 'Den', self::BASE, null));
+        $this->assertStringContainsString('at rate_limit', $this->lastLog());
+        $this->assertSame([], $this->t->requests);
+        $this->assertSame('Living room', $this->model()->get($id)['name']);
     }
 
     // ── verify ───────────────────────────────────────────────────────────────
@@ -614,6 +670,38 @@ class ServerModelTest extends Base
     }
 
     // ── remove and enable ────────────────────────────────────────────────────
+
+    public function testAKeyStoreConfigErrorLeavesTheStatusAlone(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $this->container->offsetUnset('matineeKeyStore');
+        $this->container['matineeKeyStore'] = new KeyStore($this->keyDir, 'not-base64!!');
+        $sent = count($this->t->requests);
+
+        $this->expectFailure(fn () => $this->model()->verify($id, $alice));
+        $this->assertSame('ok', $this->model()->get($id)['status']);
+        $this->assertSame($sent, count($this->t->requests));
+
+        $this->expectException(KeyStoreException::class);
+        try {
+            $this->model()->tokenFor($this->model()->get($id));
+        } finally {
+            $this->assertSame('ok', $this->model()->get($id)['status']);
+        }
+    }
+
+    public function testAnInactiveOwnerCannotRemoveOrVerify(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $this->db()->table('users')->eq('id', $alice)->update(['is_active' => 0]);
+
+        // Their session may still be live: the active flag is read on every call.
+        $this->expectForbidden(fn () => $this->model()->remove($id, $alice));
+        $this->expectForbidden(fn () => $this->model()->verify($id, $alice));
+        $this->assertNotNull($this->model()->get($id));
+    }
 
     public function testRemoveIsForTheOwnerOrAnAdmin(): void
     {
@@ -753,6 +841,80 @@ class ServerModelTest extends Base
         $this->assertSame([['baseUrl' => self::BASE, 'machineId' => self::MACHINE, 'deviceName' => 'Matinee (alice)']], $this->factoryCalls);
     }
 
+    public function testAConcurrentResealIsNotOverwritten(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $row = $this->row($id);
+        $env = random_bytes(32);
+        $withEnv = new KeyStore($this->keyDir, base64_encode($env));
+
+        // Another request re-seals the row under the env key just as this one is about to write its own re-seal.
+        $raced = null;
+        $this->container->offsetUnset('matineeKeyStore');
+        $this->container['matineeKeyStore'] = $this->container->factory(function () use ($withEnv, $env, $id, $row, &$raced) {
+            $frames = array_column(debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS), 'function');
+            if ($raced === null && in_array('writeToken', $frames, true)) {
+                $subkey = Subkeys::token($env);
+                $raced = (new TokenBox($subkey))->seal(self::TOKEN, $id, (int) $row['owner_user_id'], $row['base_url'], $row['machine_id']);
+                $this->db()->table('matinee_servers')->eq('id', $id)
+                    ->update(['token_nonce' => $raced['nonce'], 'token_ct' => $raced['ct'], 'key_id' => KeyStore::keyIdFor($env)]);
+            }
+            return $withEnv;
+        });
+
+        $this->assertSame(self::TOKEN, $this->model()->tokenFor($this->model()->get($id)));
+        $this->assertNotNull($raced);
+        $after = $this->row($id);
+        $this->assertSame($raced['ct'], $after['token_ct']);
+        $this->assertSame($raced['nonce'], $after['token_nonce']);
+        $this->assertSame(KeyStore::keyIdFor($env), $after['key_id']);
+    }
+
+    public function testTheClientIdExistsBeforeAnyClientIsBuilt(): void
+    {
+        $settings = new Settings($this->container);
+        $this->assertFalse($this->container['configModel']->exists(Settings::CLIENT_ID));
+        $seen = [];
+        $inner = $this->container->raw('matineePlexClientFactory');
+        $this->container->offsetUnset('matineePlexClientFactory');
+        $this->container['matineePlexClientFactory'] = $this->container->protect(
+            function (string $baseUrl, #[\SensitiveParameter] string $token, ?string $machineId, string $deviceName) use ($inner, $settings, &$seen): PlexClient {
+                // The PDO is looked up per call: holding it would keep the connection open past tearDown.
+                $seen[] = [$settings->clientId(), $this->db()->getConnection()->inTransaction()];
+                return $inner($baseUrl, $token, $machineId, $deviceName);
+            }
+        );
+
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $clientId = $settings->clientId();
+        $this->assertMatchesRegularExpression(self::UUID, $clientId);
+        $this->queueOk();
+        $this->model()->verify($id, $alice);
+        $this->queueOk();
+        $this->model()->update($id, $alice, 'Den', self::BASE, null);
+        $this->model()->clientFor($this->model()->get($id));
+
+        // Created by the first connect, before its client was built and outside any transaction; never replaced.
+        $this->assertSame(array_fill(0, 4, [$clientId, false]), $seen);
+    }
+
+    public function testClientForWritesNothingInsideACallersTransaction(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $bob = $this->user('bob');
+        $db = $this->db();
+
+        $db->startTransaction();
+        $db->table('matinee_attempts')->insert(['user_id' => $bob, 'created_at' => time()]);
+        $this->model()->clientFor($this->model()->get($id));
+        // A config save would have committed (closeTransaction) the caller's transaction.
+        $this->assertTrue($db->getConnection()->inTransaction());
+        $db->cancelTransaction();
+        $this->assertSame(0, $db->table('matinee_attempts')->eq('user_id', $bob)->count());
+    }
+
     // ── settings ─────────────────────────────────────────────────────────────
 
     public function testSettingsDefaultsAndClientId(): void
@@ -763,9 +925,12 @@ class ServerModelTest extends Base
         $this->assertSame(3, $settings->maxServers());
         $this->assertSame(600, Settings::ATTEMPT_WINDOW);
 
-        $id = $settings->clientId();
-        $this->assertMatchesRegularExpression('/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/', $id);
-        $this->assertSame($id, (new Settings($this->container))->clientId());
+        $this->assertSame('', $settings->clientId());
+        $this->assertFalse($this->container['configModel']->exists(Settings::CLIENT_ID));
+        $id = $settings->ensureClientId();
+        $this->assertMatchesRegularExpression(self::UUID, $id);
+        $this->assertSame($id, (new Settings($this->container))->ensureClientId());
+        $this->assertSame($id, $settings->clientId());
 
         $this->setConfig(Settings::CONNECT_POLICY, 'bogus');
         $this->setConfig(Settings::MAX_SERVERS_KEY, '0');

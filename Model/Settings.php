@@ -44,10 +44,19 @@ final class Settings extends Base
         return $this->positiveInt(self::MAX_SERVERS_KEY, self::MAX_SERVERS);
     }
 
-    /** A uuid v4, created on first use and kept in config. Saving opens and commits a transaction: call outside one. */
+    /** The per-install client id, or '' before ensureClientId() has run. Read-only: never writes. */
     public function clientId(): string
     {
-        $id = (string) $this->configModel->getOption(self::CLIENT_ID);
+        return (string) $this->configModel->getOption(self::CLIENT_ID);
+    }
+
+    /**
+     * The client id, created (a uuid v4) when missing. Creating it saves config, which opens and commits a
+     * transaction: call outside one. ServerModel calls it before building any client.
+     */
+    public function ensureClientId(): string
+    {
+        $id = $this->clientId();
         if ($id !== '') {
             return $id;
         }
@@ -56,7 +65,7 @@ final class Settings extends Base
         $b[8] = chr((ord($b[8]) & 0x3f) | 0x80);
         $this->configModel->save([self::CLIENT_ID => vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($b), 4))]);
         // Re-read, so a concurrent first use settles on what was stored.
-        return (string) $this->configModel->getOption(self::CLIENT_ID);
+        return $this->clientId();
     }
 
     private function positiveInt(string $key, int $default): int

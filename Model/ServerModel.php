@@ -6,6 +6,7 @@ use Kanboard\Core\Base;
 use Kanboard\Core\Security\Role;
 use Kanboard\Plugin\Matinee\Crypto\CryptoException;
 use Kanboard\Plugin\Matinee\Crypto\KeyStore;
+use Kanboard\Plugin\Matinee\Crypto\KeyStoreException;
 use Kanboard\Plugin\Matinee\Crypto\Subkeys;
 use Kanboard\Plugin\Matinee\Crypto\TokenBox;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
@@ -25,6 +26,9 @@ use Kanboard\Plugin\Matinee\Http\UrlGuard;
  * - The token is sealed with AD `serverId|ownerId|baseUrl|machineId`, so the row is inserted first (for its id),
  *   then sealed and updated, in one transaction.
  * - A disabled server, or one whose owner is inactive (users.is_active read on every call), hands out no token.
+ * - The install's client id is ensured before any client is built (makeClient), so the client factory only reads it.
+ * - The limits (attempts, servers per owner, duplicates) are checked then written without a lock: concurrent requests
+ *   can pass them by a little (accepted at P1).
  */
 final class ServerModel extends Base
 {
@@ -130,10 +134,18 @@ final class ServerModel extends Base
             $this->fail('update', 'duplicate', $host);
         }
 
-        $machineId = $this->probe('update', $host, fn () => $this->makeClient($url, $token ?? $this->tokenFor($server), null, $actor));
-        if ($token === null && $machineId !== $server['machine_id']) {
-            $this->fail('update', 'machine_changed', $host, null, MatineeConnectException::TOKEN_REQUIRED);
-        }
+        // Without a new token the stored one is used, pinned to the stored machine: identity() refuses another server
+        // before the token goes any further, and that refusal asks the owner for a token.
+        $machineId = $this->probe(
+            'update',
+            $host,
+            fn () => $token === null
+                ? $this->makeClient($url, $this->tokenFor($server), $server['machine_id'], $actor)
+                : $this->makeClient($url, $token, null, $actor),
+            fn (\Throwable $e) => $e instanceof PlexException && $e->reason === PlexException::SERVER_CHANGED
+                ? MatineeConnectException::TOKEN_REQUIRED
+                : null
+        );
 
         $now = time();
         $fields = ['name' => $name, 'status' => self::STATUS_OK, 'last_checked_at' => $now, 'updated_at' => $now];
@@ -150,8 +162,9 @@ final class ServerModel extends Base
 
     /**
      * Owner or admin: re-runs identity() then sections() against the stored machine id and records the status
-     * (ok, unreachable, or reconnect for a rejected token, a changed machine or an unopenable token).
-     * Returns the status on success; any failure is the generic MatineeConnectException.
+     * (ok, unreachable, or reconnect for a rejected token, a changed machine or an unopenable token; a key store
+     * configuration error leaves it as it was). Returns the status on success; any failure is the generic
+     * MatineeConnectException.
      */
     public function verify(int $serverId, int $actorId): string
     {
@@ -211,11 +224,15 @@ final class ServerModel extends Base
     }
 
     /**
+     * Does no actor check: callers authorize first. Never call inside a DB transaction (a re-seal and a status change
+     * write).
+     *
      * The single decrypt site. Reads the row by $server['id'] (nothing else from the caller's array is trusted) and
      * opens the token with the key the row names. A token that will not open marks the server `reconnect` and the
      * CryptoException propagates. A row sealed under a key that is no longer the active one is re-sealed.
      *
      * @throws MatineeForbiddenException for a missing or disabled server or an inactive owner
+     * @throws KeyStoreException for a key store configuration error: the status is left alone
      * @throws CryptoException
      */
     public function tokenFor(array $server): string
@@ -255,7 +272,11 @@ final class ServerModel extends Base
         return $token;
     }
 
-    /** A client for the stored server, pinned to its machine id and named for its owner. */
+    /**
+     * A client for the stored server, pinned to its machine id and named for its owner.
+     * Does no actor check: callers authorize first. Never call inside a DB transaction (it may create the client id,
+     * re-seal the token or record a status).
+     */
     public function clientFor(array $server): PlexClient
     {
         $row = $this->get((int) ($server['id'] ?? 0)) ?? throw new MatineeForbiddenException();
@@ -278,13 +299,16 @@ final class ServerModel extends Base
 
     private function makeClient(string $baseUrl, #[\SensitiveParameter] string $token, ?string $machineId, array $user): PlexClient
     {
+        // Created here (only when missing) so the factory never writes; every caller is outside a transaction.
+        $this->settings()->ensureClientId();
         $factory = $this->container['matineePlexClientFactory'];
         return $factory($baseUrl, $token, $machineId, PlexClient::deviceName((string) $user['username'], (int) $user['id']));
     }
 
     /**
      * Builds the client, then identity() and sections(), in that order (only identity() requires the machine id).
-     * Any failure, PlexException and UnsafeUrlException included, runs $onFailure and becomes the generic failure.
+     * Any failure, PlexException and UnsafeUrlException included, runs $onFailure and becomes the generic failure,
+     * or the code $onFailure returns.
      */
     private function probe(string $op, string $host, callable $client, ?callable $onFailure = null): string
     {
@@ -296,10 +320,8 @@ final class ServerModel extends Base
             $stage = 'sections';
             $c->sections();
         } catch (\Throwable $e) {
-            if ($onFailure !== null) {
-                $onFailure($e);
-            }
-            $this->fail($op, $stage, $host, self::reason($e));
+            $code = $onFailure !== null ? $onFailure($e) : null;
+            $this->fail($op, $stage, $host, self::reason($e), $code ?? MatineeConnectException::CONNECT_FAILED);
         }
         return $machineId;
     }
@@ -316,6 +338,7 @@ final class ServerModel extends Base
     {
         return match (true) {
             $e instanceof PlexException, $e instanceof UnsafeUrlException => $e->reason,
+            $e instanceof KeyStoreException => 'key store',
             $e instanceof CryptoException => 'token unopenable',
             $e instanceof MatineeForbiddenException => 'forbidden',
             default => 'error',
@@ -324,7 +347,7 @@ final class ServerModel extends Base
 
     private static function statusFor(\Throwable $e): ?string
     {
-        if ($e instanceof MatineeForbiddenException) {
+        if ($e instanceof MatineeForbiddenException || $e instanceof KeyStoreException) {
             return null;
         }
         if ($e instanceof CryptoException

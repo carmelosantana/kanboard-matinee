@@ -2,6 +2,7 @@
 
 use Kanboard\Plugin\Matinee\Crypto\CryptoException;
 use Kanboard\Plugin\Matinee\Crypto\KeyStore;
+use Kanboard\Plugin\Matinee\Crypto\KeyStoreException;
 use Kanboard\Plugin\Matinee\Crypto\Subkeys;
 use PHPUnit\Framework\TestCase;
 
@@ -132,8 +133,8 @@ class KeyStoreTest extends TestCase
 
         try {
             (new KeyStore($this->dir, null))->rootKey();
-            $this->fail('expected CryptoException');
-        } catch (CryptoException $e) {
+            $this->fail('expected KeyStoreException');
+        } catch (KeyStoreException $e) {
             $this->assertSame('keystore: bad key file', $e->getMessage());
             if ($bytes !== '') {
                 $this->assertStringNotContainsString($bytes, $e->getMessage());
@@ -182,8 +183,8 @@ class KeyStoreTest extends TestCase
     {
         try {
             (new KeyStore($this->dir, $env))->rootKey();
-            $this->fail('expected CryptoException');
-        } catch (CryptoException $e) {
+            $this->fail('expected KeyStoreException');
+        } catch (KeyStoreException $e) {
             $this->assertSame('keystore: bad env key', $e->getMessage());
         }
         $this->assertFileDoesNotExist($this->keyFile());
@@ -238,7 +239,7 @@ class KeyStoreTest extends TestCase
         $this->writeKeyFile(random_bytes(16));
         $store = new KeyStore($this->dir, base64_encode(random_bytes(32)));
 
-        $this->expectException(CryptoException::class);
+        $this->expectException(KeyStoreException::class);
         $this->expectExceptionMessage('keystore: bad key file');
         $store->allKeys();
     }
@@ -264,8 +265,8 @@ class KeyStoreTest extends TestCase
     {
         try {
             $store->$method();
-            $this->fail('expected CryptoException');
-        } catch (CryptoException $e) {
+            $this->fail('expected KeyStoreException');
+        } catch (KeyStoreException $e) {
             $this->assertSame($message, $e->getMessage());
         }
     }
@@ -365,8 +366,8 @@ class KeyStoreTest extends TestCase
             ShortWriteStream::$entries = ['mtnshort://k' => ['dir' => true, 'mode' => 0700, 'data' => '']];
             try {
                 (new KeyStore('mtnshort://k', null))->rootKey();
-                $this->fail('expected CryptoException');
-            } catch (CryptoException $e) {
+                $this->fail('expected KeyStoreException');
+            } catch (KeyStoreException $e) {
                 $this->assertSame('keystore: cannot create key file', $e->getMessage());
             }
             $this->assertTrue(ShortWriteStream::$created, 'the key file was opened for creation');
@@ -388,8 +389,8 @@ class KeyStoreTest extends TestCase
         $previous = ini_set('zend.exception_ignore_args', '0');
         try {
             (new KeyStore($this->dir, $env))->rootKey();
-            $this->fail('expected CryptoException');
-        } catch (CryptoException $e) {
+            $this->fail('expected KeyStoreException');
+        } catch (KeyStoreException $e) {
             $this->assertStringNotContainsString($env, (string) $e);
             $this->assertStringNotContainsString($env, self::matineeFrames($e));
         } finally {
