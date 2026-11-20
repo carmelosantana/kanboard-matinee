@@ -4,6 +4,8 @@ namespace Kanboard\Plugin\Matinee;
 use Kanboard\Core\Plugin\Base;
 use Kanboard\Core\Security\Role;
 use Kanboard\Plugin\Matinee\Crypto\KeyStore;
+use Kanboard\Plugin\Matinee\Crypto\RefSigner;
+use Kanboard\Plugin\Matinee\Crypto\Subkeys;
 use Kanboard\Plugin\Matinee\Http\CurlTransport;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
@@ -25,6 +27,8 @@ class Plugin extends Base
         $container = $this->container;
         // The root key: MATINEE_KEY when set, else DATA_DIR/matinee/secret.key (spec §2). Tests swap in a temp dir.
         $container['matineeKeyStore'] = static fn (): KeyStore => new KeyStore(DATA_DIR.'/matinee', getenv('MATINEE_KEY') ?: null);
+        // Signs browse and art refs with the refs subkey of the active root key, read when first used (spec §6).
+        $container['matineeRefSigner'] = static fn ($c): RefSigner => new RefSigner(Subkeys::refs($c['matineeKeyStore']->rootKey()));
         // Builds a Plex client over the guarded, pinned CurlTransport. Tests swap in FakeTransport. It only reads the
         // client id (ServerModel ensures it first), so building a client never writes.
         $container['matineePlexClientFactory'] = $container->protect(

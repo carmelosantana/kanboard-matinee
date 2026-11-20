@@ -8,6 +8,7 @@ use Kanboard\Model\UserModel;
 use Kanboard\Plugin\Matinee\Crypto\CryptoException;
 use Kanboard\Plugin\Matinee\Crypto\KeyStore;
 use Kanboard\Plugin\Matinee\Crypto\KeyStoreException;
+use Kanboard\Plugin\Matinee\Crypto\RefSigner;
 use Kanboard\Plugin\Matinee\Crypto\Subkeys;
 use Kanboard\Plugin\Matinee\Crypto\TokenBox;
 use Kanboard\Plugin\Matinee\Http\CurlTransport;
@@ -210,6 +211,26 @@ class ServerModelTest extends Base
         $this->assertInstanceOf(PlexClient::class, $client);
         $transport = (new \ReflectionProperty(PlexClient::class, 'transport'))->getValue($client);
         $this->assertInstanceOf(CurlTransport::class, $transport);
+    }
+
+    /** matineeRefSigner is keyed by the refs subkey of the active root, read lazily from matineeKeyStore. */
+    public function testTheRefSignerUsesTheRefsSubkeyOfTheActiveRoot(): void
+    {
+        $env = random_bytes(32);
+        $this->container->offsetUnset('matineeKeyStore');
+        $this->container['matineeKeyStore'] = new KeyStore($this->keyDir, base64_encode($env));
+
+        $signer = $this->container['matineeRefSigner'];
+        $this->assertInstanceOf(RefSigner::class, $signer);
+        $ref = $signer->sign(7, 3, '2', 'browse', '/library/sections/2/all', 60);
+        $this->assertSame('2', (new RefSigner(Subkeys::refs($env)))->verify($ref, 7)['s']);
+        foreach ([$env, Subkeys::token($env)] as $other) {
+            try {
+                (new RefSigner($other))->verify($ref, 7);
+                $this->fail('a ref verified under the wrong key');
+            } catch (MatineeForbiddenException) {
+            }
+        }
     }
 
     /** The container's policy reads the live users and server rows on every call (S6). */
