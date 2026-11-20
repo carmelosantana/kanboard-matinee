@@ -659,6 +659,80 @@ class PlexClientTest extends TestCase
         }
     }
 
+    public function testChildrenKeepsAtMostThePageSize(): void
+    {
+        $meta = [];
+        for ($i = 1; $i <= 15; $i++) {
+            $meta[] = ['ratingKey' => (string) $i, 'type' => 'movie'];
+        }
+        $this->t->respondJson(['MediaContainer' => ['Metadata' => $meta]]);
+        $out = $this->client()->children('/library/sections/1/all', 0, 10);
+        $this->assertSame(array_map('strval', range(1, 10)), array_column($out['items'], 'ratingKey'));
+        $this->assertSame(10, $out['total']);
+    }
+
+    /** @dataProvider unsafeTitles */
+    public function testChildrenTitlesLoseControlAndFormatCharacters(string $raw, string $expected): void
+    {
+        $this->t->respondJson(['MediaContainer' => ['Metadata' => [
+            ['ratingKey' => '1', 'type' => 'episode', 'title' => $raw, 'parentTitle' => $raw, 'grandparentTitle' => $raw],
+        ]]]);
+        $item = $this->client()->children('/library/metadata/1/children', 0, 60)['items'][0];
+        foreach (['title', 'parentTitle', 'grandparentTitle'] as $f) {
+            $this->assertSame($expected, $item[$f], $f);
+        }
+    }
+
+    /** @dataProvider unsafeTitles */
+    public function testSectionTitlesLoseControlAndFormatCharacters(string $raw, string $expected): void
+    {
+        $this->t->respondJson(['MediaContainer' => ['Directory' => [['key' => '1', 'type' => 'movie', 'title' => $raw]]]]);
+        $this->assertSame($expected, $this->client()->sections()[0]['title']);
+    }
+
+    public function unsafeTitles(): array
+    {
+        return [
+            'rtl override'    => ["evil\u{202E}gpj.exe", 'evilgpj.exe'],
+            'zero-width'      => ["Fake\u{200B}Movie", 'FakeMovie'],
+            'tab and newline' => ["Fake\tMovie\r\nTwo", 'FakeMovieTwo'],
+            'nul and del'     => ["a\x00b\x7Fc", 'abc'],
+            'plain unicode'   => ['Amélie — 東京', 'Amélie — 東京'],
+        ];
+    }
+
+    /** JSON cannot carry invalid UTF-8 (json_decode refuses it), so the title filter is checked directly. */
+    public function testATitleThatIsNotValidUtf8BecomesEmpty(): void
+    {
+        $text = new \ReflectionMethod(PlexClient::class, 'text');
+        $this->assertSame('', $text->invoke(null, "Fake\xC3\x28Movie"));
+        $this->assertSame('', $text->invoke(null, "\xFF\xFE"));
+        $this->assertSame('ok', $text->invoke(null, 'ok'));
+    }
+
+    /** A php.ini arg_separator.output of ';' must not change the URL Plex sees. */
+    public function testQueryStringsUseAmpersandWhateverArgSeparatorOutputSays(): void
+    {
+        $was = ini_set('arg_separator.output', ';');
+        try {
+            $this->t->respond(200, $this->fixture('children-section'));
+            $this->client()->children('/library/sections/1/all', 120, 60);
+            $this->t->respond(200, self::PNG, ['Content-Type' => 'image/png']);
+            $this->client()->art('/library/metadata/101/thumb/1700000000', 144);
+        } finally {
+            ini_set('arg_separator.output', $was);
+        }
+        $this->assertSame(
+            self::BASE . '/library/sections/1/all?X-Plex-Container-Start=120&X-Plex-Container-Size=60',
+            $this->t->requests[0]['url'],
+        );
+        $this->assertSame(
+            self::BASE . '/photo/:/transcode?width=144&height=144&minSize=1&upscale=0'
+                . '&url=%2Flibrary%2Fmetadata%2F101%2Fthumb%2F1700000000',
+            $this->t->requests[1]['url'],
+        );
+    }
+
     public function testSectionIsNullWhenLibrarySectionIdIsAbsent(): void
     {
         $this->t->respond(200, $this->fixture('children-no-section'));

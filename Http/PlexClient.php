@@ -35,7 +35,6 @@ final class PlexClient
 
     private const MACHINE_ID = '/\A[A-Za-z0-9-]{1,64}\z/';
     private const VERSION = '/\A[A-Za-z0-9._+-]{1,64}\z/';
-    private const SECTION_KEY = '/\A\d{1,20}\z/';
     private const DEVICE_NAME = '/\AMatinee( \([A-Za-z0-9._ #-]{1,40}\))?\z/';
     /** A non-negative integer that fits an int on 64-bit PHP. */
     private const UINT = '/\A\d{1,18}\z/';
@@ -147,13 +146,11 @@ final class PlexClient
             $key = $d['key'] ?? null;
             $key = is_int($key) ? (string) $key : $key;
             $type = $d['type'] ?? null;
-            if (! is_string($key) || preg_match(self::SECTION_KEY, $key) !== 1
+            if (! is_string($key) || ! PlexPaths::isSectionKey($key)
                 || ! is_string($type) || ! in_array($type, self::SECTION_TYPES, true)) {
                 continue;
             }
-            $title = $d['title'] ?? '';
-            $title = is_scalar($title) ? (string) $title : '';
-            $out[] = ['key' => $key, 'title' => mb_substr($title, 0, self::MAX_TITLE_CHARS, 'UTF-8'), 'type' => $type];
+            $out[] = ['key' => $key, 'title' => self::text($d['title'] ?? ''), 'type' => $type];
         }
         return $out;
     }
@@ -163,7 +160,8 @@ final class PlexClient
      *
      * - `section` is `MediaContainer.librarySectionID` as a string, or null when absent or not a section key.
      * - `total` is `MediaContainer.totalSize` when it is a non-negative integer; otherwise Plex did not page the
-     *   answer, so it is `start` + the number of entries that came back (no further page is implied).
+     *   answer, so it is `start` + the number of entries kept (no further page is implied).
+     * - At most `size` entries are kept, even when Plex returns more.
      * - Every kept item has every field: strings default to '', integers and paths to null. An item without a
      *   digit `ratingKey` or an allowed `type` is dropped. `thumb` is kept only when it is an art path and `key`
      *   only when it is a browse path.
@@ -188,7 +186,8 @@ final class PlexClient
         $section = is_string($section) && PlexPaths::isSectionKey($section) ? $section : null;
 
         $raw = $mc['Metadata'] ?? null;
-        $raw = is_array($raw) && array_is_list($raw) ? $raw : [];
+        // Plex may ignore X-Plex-Container-Size; never keep more than the page asked for.
+        $raw = is_array($raw) && array_is_list($raw) ? array_slice($raw, 0, $size) : [];
 
         $items = [];
         foreach ($raw as $m) {
@@ -236,15 +235,14 @@ final class PlexClient
         $rk = $m['ratingKey'] ?? null;
         $rk = is_int($rk) ? (string) $rk : $rk;
         $type = $m['type'] ?? null;
-        if (! is_string($rk) || preg_match(self::SECTION_KEY, $rk) !== 1
+        if (! is_string($rk) || ! PlexPaths::isSectionKey($rk)
             || ! is_string($type) || ! in_array($type, self::ITEM_TYPES, true)) {
             return null;
         }
 
         $item = ['ratingKey' => $rk, 'type' => $type];
         foreach (['title', 'parentTitle', 'grandparentTitle'] as $f) {
-            $v = $m[$f] ?? '';
-            $item[$f] = mb_substr(is_scalar($v) ? (string) $v : '', 0, self::MAX_TITLE_CHARS, 'UTF-8');
+            $item[$f] = self::text($m[$f] ?? '');
         }
         foreach (['year', 'index', 'duration', 'leafCount'] as $f) {
             $item[$f] = self::uint($m[$f] ?? null);
@@ -254,6 +252,17 @@ final class PlexClient
         $key = $m['key'] ?? null;
         $item['key'] = is_string($key) && PlexPaths::isBrowse($key) ? $key : null;
         return $item;
+    }
+
+    /**
+     * A display string: a scalar cast to string with control and format characters (\p{Cc}, \p{Cf}: tabs,
+     * newlines, bidi overrides, zero-width spaces) removed, then cut to MAX_TITLE_CHARS; '' when it is not valid
+     * UTF-8. The strip runs first because mb_substr would quietly turn invalid bytes into '?'.
+     */
+    private static function text(mixed $v): string
+    {
+        $s = preg_replace('/[\p{Cc}\p{Cf}]+/u', '', is_scalar($v) ? (string) $v : '') ?? '';
+        return mb_substr($s, 0, self::MAX_TITLE_CHARS, 'UTF-8');
     }
 
     /** A non-negative int from an int or a digit string, else null. */
@@ -293,7 +302,7 @@ final class PlexClient
      */
     private function request(string $path, array $query = []): PlexResponse
     {
-        $url = $this->baseUrl . $path . ($query === [] ? '' : '?' . http_build_query($query));
+        $url = $this->baseUrl . $path . ($query === [] ? '' : '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986));
         try {
             $r = $this->transport->get($url, $this->headers());
         } catch (PlexException | UnsafeUrlException $e) {
