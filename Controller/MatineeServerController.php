@@ -9,7 +9,7 @@ use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
 
 /**
  * User settings → Plex servers (spec §4, §5). Any signed-in user reaches it (ACL APP_USER); every ability is then
- * decided from the loaded server row, by SharePolicy or the model, never by an id in the URL alone.
+ * decided from the loaded server row, by MatineePolicy or the model, never by an id in the URL alone.
  *
  * The token is write-only: it is read from the POST once, handed to the model, and never put in a template, a flash
  * or a log line. A failed form re-renders the name and a valid base address only.
@@ -73,7 +73,7 @@ class MatineeServerController extends MatineeBaseController
         $this->redirectToServer($serverId);
     }
 
-    /** The owner's page, or an admin's (SharePolicy::canManageServer): status and actions. */
+    /** The owner's page, or an admin's (MatineePolicy::canManageServer): status and actions. */
     public function show(): void
     {
         $me = $this->actorId();

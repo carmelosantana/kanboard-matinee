@@ -6,7 +6,7 @@ use Kanboard\Controller\BaseController;
 use Kanboard\Core\Controller\AccessForbiddenException;
 use Kanboard\Plugin\Matinee\Model\MatineeConnectException;
 use Kanboard\Plugin\Matinee\Model\ServerModel;
-use Kanboard\Plugin\Matinee\Model\SharePolicy;
+use Kanboard\Plugin\Matinee\Model\MatineePolicy;
 use Kanboard\Plugin\Matinee\Plugin;
 use Pimple\Container;
 
@@ -85,8 +85,8 @@ abstract class MatineeBaseController extends BaseController
         return $this->container['matineeServerModel'];
     }
 
-    protected function policy(): SharePolicy
+    protected function policy(): MatineePolicy
     {
-        return $this->container['matineeSharePolicy'];
+        return $this->container['matineePolicy'];
     }
 }

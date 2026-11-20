@@ -7,8 +7,8 @@ use Kanboard\Plugin\Matinee\Crypto\KeyStore;
 use Kanboard\Plugin\Matinee\Http\CurlTransport;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
+use Kanboard\Plugin\Matinee\Model\MatineePolicy;
 use Kanboard\Plugin\Matinee\Model\ServerModel;
-use Kanboard\Plugin\Matinee\Model\SharePolicy;
 use Kanboard\Plugin\Matinee\Model\Settings;
 
 class Plugin extends Base
@@ -41,7 +41,7 @@ class Plugin extends Base
         );
         $container['matineeServerModel'] = static fn ($c): ServerModel => new ServerModel($c);
         // The policy's lookups read the DB on every call; only the closures are shared.
-        $container['matineeSharePolicy'] = static fn ($c): SharePolicy => SharePolicy::fromContainer($c);
+        $container['matineePolicy'] = static fn ($c): MatineePolicy => MatineePolicy::fromContainer($c);
 
         // ACL: any signed-in user reaches the server pages (each action then checks the loaded row); the admin pages
         // are admins only (each action checks again). Anonymous users reach neither.

@@ -16,6 +16,7 @@ use Kanboard\Plugin\Matinee\Http\PlexException;
 use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
 use Kanboard\Plugin\Matinee\Model\MatineeConnectException;
 use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
+use Kanboard\Plugin\Matinee\Model\MatineePolicy;
 use Kanboard\Plugin\Matinee\Model\ServerModel;
 use Kanboard\Plugin\Matinee\Model\Settings;
 use Kanboard\Plugin\Matinee\Plugin;
@@ -193,6 +194,9 @@ class ServerModelTest extends Base
         // The default wiring, before the test overrides: a KeyStore and a factory that builds a CurlTransport client.
         (new Plugin($this->container))->initialize();
         $this->assertInstanceOf(ServerModel::class, $this->container['matineeServerModel']);
+        $this->assertInstanceOf(MatineePolicy::class, $this->container['matineePolicy']);
+        $this->assertFalse(isset($this->container['matineeSharePolicy']));
+        $this->assertFalse(isset($this->container['matineeShareModel']));
         $this->assertInstanceOf(KeyStore::class, $this->container['matineeKeyStore']);
         // The factory only reads the client id: without one it refuses, and writes nothing.
         try {
@@ -206,6 +210,29 @@ class ServerModelTest extends Base
         $this->assertInstanceOf(PlexClient::class, $client);
         $transport = (new \ReflectionProperty(PlexClient::class, 'transport'))->getValue($client);
         $this->assertInstanceOf(CurlTransport::class, $transport);
+    }
+
+    /** The container's policy reads the live users and server rows on every call (S6). */
+    public function testThePolicyReadsLiveRows(): void
+    {
+        $alice = $this->user('alice');
+        $bob = $this->user('bob');
+        $server = $this->model()->get($this->connect($alice));
+        $policy = $this->container['matineePolicy'];
+
+        $this->assertTrue($policy->canBrowse($alice, $server));
+        $this->assertFalse($policy->canBrowse($bob, $server));
+        $this->db()->table('matinee_servers')->eq('id', $server['id'])->update(['is_shared' => 1]);
+        $this->assertTrue($policy->canBrowse($bob, $server), 'the stale array still says private');
+        $this->db()->table('users')->eq('id', $alice)->update(['is_active' => 0]);
+        $this->assertFalse($policy->canBrowse($bob, $server));
+        $this->db()->table('users')->eq('id', $alice)->update(['is_active' => 1]);
+        $this->db()->table('users')->eq('id', $bob)->update(['role' => Role::APP_ADMIN]);
+        $this->assertTrue($policy->isActiveAdmin($bob));
+        $this->assertFalse($policy->canToggleShared($bob, $server));
+        $this->setConfig(Settings::CONNECT_POLICY, Settings::POLICY_ADMINS);
+        $this->assertFalse($policy->canConnectServer($alice));
+        $this->assertTrue($policy->canConnectServer($bob));
     }
 
     public function testConnectStoresTheServerAndTheToken(): void
