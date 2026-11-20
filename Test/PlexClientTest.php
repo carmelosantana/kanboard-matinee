@@ -432,6 +432,41 @@ class PlexClientTest extends TestCase
         $this->assertCount(6, $this->client()->sections());
     }
 
+    /**
+     * L1: ~262k tiny objects fit under the 2 MiB cap but decode to ~106 MiB. Too many JSON containers is refused
+     * before json_decode, on every JSON path (children, sections, identity), with memory growth kept small.
+     */
+    public function testAJsonBodyWithTooManyContainersIsTooLargeBeforeItIsDecoded(): void
+    {
+        $head = '{"MediaContainer":{"Metadata":[';
+        $n = intdiv(PlexClient::MAX_BODY_BYTES - strlen($head) - 3, 8);
+        $body = $head . rtrim(str_repeat('{"a":1},', $n), ',') . ']}}';
+        $this->assertLessThanOrEqual(PlexClient::MAX_BODY_BYTES, strlen($body));
+
+        foreach ([
+            'children' => fn () => $this->client()->children('/library/sections/1/all', 0, 60),
+            'sections' => fn () => $this->client()->sections(),
+            'identity' => fn () => $this->client()->identity(),
+        ] as $label => $call) {
+            $this->t->respond(200, $body);
+            $before = memory_get_usage();
+            gc_collect_cycles();
+            memory_reset_peak_usage();
+            $this->expectPlexError($call, PlexException::TOO_LARGE);
+            $this->assertLessThan(8 * 1024 * 1024, memory_get_peak_usage() - $before, $label . ': decoded anyway');
+        }
+    }
+
+    public function testAJsonBodyAtTheContainerCapIsDecoded(): void
+    {
+        $items = rtrim(str_repeat('{"ratingKey":"1","type":"movie"},', PlexClient::MAX_JSON_CONTAINERS - 3), ',');
+        $this->t->respond(200, '{"MediaContainer":{"Metadata":[' . $items . ']}}');
+        $this->assertCount(60, $this->client()->children('/library/sections/1/all', 0, 60)['items']);
+
+        $this->t->respond(200, '{"MediaContainer":{"Metadata":[' . $items . ',{}]}}');
+        $this->expectPlexError(fn () => $this->client()->children('/library/sections/1/all', 0, 60), PlexException::TOO_LARGE);
+    }
+
     public function testATransportFailureIsUnreachableWithNothingChained(): void
     {
         $this->t->fail(new \RuntimeException('connect to ' . self::BASE . '/identity?X-Plex-Token=' . self::TOKEN . ' failed'));
@@ -990,6 +1025,14 @@ class PlexClientTest extends TestCase
     {
         $this->t->respond(200, str_repeat('x', 2 * 1024 * 1024 + 1), ['Content-Type' => 'image/png']);
         $this->expectPlexError(fn () => $this->client()->art('/library/metadata/1/thumb/2', 512), PlexException::TOO_LARGE);
+    }
+
+    /** Art is never decoded, so the JSON container cap does not apply: only the 2 MiB transport cap does. */
+    public function testArtUpTo2MiBIsNotHeldToTheJsonContainerCap(): void
+    {
+        $body = str_repeat('{[', 1024 * 1024);
+        $this->t->respond(200, $body, ['Content-Type' => 'image/png']);
+        $this->assertSame($body, $this->client()->art('/library/metadata/1/thumb/2', 512)['body']);
     }
 
     // ── PlexResponse ─────────────────────────────────────────────────────────

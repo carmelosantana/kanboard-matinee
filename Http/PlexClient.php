@@ -8,7 +8,10 @@ namespace Kanboard\Plugin\Matinee\Http;
  *
  * - The token travels only in the `X-Plex-Token` header, never in a URL.
  * - Errors are PlexException with a fixed reason; upstream bodies and transport messages never surface (§11 S9).
- * - Bodies over 2 MiB are refused and JSON is decoded with depth 32 (§11 S11).
+ * - Bodies over 2 MiB are refused and JSON is decoded with depth 32 (§11 S11). A JSON body with more than
+ *   MAX_JSON_CONTAINERS `{` and `[` (counted over the raw bytes, so braces inside strings count too) is refused as
+ *   too large before it is decoded: each decoded array costs PHP hundreds of bytes, so ~262k `{"a":1}` under the
+ *   2 MiB cap would decode to ~106 MiB. Capped, a 2 MiB body decodes to under ~30 MiB.
  * - With a pinned `machineId`, any response whose `MediaContainer.machineIdentifier` differs is
  *   `plex.server_changed`.
  * - The header set (with the token) is kept outside the object, in a class-private WeakMap, so var_export, an
@@ -25,6 +28,11 @@ final class PlexClient
     public const PRODUCT = 'Matinee';
     public const MAX_BODY_BYTES = 2097152;
     public const JSON_DEPTH = 32;
+    /**
+     * A 60-item page of full Plex metadata holds ~20 containers per item (Media, Part, tag lists), so ~1.2k; even a
+     * MAX_PAGE_SIZE page Plex over-fills is a few thousand. Sections and identity are far smaller.
+     */
+    public const MAX_JSON_CONTAINERS = 20000;
     public const SECTION_TYPES = ['movie', 'show', 'artist', 'photo'];
     public const MAX_TITLE_CHARS = 200;
     public const ITEM_TYPES = ['movie', 'show', 'season', 'episode', 'artist', 'album', 'track', 'photo'];
@@ -278,6 +286,9 @@ final class PlexClient
     private function fetch(string $path, array $query = []): array
     {
         $r = $this->request($path, $query);
+        if (substr_count($r->body, '{') + substr_count($r->body, '[') > self::MAX_JSON_CONTAINERS) {
+            throw PlexException::tooLarge();
+        }
 
         try {
             $data = json_decode($r->body, true, self::JSON_DEPTH, JSON_THROW_ON_ERROR);

@@ -511,6 +511,23 @@ class BrowseControllerTest extends Base
         $this->assertSame([], $this->t->requests);
     }
 
+    /** An app admin who is not the owner is no one special on a private server (MatineePolicy::canBrowse): every page refuses, Plex untouched. */
+    public function testAnAdminWhoIsNotTheOwnerCannotBrowseAPrivateServer(): void
+    {
+        $admin = $this->user('ada', Role::APP_ADMIN);
+        $this->loginAs($admin);
+
+        $body = $this->get(self::BRW, 'index')->body();
+        $this->assertStringNotContainsString('Living room', $body);
+        $this->assertStringNotContainsString('server_id='.$this->server, $body);
+        $this->assertStringContainsString('No Plex server is shared with you yet.', $body);
+
+        $this->forbidden(fn () => $this->get(self::BRW, 'server', ['server_id' => $this->server]), 'server');
+        $this->forbidden(fn () => $this->listing($this->browseRef($admin)), 'listing');
+        $this->assertArtRefused(403, $this->art($this->artRef($admin)), 'art');
+        $this->assertSame([], $this->t->requests);
+    }
+
     public function testABadUpstreamIsAnEmpty502(): void
     {
         $ref = $this->artRef($this->owner);
