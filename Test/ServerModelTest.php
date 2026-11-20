@@ -1,0 +1,779 @@
+<?php
+require_once 'tests/units/Base.php';
+require_once __DIR__.'/support/FakeTransport.php';
+
+use KanboardTests\units\Base;
+use Kanboard\Core\Security\Role;
+use Kanboard\Model\ProjectModel;
+use Kanboard\Model\UserModel;
+use Kanboard\Plugin\Matinee\Crypto\CryptoException;
+use Kanboard\Plugin\Matinee\Crypto\KeyStore;
+use Kanboard\Plugin\Matinee\Http\CurlTransport;
+use Kanboard\Plugin\Matinee\Http\PlexClient;
+use Kanboard\Plugin\Matinee\Http\PlexException;
+use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
+use Kanboard\Plugin\Matinee\Model\MatineeConnectException;
+use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
+use Kanboard\Plugin\Matinee\Model\ServerModel;
+use Kanboard\Plugin\Matinee\Model\Settings;
+use Kanboard\Plugin\Matinee\Plugin;
+use Kanboard\Plugin\Matinee\Test\FakeTransport;
+
+/** Collects every log line so tests can check the logged stage and that no secret is logged. */
+class MatineeTestLogger extends \Psr\Log\AbstractLogger
+{
+    /** @var list<string> */
+    public array $lines = [];
+
+    public function log($level, $message, array $context = []): void
+    {
+        $this->lines[] = $level.' '.$message;
+    }
+}
+
+/**
+ * ServerModel (plan Task 7; spec §4, §2, §11 S1, S6, S7, S9, S12). The Plex side is FakeTransport behind the
+ * injectable client factory; the key store lives in a temp dir.
+ */
+class ServerModelTest extends Base
+{
+    private const TOKEN = 'test-token-NOT-REAL-0000';
+    private const TOKEN2 = 'test-token-NOT-REAL-1111';
+    private const BASE = 'https://plex.example.test:32400';
+    private const MACHINE = '0123456789abcdef0123456789abcdef01234567';
+    private const OTHER_MACHINE = 'fedcba9876543210fedcba9876543210fedcba98';
+    private const CLIENT_ID = 'c0ffee00-1111-4222-8333-444455556666';
+    private const FAILED = 'matinee.connect_failed';
+
+    private FakeTransport $t;
+    private MatineeTestLogger $log;
+    private string $keyDir;
+
+    /** @var list<array{baseUrl: string, machineId: ?string, deviceName: string}> */
+    private array $factoryCalls = [];
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $driver = ['sqlite' => 'Sqlite', 'mysql' => 'Mysql', 'postgres' => 'Postgres'][DB_DRIVER];
+        require_once __DIR__."/../Schema/$driver.php";
+        $pdo = $this->container['db']->getConnection();
+        \Kanboard\Plugin\Matinee\Schema\version_1($pdo);
+        \Kanboard\Plugin\Matinee\Schema\version_2($pdo);
+
+        (new Plugin($this->container))->initialize();
+
+        $this->keyDir = sys_get_temp_dir().'/matinee-servermodel-'.bin2hex(random_bytes(6));
+        $this->container['matineeKeyStore'] = new KeyStore($this->keyDir, null);
+
+        $this->t = new FakeTransport();
+        $this->container['matineePlexClientFactory'] = $this->container->protect(
+            function (string $baseUrl, #[\SensitiveParameter] string $token, ?string $machineId, string $deviceName): PlexClient {
+                $this->factoryCalls[] = ['baseUrl' => $baseUrl, 'machineId' => $machineId, 'deviceName' => $deviceName];
+                return new PlexClient($baseUrl, $token, self::CLIENT_ID, $this->t, $machineId, $deviceName);
+            }
+        );
+
+        $this->log = new MatineeTestLogger();
+        $this->container['logger'] = $this->log;
+    }
+
+    protected function tearDown(): void
+    {
+        foreach (['secret.key', '.lock'] as $f) {
+            @unlink($this->keyDir.'/'.$f);
+        }
+        @rmdir($this->keyDir);
+        parent::tearDown();
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    private function model(): ServerModel
+    {
+        return $this->container['matineeServerModel'];
+    }
+
+    private function db(): \PicoDb\Database
+    {
+        return $this->container['db'];
+    }
+
+    private function user(string $name, string $role = Role::APP_USER): int
+    {
+        return (int) (new UserModel($this->container))->create(['username' => $name, 'role' => $role]);
+    }
+
+    private function fixture(string $name): string
+    {
+        return (string) file_get_contents(__DIR__.'/fixtures/plex/'.$name.'.json');
+    }
+
+    private function queueOk(?string $machine = null): void
+    {
+        if ($machine === null) {
+            $this->t->respond(200, $this->fixture('identity'));
+        } else {
+            $this->t->respondJson(['MediaContainer' => ['machineIdentifier' => $machine, 'version' => '1.0']]);
+        }
+        $this->t->respond(200, $this->fixture('sections'));
+    }
+
+    private function connect(int $userId, string $url = self::BASE, string $token = self::TOKEN): int
+    {
+        $this->queueOk();
+        return $this->model()->connect($userId, 'Living room', $url, $token);
+    }
+
+    private function setConfig(string $key, string $value): void
+    {
+        $this->container['configModel']->save([$key => $value]);
+    }
+
+    /** Runs $fn, expects the generic connect failure, and returns the exception. */
+    private function expectFailure(callable $fn, string $message = self::FAILED): MatineeConnectException
+    {
+        try {
+            $fn();
+        } catch (MatineeConnectException $e) {
+            $this->assertSame($message, $e->getMessage());
+            $this->assertNull($e->getPrevious());
+            return $e;
+        }
+        $this->fail('expected MatineeConnectException '.$message);
+    }
+
+    private function expectForbidden(callable $fn): void
+    {
+        try {
+            $fn();
+        } catch (MatineeForbiddenException $e) {
+            $this->assertSame('matinee.forbidden', $e->getMessage());
+            return;
+        }
+        $this->fail('expected MatineeForbiddenException');
+    }
+
+    private function serverRows(): int
+    {
+        return $this->db()->table('matinee_servers')->count();
+    }
+
+    private function row(int $id): array
+    {
+        return $this->db()->table('matinee_servers')->eq('id', $id)->findOne();
+    }
+
+    private function lastLog(): string
+    {
+        return (string) end($this->log->lines);
+    }
+
+    /** @return list<string> */
+    private function matineeTables(): array
+    {
+        $pdo = $this->db()->getConnection();
+        $sql = match (DB_DRIVER) {
+            'sqlite' => "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'matinee%'",
+            'mysql' => "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE 'matinee%'",
+            'postgres' => "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name LIKE 'matinee%'",
+        };
+        $tables = $pdo->query($sql)->fetchAll(\PDO::FETCH_COLUMN);
+        sort($tables);
+        return $tables;
+    }
+
+    // ── connect ──────────────────────────────────────────────────────────────
+
+    public function testPluginRegistersTheServices(): void
+    {
+        // The default wiring, before the test overrides: a KeyStore and a factory that builds a CurlTransport client.
+        (new Plugin($this->container))->initialize();
+        $this->assertInstanceOf(ServerModel::class, $this->container['matineeServerModel']);
+        $this->assertInstanceOf(KeyStore::class, $this->container['matineeKeyStore']);
+        $client = $this->container['matineePlexClientFactory'](self::BASE, self::TOKEN, null, 'Matinee');
+        $this->assertInstanceOf(PlexClient::class, $client);
+        $transport = (new \ReflectionProperty(PlexClient::class, 'transport'))->getValue($client);
+        $this->assertInstanceOf(CurlTransport::class, $transport);
+    }
+
+    public function testConnectStoresTheServerAndTheToken(): void
+    {
+        $alice = $this->user('alice');
+        $this->queueOk();
+        $id = $this->model()->connect($alice, '  Living room ', 'HTTPS://Plex.Example.Test:32400/', self::TOKEN);
+
+        $server = $this->model()->get($id);
+        $this->assertSame($alice, (int) $server['owner_user_id']);
+        $this->assertSame('Living room', $server['name']);
+        $this->assertSame(self::BASE, $server['base_url']);
+        $this->assertSame(self::MACHINE, $server['machine_id']);
+        $this->assertSame('ok', $server['status']);
+        $this->assertSame(1, (int) $server['is_enabled']);
+        $this->assertGreaterThan(0, (int) $server['created_at']);
+        $this->assertGreaterThan(0, (int) $server['last_checked_at']);
+
+        $this->assertSame($this->container['matineeKeyStore']->activeKeyId(), $this->row($id)['key_id']);
+        $this->assertSame(self::TOKEN, $this->model()->tokenFor($server));
+        $this->assertSame([['baseUrl' => self::BASE, 'machineId' => null, 'deviceName' => 'Matinee (alice)']], $this->factoryCalls);
+    }
+
+    public function testConnectCallsIdentityBeforeSections(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $this->assertSame([self::BASE.'/identity', self::BASE.'/library/sections'], array_column($this->t->requests, 'url'));
+
+        $this->t->requests = [];
+        $this->queueOk();
+        $this->assertSame('ok', $this->model()->verify($id, (int) $this->model()->get($id)['owner_user_id']));
+        $this->assertSame([self::BASE.'/identity', self::BASE.'/library/sections'], array_column($this->t->requests, 'url'));
+    }
+
+    public function testNoTableColumnOrLogLineHoldsTheToken(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $this->queueOk();
+        $this->model()->verify($id, $alice);
+        $this->queueOk();
+        $this->model()->update($id, $alice, 'Den', self::BASE, null);
+        $this->t->fail(new \RuntimeException('boom '.self::TOKEN));
+        $this->expectFailure(fn () => $this->model()->verify($id, $alice));
+        $this->t->respond(401, '');
+        $this->expectFailure(fn () => $this->model()->connect($alice, 'X', 'https://other.example.test', self::TOKEN));
+
+        $tables = $this->matineeTables();
+        $this->assertSame(['matinee_attempts', 'matinee_servers', 'matinee_share_sections', 'matinee_shares'], $tables);
+        $scanned = 0;
+        foreach (array_merge($tables, ['settings']) as $table) {
+            foreach ($this->db()->table($table)->findAll() as $row) {
+                foreach ($row as $col => $value) {
+                    $this->assertStringNotContainsString(self::TOKEN, (string) $value, "$table.$col");
+                    $this->assertStringNotContainsString('NOT-REAL', (string) $value, "$table.$col");
+                    $scanned++;
+                }
+            }
+        }
+        $this->assertGreaterThan(13, $scanned);
+        foreach ($this->log->lines as $line) {
+            $this->assertStringNotContainsString(self::TOKEN, $line);
+            $this->assertStringNotContainsString('NOT-REAL', $line);
+        }
+        $this->assertSame(self::TOKEN, $this->model()->tokenFor($this->model()->get($id)));
+    }
+
+    public function testBadUrlStoresNothingAndSendsNothing(): void
+    {
+        $alice = $this->user('alice');
+        foreach (['', 'ftp://plex.example.test', 'https://plex.example.test:32400/web', 'https://u:p@plex.example.test',
+            'https://plex.example.test/?X-Plex-Token='.self::TOKEN, 'https://0x7f.1', 'https://plex.example.test:080'] as $url) {
+            $this->expectFailure(fn () => $this->model()->connect($alice, 'Living room', $url, self::TOKEN));
+            $this->assertStringContainsString('at url', $this->lastLog());
+        }
+        $this->assertSame(0, $this->serverRows());
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testRejectedTokenStoresNothing(): void
+    {
+        $this->t->respond(401, '');
+        $this->expectFailure(fn () => $this->model()->connect($this->user('alice'), 'Living room', self::BASE, self::TOKEN));
+        $this->assertSame(0, $this->serverRows());
+        $this->assertStringContainsString('at identity', $this->lastLog());
+        $this->assertStringContainsString(PlexException::TOKEN_REJECTED, $this->lastLog());
+    }
+
+    public function testUnreachableServerStoresNothing(): void
+    {
+        $this->t->fail(new \RuntimeException('connection refused '.self::TOKEN));
+        $this->expectFailure(fn () => $this->model()->connect($this->user('alice'), 'Living room', self::BASE, self::TOKEN));
+        $this->assertSame(0, $this->serverRows());
+        $this->assertStringContainsString(PlexException::UNREACHABLE, $this->lastLog());
+    }
+
+    public function testSectionsFailureStoresNothing(): void
+    {
+        $this->t->respond(200, $this->fixture('identity'))->respond(401, '');
+        $this->expectFailure(fn () => $this->model()->connect($this->user('alice'), 'Living room', self::BASE, self::TOKEN));
+        $this->assertSame(0, $this->serverRows());
+        $this->assertStringContainsString('at sections', $this->lastLog());
+    }
+
+    public function testASealFailureAfterTheInsertRollsBack(): void
+    {
+        // A malformed env key fails only when the token is sealed, after the row is inserted.
+        $this->container['matineeKeyStore'] = new KeyStore($this->keyDir, 'not a key');
+        $this->expectFailure(fn () => $this->connect($this->user('alice')));
+        $this->assertStringContainsString('at store', $this->lastLog());
+        $this->assertSame(0, $this->serverRows());
+    }
+
+    public function testAdminsPolicyRefusesAUser(): void
+    {
+        $this->setConfig(Settings::CONNECT_POLICY, Settings::POLICY_ADMINS);
+        $this->expectFailure(fn () => $this->model()->connect($this->user('alice'), 'Living room', self::BASE, self::TOKEN));
+        $this->assertStringContainsString('at policy', $this->lastLog());
+        $this->assertSame([], $this->t->requests);
+        $this->assertSame(0, $this->serverRows());
+
+        $admin = $this->user('root2', Role::APP_ADMIN);
+        $this->assertGreaterThan(0, $this->connect($admin));
+    }
+
+    public function testInactiveUserCannotConnect(): void
+    {
+        $alice = $this->user('alice');
+        $this->db()->table('users')->eq('id', $alice)->update(['is_active' => 0]);
+        $this->expectFailure(fn () => $this->model()->connect($alice, 'Living room', self::BASE, self::TOKEN));
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testEveryFailureStageGivesTheSameMessage(): void
+    {
+        $n = 0;
+        $fresh = function () use (&$n): int {
+            return $this->user('user'.(++$n));
+        };
+        $connect = fn (int $user, string $url = self::BASE) => fn () => $this->model()->connect($user, 'Living room', $url, self::TOKEN);
+
+        $scenarios = [];
+        $scenarios['url'] = $connect($fresh(), 'gopher://plex.example.test');
+        $scenarios['guard'] = function () use ($fresh) {
+            $this->t->fail(new UnsafeUrlException(UnsafeUrlException::PRIVATE_NETWORK, 'plex.example.test'));
+            $this->model()->connect($fresh(), 'Living room', self::BASE, self::TOKEN);
+        };
+        $scenarios['unreachable'] = function () use ($fresh) {
+            $this->t->fail(new \RuntimeException('timeout'));
+            $this->model()->connect($fresh(), 'Living room', self::BASE, self::TOKEN);
+        };
+        $scenarios['rejected'] = function () use ($fresh) {
+            $this->t->respond(401, '');
+            $this->model()->connect($fresh(), 'Living room', self::BASE, self::TOKEN);
+        };
+        $scenarios['http'] = function () use ($fresh) {
+            $this->t->respond(500, 'upstream says '.self::TOKEN);
+            $this->model()->connect($fresh(), 'Living room', self::BASE, self::TOKEN);
+        };
+        $scenarios['badjson'] = function () use ($fresh) {
+            $this->t->respond(200, '{"MediaContainer": {}}');
+            $this->model()->connect($fresh(), 'Living room', self::BASE, self::TOKEN);
+        };
+        $scenarios['sections'] = function () use ($fresh) {
+            $this->t->respond(200, $this->fixture('identity'))->fail(new UnsafeUrlException(UnsafeUrlException::BLOCKED_ADDRESS));
+            $this->model()->connect($fresh(), 'Living room', self::BASE, self::TOKEN);
+        };
+        $inputUser = $fresh();
+        $scenarios['input'] = fn () => $this->model()->connect($inputUser, '', self::BASE, self::TOKEN);
+        $dupUser = $fresh();
+        $this->connect($dupUser);
+        $scenarios['duplicate'] = $connect($dupUser, 'https://plex.example.test:32400/');
+        $limitUser = $fresh();
+        foreach (['a', 'b', 'c'] as $h) {
+            $this->connect($limitUser, "https://$h.example.test");
+        }
+        $scenarios['server_limit'] = $connect($limitUser, 'https://d.example.test');
+        $rateUser = $fresh();
+        $this->db()->table('matinee_attempts')->insert(['user_id' => $rateUser, 'created_at' => time()]);
+        $scenarios['rate_limit'] = $connect($rateUser);
+        $verifyUser = $fresh();
+        $verifyServer = $this->connect($verifyUser, 'https://v.example.test');
+        $scenarios['verify_guard'] = function () use ($verifyServer, $verifyUser) {
+            $this->t->fail(new UnsafeUrlException(UnsafeUrlException::PORT_NOT_ALLOWED, 'v.example.test', 8080));
+            $this->model()->verify($verifyServer, $verifyUser);
+        };
+        $scenarios['verify_plex'] = function () use ($verifyServer, $verifyUser) {
+            $this->t->respond(401, '');
+            $this->model()->verify($verifyServer, $verifyUser);
+        };
+
+        $seen = [];
+        foreach ($scenarios as $stage => $fn) {
+            if ($stage === 'rate_limit') {
+                $this->setConfig(Settings::ATTEMPT_LIMIT_KEY, '1');
+            }
+            if ($stage === 'verify_guard') {
+                $this->setConfig(Settings::ATTEMPT_LIMIT_KEY, '10');
+            }
+            $e = $this->expectFailure($fn);
+            $seen[$stage] = [get_class($e), $e->getMessage(), $e->getCode()];
+            $this->assertStringNotContainsString(self::TOKEN, $this->lastLog(), $stage);
+            $this->assertStringNotContainsString('https://', $this->lastLog(), $stage);
+        }
+        $this->assertCount(1, array_unique(array_map('serialize', $seen)), print_r($seen, true));
+        $this->assertSame([MatineeConnectException::class, self::FAILED, 0], reset($seen));
+
+        $logged = implode("\n", $this->log->lines);
+        foreach (['url', 'identity', 'sections', 'input', 'duplicate', 'server_limit', 'rate_limit'] as $stage) {
+            $this->assertStringContainsString("at $stage ", $logged);
+        }
+        $this->assertStringContainsString(UnsafeUrlException::PRIVATE_NETWORK, $logged);
+    }
+
+    // ── rate and server limits ───────────────────────────────────────────────
+
+    public function testEleventhAttemptInTenMinutesIsRefused(): void
+    {
+        $alice = $this->user('alice');
+        for ($i = 0; $i < 10; $i++) {
+            $this->t->respond(401, '');
+            $this->expectFailure(fn () => $this->model()->connect($alice, 'Living room', self::BASE, self::TOKEN));
+        }
+        $this->assertCount(10, $this->t->requests);
+
+        $this->queueOk();
+        $this->expectFailure(fn () => $this->model()->connect($alice, 'Living room', self::BASE, self::TOKEN));
+        $this->assertStringContainsString('at rate_limit', $this->lastLog());
+        $this->assertCount(10, $this->t->requests);
+        $this->assertSame(10, $this->db()->table('matinee_attempts')->eq('user_id', $alice)->count());
+
+        // Another user is not affected.
+        $this->assertGreaterThan(0, $this->model()->connect($this->user('bob'), 'Living room', self::BASE, self::TOKEN));
+    }
+
+    public function testVerifyCountsTowardTheAttemptLimit(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        for ($i = 0; $i < 9; $i++) {
+            $this->queueOk();
+            $this->model()->verify($id, $alice);
+        }
+        $before = count($this->t->requests);
+        $this->expectFailure(fn () => $this->model()->verify($id, $alice));
+        $this->assertSame($before, count($this->t->requests));
+    }
+
+    public function testOldAttemptsDoNotCountAndArePruned(): void
+    {
+        $alice = $this->user('alice');
+        $bob = $this->user('bob');
+        for ($i = 0; $i < 10; $i++) {
+            $this->db()->table('matinee_attempts')->insert(['user_id' => $alice, 'created_at' => time() - 601]);
+        }
+        $this->db()->table('matinee_attempts')->insert(['user_id' => $bob, 'created_at' => time() - 3601]);
+
+        $this->assertGreaterThan(0, $this->connect($alice));
+
+        $this->assertSame(0, $this->db()->table('matinee_attempts')->eq('user_id', $bob)->count());
+        $this->assertSame(11, $this->db()->table('matinee_attempts')->eq('user_id', $alice)->count());
+    }
+
+    public function testFourthServerIsRefused(): void
+    {
+        $alice = $this->user('alice');
+        foreach (['a', 'b', 'c'] as $h) {
+            $this->connect($alice, "https://$h.example.test");
+        }
+        $sent = count($this->t->requests);
+        $this->expectFailure(fn () => $this->model()->connect($alice, 'Living room', 'https://d.example.test', self::TOKEN));
+        $this->assertStringContainsString('at server_limit', $this->lastLog());
+        $this->assertSame($sent, count($this->t->requests));
+        $this->assertSame(3, $this->serverRows());
+
+        // The limit is per owner.
+        $this->assertGreaterThan(0, $this->connect($this->user('bob'), 'https://d.example.test'));
+    }
+
+    public function testDuplicateServerComparesHostAndEffectivePort(): void
+    {
+        $alice = $this->user('alice');
+        $this->connect($alice, 'http://plex.example.test');
+        $this->connect($alice, 'https://plex.example.test');
+        $sent = count($this->t->requests);
+
+        foreach (['http://plex.example.test:80', 'HTTP://PLEX.example.test./', 'https://plex.example.test:443'] as $url) {
+            $this->expectFailure(fn () => $this->model()->connect($alice, 'Living room', $url, self::TOKEN));
+            $this->assertStringContainsString('at duplicate', $this->lastLog());
+        }
+        $this->assertSame($sent, count($this->t->requests));
+        $this->assertSame(2, $this->serverRows());
+
+        // Another owner may add the same server.
+        $this->assertGreaterThan(0, $this->connect($this->user('bob'), 'http://plex.example.test:80'));
+    }
+
+    // ── update ───────────────────────────────────────────────────────────────
+
+    public function testUpdateWithANewUrlNeedsTheToken(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $sent = count($this->t->requests);
+
+        $this->expectFailure(fn () => $this->model()->update($id, $alice, 'Den', 'https://new.example.test', null), 'matinee.token_required');
+        $this->assertSame($sent, count($this->t->requests));
+        $this->assertSame(self::BASE, $this->model()->get($id)['base_url']);
+        $this->assertSame('Living room', $this->model()->get($id)['name']);
+    }
+
+    public function testUpdateWithANewUrlAndTokenReseals(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $before = $this->row($id);
+
+        $this->queueOk();
+        $this->model()->update($id, $alice, 'Den', 'https://new.example.test:32400', self::TOKEN2);
+
+        $server = $this->model()->get($id);
+        $this->assertSame('Den', $server['name']);
+        $this->assertSame('https://new.example.test:32400', $server['base_url']);
+        $this->assertNotSame($before['token_nonce'], $this->row($id)['token_nonce']);
+        $this->assertSame(self::TOKEN2, $this->model()->tokenFor($server));
+        $this->assertSame('https://new.example.test:32400/identity', $this->t->requests[2]['url']);
+    }
+
+    public function testUpdateRenamesWithTheStoredToken(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $this->queueOk();
+        $this->model()->update($id, $alice, 'Den', 'https://plex.example.test:32400/', null);
+        $this->assertSame('Den', $this->model()->get($id)['name']);
+        $this->assertSame(self::TOKEN, $this->model()->tokenFor($this->model()->get($id)));
+    }
+
+    public function testUpdateWithAMachineIdChangeNeedsTheToken(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+
+        $this->queueOk(self::OTHER_MACHINE);
+        $this->expectFailure(fn () => $this->model()->update($id, $alice, 'Den', self::BASE, null), 'matinee.token_required');
+        $this->assertSame(self::MACHINE, $this->model()->get($id)['machine_id']);
+        $this->assertSame('Living room', $this->model()->get($id)['name']);
+
+        $this->queueOk(self::OTHER_MACHINE);
+        $this->model()->update($id, $alice, 'Den', self::BASE, self::TOKEN2);
+        $this->assertSame(self::OTHER_MACHINE, $this->model()->get($id)['machine_id']);
+        $this->assertSame(self::TOKEN2, $this->model()->tokenFor($this->model()->get($id)));
+    }
+
+    public function testOnlyTheOwnerMayUpdate(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        foreach ([$this->user('bob'), $this->user('root2', Role::APP_ADMIN), 9999] as $actor) {
+            $this->expectForbidden(fn () => $this->model()->update($id, $actor, 'Mine', self::BASE, self::TOKEN2));
+        }
+        $this->assertSame('Living room', $this->model()->get($id)['name']);
+    }
+
+    public function testUpdateToAnotherOfMyServersIsADuplicate(): void
+    {
+        $alice = $this->user('alice');
+        $this->connect($alice, 'https://a.example.test');
+        $id = $this->connect($alice, 'https://b.example.test');
+        $this->expectFailure(fn () => $this->model()->update($id, $alice, 'B', 'https://a.example.test:443', self::TOKEN2));
+        $this->assertStringContainsString('at duplicate', $this->lastLog());
+    }
+
+    // ── verify ───────────────────────────────────────────────────────────────
+
+    public function testVerifyRecordsTheStatus(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+
+        $this->t->fail(new \RuntimeException('timeout'));
+        $this->expectFailure(fn () => $this->model()->verify($id, $alice));
+        $this->assertSame('unreachable', $this->model()->get($id)['status']);
+
+        $this->t->fail(new UnsafeUrlException(UnsafeUrlException::PRIVATE_NETWORK, 'plex.example.test'));
+        $this->expectFailure(fn () => $this->model()->verify($id, $alice));
+        $this->assertSame('unreachable', $this->model()->get($id)['status']);
+
+        $this->t->respond(401, '');
+        $this->expectFailure(fn () => $this->model()->verify($id, $alice));
+        $this->assertSame('reconnect', $this->model()->get($id)['status']);
+
+        // A different server answering at the stored URL (machine id pinned): identity() refuses it.
+        $this->t->respondJson(['MediaContainer' => ['machineIdentifier' => self::OTHER_MACHINE]]);
+        $this->expectFailure(fn () => $this->model()->verify($id, $alice));
+        $this->assertSame('reconnect', $this->model()->get($id)['status']);
+
+        $this->db()->table('matinee_servers')->eq('id', $id)->update(['last_checked_at' => 5]);
+        $this->queueOk();
+        $this->assertSame('ok', $this->model()->verify($id, $alice));
+        $this->assertSame('ok', $this->model()->get($id)['status']);
+        $this->assertGreaterThan(5, (int) $this->model()->get($id)['last_checked_at']);
+        $this->assertSame(self::MACHINE, end($this->factoryCalls)['machineId']);
+    }
+
+    public function testVerifyIsForTheOwnerOrAnAdmin(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $this->expectForbidden(fn () => $this->model()->verify($id, $this->user('bob')));
+        $this->expectForbidden(fn () => $this->model()->verify(9999, $alice));
+
+        $admin = $this->user('root2', Role::APP_ADMIN);
+        $this->queueOk();
+        $this->assertSame('ok', $this->model()->verify($id, $admin));
+        $this->assertSame(1, $this->db()->table('matinee_attempts')->eq('user_id', $admin)->count());
+    }
+
+    // ── remove and enable ────────────────────────────────────────────────────
+
+    public function testRemoveIsForTheOwnerOrAnAdmin(): void
+    {
+        $alice = $this->user('alice');
+        $bob = $this->user('bob');
+        $id = $this->connect($alice);
+        $project = (int) (new ProjectModel($this->container))->create(['name' => 'Movies']);
+        $this->db()->table('matinee_shares')->insert(['server_id' => $id, 'created_by' => $alice, 'audience' => 'project',
+            'project_id' => $project, 'whole_server' => 1, 'is_enabled' => 1, 'created_at' => 1]);
+
+        $this->expectForbidden(fn () => $this->model()->remove($id, $bob));
+        $this->assertNotNull($this->model()->get($id));
+
+        $this->model()->remove($id, $alice);
+        $this->assertNull($this->model()->get($id));
+        $this->assertSame(0, $this->db()->table('matinee_shares')->count());
+
+        $other = $this->connect($bob);
+        $this->model()->remove($other, $this->user('root2', Role::APP_ADMIN));
+        $this->assertSame(0, $this->serverRows());
+    }
+
+    public function testAdminCanDisableAndGetNeverReturnsTheTokenColumns(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $admin = $this->user('root2', Role::APP_ADMIN);
+
+        $this->expectForbidden(fn () => $this->model()->setEnabled($id, false, $alice));
+        $this->assertSame(1, (int) $this->model()->get($id)['is_enabled']);
+
+        $this->model()->setEnabled($id, false, $admin);
+        $server = $this->model()->get($id);
+        $this->assertSame(0, (int) $server['is_enabled']);
+
+        $public = ['id', 'owner_user_id', 'name', 'base_url', 'machine_id', 'is_enabled', 'status', 'last_checked_at', 'created_at', 'updated_at'];
+        $this->assertSame($public, array_keys($server));
+        $this->assertSame([$public], array_map('array_keys', $this->model()->listForOwner($alice)));
+        $this->assertSame([$public], array_map('array_keys', $this->model()->listAll()));
+        $this->assertSame([], $this->model()->listForOwner($admin));
+        $this->assertNull($this->model()->get(9999));
+
+        // A disabled server hands out no token.
+        $this->expectForbidden(fn () => $this->model()->tokenFor($server));
+        $this->model()->setEnabled($id, true, $admin);
+        $this->assertSame(self::TOKEN, $this->model()->tokenFor($this->model()->get($id)));
+    }
+
+    // ── tokenFor ─────────────────────────────────────────────────────────────
+
+    public function testTamperedCiphertextMarksTheServerForReconnect(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $ct = base64_decode($this->row($id)['token_ct']);
+        $ct[0] = chr(ord($ct[0]) ^ 1);
+        $this->db()->table('matinee_servers')->eq('id', $id)->update(['token_ct' => base64_encode($ct)]);
+
+        try {
+            $this->model()->tokenFor($this->model()->get($id));
+            $this->fail('expected CryptoException');
+        } catch (CryptoException $e) {
+            $this->assertSame('token: cannot open', $e->getMessage());
+        }
+        $this->assertSame('reconnect', $this->model()->get($id)['status']);
+    }
+
+    public function testDbOnlyChangeOfTheEndpointBreaksTokenFor(): void
+    {
+        $alice = $this->user('alice');
+        foreach (['base_url' => 'https://evil.example.test:32400', 'machine_id' => self::OTHER_MACHINE, 'owner_user_id' => $this->user('bob')] as $col => $value) {
+            $id = $this->connect($alice, 'https://'.str_replace('_', '-', $col).'.example.test');
+            $this->db()->table('matinee_servers')->eq('id', $id)->update([$col => $value]);
+            try {
+                $this->model()->tokenFor($this->model()->get($id));
+                $this->fail("expected CryptoException after changing $col");
+            } catch (CryptoException) {
+            }
+            $this->assertSame('reconnect', $this->model()->get($id)['status']);
+        }
+    }
+
+    public function testTokenForReadsTheRowNotTheCallersArray(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $server = $this->model()->get($id);
+        $server['base_url'] = 'https://evil.example.test';
+        $this->assertSame(self::TOKEN, $this->model()->tokenFor($server));
+    }
+
+    public function testARowSealedUnderTheFileKeyResealsToTheEnvKey(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $fileKid = $this->container['matineeKeyStore']->activeKeyId();
+        $this->assertSame($fileKid, $this->row($id)['key_id']);
+
+        $env = base64_encode(random_bytes(32));
+        $withEnv = new KeyStore($this->keyDir, $env);
+        $this->container->offsetUnset('matineeKeyStore');
+        $this->container['matineeKeyStore'] = $withEnv;
+        $before = $this->row($id);
+
+        $this->assertSame(self::TOKEN, $this->model()->tokenFor($this->model()->get($id)));
+        $after = $this->row($id);
+        $this->assertSame($withEnv->activeKeyId(), $after['key_id']);
+        $this->assertNotSame($fileKid, $after['key_id']);
+        $this->assertNotSame($before['token_ct'], $after['token_ct']);
+
+        // Sealed under the env key now: an env-only store (no key file) opens it.
+        $emptyDir = $this->keyDir.'-empty';
+        $this->container->offsetUnset('matineeKeyStore');
+        $this->container['matineeKeyStore'] = new KeyStore($emptyDir, $env);
+        $this->assertSame(self::TOKEN, $this->model()->tokenFor($this->model()->get($id)));
+        $this->assertFileDoesNotExist($emptyDir);
+    }
+
+    public function testAnInactiveOwnerGetsNoTokenOrClient(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $this->db()->table('users')->eq('id', $alice)->update(['is_active' => 0]);
+        $server = $this->model()->get($id);
+
+        $this->expectForbidden(fn () => $this->model()->tokenFor($server));
+        $this->expectForbidden(fn () => $this->model()->clientFor($server));
+        $this->assertSame('ok', $this->model()->get($id)['status']);
+
+        $admin = $this->user('root2', Role::APP_ADMIN);
+        $this->expectFailure(fn () => $this->model()->verify($id, $admin));
+    }
+
+    public function testClientForPinsTheMachineAndNamesTheOwner(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $this->factoryCalls = [];
+        $client = $this->model()->clientFor($this->model()->get($id));
+        $this->assertInstanceOf(PlexClient::class, $client);
+        $this->assertSame([['baseUrl' => self::BASE, 'machineId' => self::MACHINE, 'deviceName' => 'Matinee (alice)']], $this->factoryCalls);
+    }
+
+    // ── settings ─────────────────────────────────────────────────────────────
+
+    public function testSettingsDefaultsAndClientId(): void
+    {
+        $settings = new Settings($this->container);
+        $this->assertSame(Settings::POLICY_EVERYONE, $settings->connectPolicy());
+        $this->assertSame(10, $settings->attemptLimit());
+        $this->assertSame(3, $settings->maxServers());
+        $this->assertSame(600, Settings::ATTEMPT_WINDOW);
+
+        $id = $settings->clientId();
+        $this->assertMatchesRegularExpression('/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/', $id);
+        $this->assertSame($id, (new Settings($this->container))->clientId());
+
+        $this->setConfig(Settings::CONNECT_POLICY, 'bogus');
+        $this->setConfig(Settings::MAX_SERVERS_KEY, '0');
+        $this->setConfig(Settings::ATTEMPT_LIMIT_KEY, 'lots');
+        $this->assertSame(Settings::POLICY_EVERYONE, $settings->connectPolicy());
+        $this->assertSame(3, $settings->maxServers());
+        $this->assertSame(10, $settings->attemptLimit());
+        $this->setConfig(Settings::MAX_SERVERS_KEY, '5');
+        $this->assertSame(5, $settings->maxServers());
+    }
+}

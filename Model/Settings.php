@@ -1,0 +1,67 @@
+<?php
+
+namespace Kanboard\Plugin\Matinee\Model;
+
+use Kanboard\Core\Base;
+use Kanboard\Plugin\Matinee\Http\UrlGuard;
+
+/**
+ * Matinee's config keys (spec §3, §4, §11 S1). Values are read straight from the settings table on every call, so a
+ * change an admin saves applies at once (ConfigModel::get caches the whole table per request).
+ */
+final class Settings extends Base
+{
+    /** Who may connect a server: everyone (any active user) or admins (D3). */
+    public const CONNECT_POLICY = 'matinee_connect_policy';
+    public const POLICY_EVERYONE = 'everyone';
+    public const POLICY_ADMINS = 'admins';
+
+    public const ALLOWED_HOSTS = UrlGuard::ALLOWED_HOSTS_KEY;
+    /** S1 replaced the blanket matinee_allow_private with explicit targets. */
+    public const PRIVATE_TARGETS = UrlGuard::PRIVATE_TARGETS_KEY;
+    /** The per-install X-Plex-Client-Identifier. */
+    public const CLIENT_ID = 'matinee_client_id';
+
+    /** S1: connect and verify attempts per user per window, and servers per owner; the admin may change both. */
+    public const ATTEMPT_LIMIT_KEY = 'matinee_attempt_limit';
+    public const MAX_SERVERS_KEY = 'matinee_max_servers';
+    public const ATTEMPT_LIMIT = 10;
+    public const ATTEMPT_WINDOW = 600;
+    public const MAX_SERVERS = 3;
+
+    public function connectPolicy(): string
+    {
+        return $this->configModel->getOption(self::CONNECT_POLICY) === self::POLICY_ADMINS ? self::POLICY_ADMINS : self::POLICY_EVERYONE;
+    }
+
+    public function attemptLimit(): int
+    {
+        return $this->positiveInt(self::ATTEMPT_LIMIT_KEY, self::ATTEMPT_LIMIT);
+    }
+
+    public function maxServers(): int
+    {
+        return $this->positiveInt(self::MAX_SERVERS_KEY, self::MAX_SERVERS);
+    }
+
+    /** A uuid v4, created on first use and kept in config. Saving opens and commits a transaction: call outside one. */
+    public function clientId(): string
+    {
+        $id = (string) $this->configModel->getOption(self::CLIENT_ID);
+        if ($id !== '') {
+            return $id;
+        }
+        $b = random_bytes(16);
+        $b[6] = chr((ord($b[6]) & 0x0f) | 0x40);
+        $b[8] = chr((ord($b[8]) & 0x3f) | 0x80);
+        $this->configModel->save([self::CLIENT_ID => vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($b), 4))]);
+        // Re-read, so a concurrent first use settles on what was stored.
+        return (string) $this->configModel->getOption(self::CLIENT_ID);
+    }
+
+    private function positiveInt(string $key, int $default): int
+    {
+        $raw = (string) $this->configModel->getOption($key);
+        return ctype_digit($raw) && (int) $raw >= 1 ? (int) $raw : $default;
+    }
+}
