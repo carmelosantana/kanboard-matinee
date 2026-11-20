@@ -93,9 +93,15 @@ final class UrlGuard
         );
     }
 
-    /** Replace DNS resolution in tests; null restores the real resolver. */
+    /**
+     * Replace DNS resolution in tests; null restores the real resolver. Inert unless MATINEE_TESTING is defined, which
+     * only the tests that use the seam do: in production nothing can swap out DNS.
+     */
     public static function setResolverForTesting(?callable $resolver): void
     {
+        if (! defined('MATINEE_TESTING')) {
+            return;
+        }
         self::$resolver = $resolver;
     }
 

@@ -12,6 +12,12 @@ class UrlGuardTest extends TestCase
 {
     private const PUBLIC_IP = '93.184.216.34';
 
+    protected function setUp(): void
+    {
+        // Opens the DNS seam (UrlGuard::setResolverForTesting is inert without it).
+        defined('MATINEE_TESTING') || define('MATINEE_TESTING', true);
+    }
+
     protected function tearDown(): void
     {
         UrlGuard::setResolverForTesting(null);

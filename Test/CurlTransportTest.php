@@ -111,6 +111,8 @@ class CurlTransportTest extends TestCase
             self::prerequisiteMissing(self::$unavailable);
         }
         $this->resolverCalls = 0;
+        // Opens the DNS seam (UrlGuard::setResolverForTesting is inert without it).
+        defined('MATINEE_TESTING') || define('MATINEE_TESTING', true);
         UrlGuard::setResolverForTesting(function (string $host): array {
             $this->resolverCalls++;
             return $host === self::HOST ? ['127.0.0.1'] : [];
