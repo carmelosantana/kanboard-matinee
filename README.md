@@ -1,23 +1,23 @@
 # Matinee (Kanboard plugin)
 
-Connect a Plex server to Kanboard and share chosen libraries, or the whole server, with a project you manage.
-The Plex token is encrypted at rest and never shown to anyone, admins included.
+Connect a Plex server to Kanboard and keep it to yourself, or share the whole server with everyone on your
+Kanboard. The Plex token is encrypted at rest and never shown to anyone, admins included.
 
 **Status:** 0.1.0, in development (P1 foundation). Not released or listed in ModMenu yet.
 
 ## What it does today
 
-P1 is the foundation: servers and shares. Nothing plays yet.
+P1 is the foundation: servers and the sharing switch. Nothing plays yet.
 
 - **Connect a Plex server** with a name, its address and your Plex token. Matinee checks the server answers
   and the token works before it stores anything.
-- **Share it.** Pick the whole server or some of its libraries, then the audience: a project you manage, or
-  (admins only) everyone on this Kanboard.
-- **Manage it.** Verify the connection, change the name, address or token, unlink shares, remove the server.
-  Admins see every server and can switch any of them off.
+- **Share it, or don't** (see [Sharing](#sharing)). A server is private to you until you switch on **Shared
+  with everyone**.
+- **Manage it.** Verify the connection, change the name, address or token, remove the server. Admins see
+  every server and can switch any of them off.
 
-Browsing and playing media, watch-together rooms and project playlists come in later phases (see
-[Roadmap](#roadmap)). Until then a share records who will get access; no one can open media through it.
+Browsing and playing media, watch-together rooms and playlists come in later phases (see
+[Roadmap](#roadmap)). Until then the switch records who will get access; no one can open media through it.
 
 ## Requirements
 
@@ -42,7 +42,7 @@ SQLite, MySQL, Postgres and SQL Server.
 | Admin | **Back up the key file** (`DATA_DIR/matinee/secret.key`), or set `MATINEE_KEY`. Losing it means every owner pastes their token again. | one-time chore |
 | Owner | Find the server address. | about 5 min the first time |
 | Owner | Find the Plex token and paste it. | about 3 min |
-| Owner | Pick the libraries and the audience for each share. | 1 min per share |
+| Owner | Switch on **Shared with everyone**, if you want to. | one click |
 
 ## Connecting a server
 
@@ -65,6 +65,19 @@ probe your network. The reason goes to the Kanboard log (stage and host only).
 A plex.direct name resolves to the IP in its first label, whatever the hash. If that IP is private, the server
 counts as private and needs a private target like any other LAN address.
 
+## Sharing
+
+A server is either **private** (only you) or **shared with everyone**: every active user on this Kanboard.
+Sharing is always the whole server, every library whose type Matinee plays (movies, shows, music, photos),
+including libraries you add later. There are no per-project or per-library shares.
+
+Open the server under **Plex servers** and use **Share with everyone** or **Make private**. Only you, the
+owner, can flip it, and only while the server is enabled. An admin can't share or unshare someone else's
+server, but can disable it.
+
+Once playback ships, everyone you share with browses and plays through your Plex, and Plex shows all of that
+playback as you.
+
 ## Admin settings
 
 **Settings → Matinee** (admins only).
@@ -72,14 +85,15 @@ counts as private and needs a private target like any other LAN address.
 | Setting | Default | What it does |
 |---|---|---|
 | Who may connect a Plex server | Every user | Every active user, or administrators only |
-| Server connection attempts per user per 10 minutes | 10 | Connect, verify, saving an edit and opening the share form each count one |
+| Server connection attempts per user per 10 minutes | 10 | Connect, verify and saving an edit each count one |
 | Servers per user | 3 | How many servers one user may own |
 | Private targets | empty | Private addresses Matinee may reach (below) |
 | Allowed hosts | empty | When set, the only hosts Matinee may reach at all |
 
-Below the settings, the server list shows every server with its owner, host, status and share count, and a
-**Disable / Enable** switch. A disabled server hands out no token, so its shares stop working at once. An admin
-can open any server to verify it, unlink its shares or remove it. There is no edit and no token here.
+Below the settings, the server list shows every server with its owner, host, status and whether it is
+shared, and a **Disable / Enable** switch. A disabled server hands out no token, so no one can use it, the
+owner included. An admin can open any server to verify or remove it. There is no edit, no sharing switch and no
+token here.
 
 ### Private targets
 
@@ -143,9 +157,7 @@ includes key bytes or paths.
 
 | Table | Holds |
 |---|---|
-| `matinee_servers` | owner, name, base address, Plex machine id, sealed token, key id, enabled flag, status, timestamps |
-| `matinee_shares` | server, audience (`project` or `everyone`), project, whole-server flag, enabled flag, creator |
-| `matinee_share_sections` | the library section keys a share covers |
+| `matinee_servers` | owner, name, base address, Plex machine id, sealed token, key id, enabled flag, shared flag, status, timestamps |
 | `matinee_attempts` | one row per server connection attempt, for the rate limit; pruned after an hour |
 
 Settings live in core's `settings` table under `matinee_*` keys, including a per-install Plex client id.
@@ -155,7 +167,7 @@ time. The seal is bound to the server row, its owner, its address and its machin
 moved to another row or endpoint. Only the ciphertext and nonce are stored. No page, flash message, log line or
 error ever contains the token, and there is no "show token", not even for admins.
 
-Deleting a user removes their servers. Deleting a server, or a project, removes its shares.
+Deleting a user removes their servers.
 
 ## Security model
 
@@ -167,12 +179,12 @@ Deleting a user removes their servers. Deleting a server, or a project, removes 
   Matinee pins each server's Plex machine id and refuses a server that has changed.
 - **Failures** read the same to the user whatever went wrong (see [Connecting a server](#connecting-a-server)).
 - **Rate limits.** Server connection attempts per user per 10 minutes, and servers per user.
-- **Live checks.** Every ability is decided from the database on each request: the user and server owner
-  must be active, the server and share enabled, the project active, the role current. An everyone-share stops
-  working if its creator is no longer an admin. Nothing is cached across requests, so revoking access takes
+- **Live checks.** Every ability is decided from the database on each request: the user and the server's
+  owner must be active, the server enabled, and the server shared or yours; an admin must still be an admin.
+  Nothing is cached across requests, so making a server private, disabling it or deactivating a user takes
   effect on the next click.
-- **Authorization from the object.** Actions load the server or share and decide from that row, never from a
-  project id in the URL.
+- **Authorization from the object.** Actions load the server row and decide from it, never from the caller's
+  copy or anything else in the URL.
 - **Forms.** Every change is a POST with Kanboard's CSRF token. Anonymous users reach no Matinee page.
 - **Headers.** Matinee pages send `Referrer-Policy: same-origin`, refusals included.
 - **Plex sees one name per viewer.** Requests carry `X-Plex-Device-Name: Matinee (<username>)`. The username is
@@ -180,20 +192,17 @@ Deleting a user removes their servers. Deleting a server, or a project, removes 
 
 ## Roles
 
-What each role can do with a share. P1 builds the policy and the management pages; browsing, rooms and
-playlists arrive with P2–P5.
+What each role can do with a server. P1 builds the policy and the management pages; browsing, rooms and
+playlists arrive with P2–P5. Project roles play no part.
 
 | Who | Can |
 |---|---|
-| Project viewer | browse the project's shares (P2) |
-| Project member, or a custom project role | browse, and start or control rooms and edit playlists (P4, P5) |
-| Project manager | all of the above; share their own servers with the project; unlink any share of the project (no button yet, see [Known limits](#known-limits-and-accepted-risks)) |
-| Server owner | connect, edit, verify, share and remove their servers; browse their own shares whatever their project role |
-| App admin | see every server; verify, disable, unlink or remove any of them; share with everyone. No browse without a project role. |
-| Any active user, on an everyone-share | browse, rooms and playlists |
+| Server owner | connect, edit, verify and remove their servers; share or unshare them; browse, start or control rooms and edit playlists on them |
+| Everyone, when the server is shared | every active user: browse, start or control rooms and edit playlists |
+| App admin | see every server; verify, disable or remove any of them. No browse of a private server, and no sharing switch on someone else's. |
 
-A custom project role counts as a member, never as a manager. The server owner's own access to a project
-share is browse only; rooms and playlists need a member role like anyone else.
+Connecting a server follows **Who may connect a Plex server**. Nothing works on a disabled server or on a
+server whose owner is deactivated.
 
 ## Known limits and accepted risks
 
@@ -201,27 +210,21 @@ share is browse only; rooms and playlists need a member role like anyone else.
   `config.php`. Keep backups that hold both as safe as the key.
 - **Limits are checked without a lock.** A burst of concurrent requests can pass the attempt limit or the
   server cap by a little. An owner can't add the same host and port twice.
-- **On MySQL, two admins racing** can create a duplicate everyone-share for one server. That gives duplicate
-  rows, not extra access. The other databases block it with a unique index.
-- **A project share follows the project's membership.** Members added later get access too, and a project
-  manager can widen the audience by adding people. The share page says so; the owner can unlink at any time.
-- **A whole-server share** follows the libraries the owner adds later. That is the point of it.
+- **Sharing is all or nothing.** A shared server reaches every active user, including users added later, and
+  every library the owner adds later. Keep a server private if that is too wide.
 - **The owner's Plex sees all traffic as the owner.** Plex activity shows "Matinee (username)", so the owner
   can see who watched what.
 - **Transcoding load** will land on the owner's Plex (P3 adds stream caps).
-- **Project managers have no unlink button yet.** The policy lets them unlink a share of their project, but
-  the button sits on the server page, which only the owner and admins reach. Until P2's project Media page,
-  ask the owner or an admin.
 
 ## Roadmap
 
 | Phase | Adds |
 |---|---|
-| P1 (this) | servers, shares, policy, settings |
-| P2 | signed media refs, browse pages under a project's and the dashboard's Media, artwork |
+| P1 (this) | servers, the sharing switch, policy, settings |
+| P2 | signed media refs, browse pages, artwork |
 | P3 | playback: audio with ranged responses, video through Plex HLS transcode, stream caps |
 | P4 | watch-together rooms, synced to within about 2 s |
-| P5 | project playlists (Matinee's own; nothing is written to Plex) |
+| P5 | playlists per server (Matinee's own; nothing is written to Plex) |
 
 Matinee never writes to the owner's Plex account: no playlists, watch state or ratings.
 
@@ -231,8 +234,8 @@ Removing `plugins/Matinee/` stops the plugin but deletes none of its data. What 
 
 | Left behind | How to delete it |
 |---|---|
-| Tables `matinee_servers`, `matinee_shares`, `matinee_share_sections`, `matinee_attempts` | `DROP TABLE` each, in the order `matinee_share_sections`, `matinee_shares`, `matinee_servers`, `matinee_attempts` |
-| Matinee's row in core's `plugin_schema_versions` table | delete it too, or a reinstall skips creating the tables |
+| Tables `matinee_servers` and `matinee_attempts` | `DROP TABLE` each |
+| Matinee's row in core's `plugin_schema_versions` table (`plugin` = `matinee`) | delete it too, or a reinstall skips creating the tables |
 | Rows in core's `settings` table whose `option` starts with `matinee_` | delete those rows (the `option` column is a reserved word on MySQL, so quote it there) |
 | The key file `DATA_DIR/matinee/secret.key` | delete the `DATA_DIR/matinee/` directory |
 | `MATINEE_KEY`, if you set it | remove it from the environment or the php-fpm pool config |

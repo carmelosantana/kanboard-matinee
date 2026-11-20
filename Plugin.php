@@ -95,7 +95,7 @@ class Plugin extends Base
     }
 
     public function getPluginName(): string        { return 'Matinee'; }
-    public function getPluginDescription(): string { return t('Share Plex libraries with Kanboard projects.'); }
+    public function getPluginDescription(): string { return t('Share a Plex server with everyone on your Kanboard.'); }
     public function getPluginAuthor(): string      { return 'Carmelo Santana'; }
     public function getPluginVersion(): string     { return '0.1.0'; }
     public function getPluginHomepage(): string    { return 'https://github.com/carmelosantana/kanboard-matinee'; }

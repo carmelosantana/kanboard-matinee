@@ -1,6 +1,6 @@
 {
     "name": "Matinee",
-    "description": "Share Plex libraries with Kanboard projects.",
+    "description": "Share a Plex server with everyone on your Kanboard.",
     "version": "0.1.0",
     "author": "Carmelo Santana",
     "homepage": "https://github.com/carmelosantana/kanboard-matinee",
