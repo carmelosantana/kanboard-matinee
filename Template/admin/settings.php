@@ -10,7 +10,7 @@
         <?= $this->form->label(t('Who may connect a Plex server'), 'matinee_connect_policy') ?>
         <?= $this->form->select('matinee_connect_policy', $policies, $values) ?>
 
-        <?= $this->form->label(t('Connect and verify attempts per user per 10 minutes'), 'matinee_attempt_limit') ?>
+        <?= $this->form->label(t('Server connection attempts per user per 10 minutes'), 'matinee_attempt_limit') ?>
         <?= $this->form->number('matinee_attempt_limit', $values, [], ['min="1"', 'max="1000"', 'required']) ?>
 
         <?= $this->form->label(t('Servers per user'), 'matinee_max_servers') ?>
