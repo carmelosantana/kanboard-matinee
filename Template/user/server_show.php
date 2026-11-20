@@ -4,7 +4,7 @@
     <ul>
         <li><?= $this->url->icon('edit', t('Edit'), 'MatineeServerController', 'edit', ['plugin' => 'Matinee', 'server_id' => $server['id']]) ?></li>
         <?php if ($server['is_enabled']): ?>
-        <li><?= $this->url->icon('share-alt', t('Share'), 'MatineeServerController', 'shareCreate', ['plugin' => 'Matinee', 'server_id' => $server['id']]) ?></li>
+        <li><?= $this->url->icon('share-alt', t('Share'), 'MatineeServerController', 'shareCreate', ['plugin' => 'Matinee', 'server_id' => $server['id'], 'csrf_token' => $this->app->getToken()->getReusableCSRFToken()]) ?></li>
         <?php endif ?>
     </ul>
     <?php endif ?>

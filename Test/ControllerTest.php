@@ -283,13 +283,18 @@ class ControllerTest extends Base
         return $m[0][0];
     }
 
+    private function urlInput(string $html): string
+    {
+        $this->assertSame(1, preg_match_all('/<input\b[^>]*\bname="url"[^>]*>/', $html, $m));
+        return $m[0][0];
+    }
+
     public function testTheTokenFieldIsWriteOnly(): void
     {
         $add = $this->get(self::SRV, 'create')->body();
         $input = $this->tokenInput($add);
         $this->assertStringContainsString('type="password"', $input);
         $this->assertStringContainsString('value=""', $input);
-        $this->assertStringContainsString('autocomplete="off"', $input);
         $this->assertStringNotContainsString('placeholder', $input);
 
         $server = $this->server($this->owner);
@@ -301,6 +306,16 @@ class ControllerTest extends Base
         $this->assertStringNotContainsString(self::TOKEN, $edit);
         $this->assertStringContainsString('value="Living room"', $edit);
         $this->assertStringContainsString('value="'.self::BASE.'"', $edit);
+    }
+
+    /** Browsers and password managers fill neither field: the token is a new secret, the address is not a login. */
+    public function testTheTokenAndAddressFieldsAreNotAutofilled(): void
+    {
+        $server = $this->server($this->owner);
+        foreach (['create' => $this->get(self::SRV, 'create')->body(), 'edit' => $this->get(self::SRV, 'edit', ['server_id' => $server])->body()] as $page => $html) {
+            $this->assertStringContainsString('autocomplete="new-password"', $this->tokenInput($html), $page);
+            $this->assertStringContainsString('autocomplete="off"', $this->urlInput($html), $page);
+        }
     }
 
     public function testConnectAddsTheServerAndOpensIt(): void
@@ -429,6 +444,43 @@ class ControllerTest extends Base
         $this->assertStringNotContainsString('name="sections[]"', $body);
         $this->assertStringContainsString('name="whole_server"', $body);
         $this->assertStringNotContainsString(self::TOKEN, $body);
+    }
+
+    /**
+     * The share form makes a live Plex call and records an attempt, so a GET from another site (an <img>, say) must
+     * not reach it: it needs the reusable CSRF token that the Share link carries.
+     */
+    public function testTheShareFormNeedsTheLinksCsrfToken(): void
+    {
+        $server = $this->server($this->owner);
+        $this->role($this->project('Movie night'), $this->owner, Role::PROJECT_MANAGER);
+        $attempts = fn (): int => $this->container['db']->table('matinee_attempts')->count();
+        $before = [count($this->t->requests), $attempts()];
+        foreach ([[], ['csrf_token' => 'forged'], ['csrf_token' => $this->container['token']->getCSRFToken()]] as $extra) {
+            $this->forbidden(fn () => $this->call(self::SRV, 'shareCreate', ['server_id' => $server] + $extra, [], false, 'GET'), json_encode($extra));
+        }
+        $this->assertSame($before, [count($this->t->requests), $attempts()]);
+
+        // The Share link on the server page carries a token that opens the form.
+        $show = $this->get(self::SRV, 'show', ['server_id' => $server])->body();
+        $this->assertSame(1, preg_match('#href="([^"]*action=shareCreate[^"]*)"#', $show, $m), 'Share link');
+        parse_str((string) parse_url(html_entity_decode($m[1]), PHP_URL_QUERY), $query);
+        $this->assertNotEmpty($query['csrf_token'] ?? '');
+        $this->queueSections();
+        $body = $this->call(self::SRV, 'shareCreate', ['server_id' => $server, 'csrf_token' => $query['csrf_token']], [], false, 'GET')->body();
+        $this->assertStringContainsString('name="sections[]" value="1"', $body);
+        $this->assertSame($before[1] + 1, $attempts());
+    }
+
+    /** A failed share save sends the owner back to the form with a token that opens it. */
+    public function testAFailedShareSaveRedirectsWithAWorkingToken(): void
+    {
+        $server = $this->server($this->owner);
+        $response = $this->call(self::SRV, 'shareSave', ['server_id' => $server], ['audience' => 'nonsense', 'whole_server' => '1']);
+        $location = html_entity_decode($response->headers()['Location'] ?? '');
+        parse_str((string) parse_url($location, PHP_URL_QUERY), $query);
+        $this->assertSame('shareCreate', $query['action'] ?? null, $location);
+        $this->assertTrue($this->container['token']->validateReusableCSRFToken($query['csrf_token'] ?? ''));
     }
 
     /** The share form's live sections call counts toward the attempt limit: over it, no Plex request is made. */

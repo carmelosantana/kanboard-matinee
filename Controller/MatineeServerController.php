@@ -125,10 +125,12 @@ class MatineeServerController extends MatineeBaseController
     /**
      * The owner's share form: whole server or sections from a live sections() call (one attempt toward the limit),
      * and an audience of the projects they manage (direct or group, never a custom role), plus Everyone for an active
-     * app admin.
+     * app admin. It is a GET that calls Plex and records an attempt, so it needs the reusable CSRF token the Share link
+     * carries: a cross-site <img> cannot open it.
      */
     public function shareCreate(): void
     {
+        $this->checkReusableGETCSRFParam();
         $server = $this->ownedServer();
         $me = $this->actorId();
         try {
@@ -164,11 +166,11 @@ class MatineeServerController extends MatineeBaseController
             throw new AccessForbiddenException();
         } catch (MatineeShareException) {
             $this->flash->failure(t('That share could not be saved.'));
-            $this->response->redirect($this->helper->url->to('MatineeServerController', 'shareCreate', ['plugin' => 'Matinee', 'server_id' => $serverId]));
+            $this->response->redirect($this->shareFormUrl($serverId));
             return;
         } catch (MatineeConnectException $e) {
             $this->flash->failure(self::connectMessage($e));
-            $this->response->redirect($this->helper->url->to('MatineeServerController', 'shareCreate', ['plugin' => 'Matinee', 'server_id' => $serverId]));
+            $this->response->redirect($this->shareFormUrl($serverId));
             return;
         }
         $this->flash->success(t('Share saved.'));
@@ -272,6 +274,12 @@ class MatineeServerController extends MatineeBaseController
         $this->response->html($this->helper->layout->user($template, $params + [
             'user' => $this->userModel->getById($this->actorId()),
         ]));
+    }
+
+    /** The share form's address, with the reusable CSRF token shareCreate checks. */
+    private function shareFormUrl(int $serverId): string
+    {
+        return $this->helper->url->to('MatineeServerController', 'shareCreate', ['plugin' => 'Matinee', 'server_id' => $serverId, 'csrf_token' => $this->token->getReusableCSRFToken()]);
     }
 
     private function redirectToServer(int $serverId): void

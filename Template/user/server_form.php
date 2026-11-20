@@ -12,14 +12,14 @@
     <?= $this->form->text('name', $values, [], ['required', 'maxlength="100"']) ?>
 
     <?= $this->form->label(t('Server address'), 'url') ?>
-    <?= $this->form->text('url', $values, [], ['required', 'placeholder="https://plex.example.com:32400"']) ?>
+    <?= $this->form->text('url', $values, [], ['required', 'autocomplete="off"', 'placeholder="https://plex.example.com:32400"']) ?>
 
     <?= $this->form->label(t('Plex token'), 'token') ?>
     <?php /* Write-only: the stored token is never sent back, not even masked. */ ?>
     <?php if ($server === null): ?>
-        <input type="password" name="token" id="form-token" value="" autocomplete="off" required>
+        <input type="password" name="token" id="form-token" value="" autocomplete="new-password" required>
     <?php else: ?>
-        <input type="password" name="token" id="form-token" value="" autocomplete="off" placeholder="<?= t('stored — leave blank to keep') ?>">
+        <input type="password" name="token" id="form-token" value="" autocomplete="new-password" placeholder="<?= t('stored — leave blank to keep') ?>">
         <p class="form-help"><?= t('Changing the address needs the token again.') ?></p>
     <?php endif ?>
     <p class="form-help"><?= t('The token is stored encrypted and is never shown again.') ?></p>

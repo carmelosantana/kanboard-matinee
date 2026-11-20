@@ -177,9 +177,10 @@ trait MatineeControllerHarness
         return $response;
     }
 
+    /** A GET as a link on a Matinee page makes it: with the session's reusable CSRF token, as the share link has. */
     private function get(string $controller, string $action, array $get = []): MatineeTestResponse
     {
-        return $this->call($controller, $action, $get, [], false, 'GET');
+        return $this->call($controller, $action, $get + ['csrf_token' => $this->container['token']->getReusableCSRFToken()], [], false, 'GET');
     }
 
     /** The flash messages now in the session (left in place). */
