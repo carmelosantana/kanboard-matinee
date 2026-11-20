@@ -16,6 +16,7 @@ class RoutesTest extends Base
         'matinee/servers/7/edit' => ['MatineeServerController', 'edit', ['server_id' => '7']],
         'matinee/servers/7/verify' => ['MatineeServerController', 'verify', ['server_id' => '7']],
         'matinee/servers/7/remove' => ['MatineeServerController', 'remove', ['server_id' => '7']],
+        'matinee/servers/7/share' => ['MatineeServerController', 'share', ['server_id' => '7']],
         'matinee/admin' => ['MatineeAdminController', 'show', []],
         'matinee/admin/save' => ['MatineeAdminController', 'save', []],
         'matinee/admin/servers/7/toggle' => ['MatineeAdminController', 'toggle', ['server_id' => '7']],

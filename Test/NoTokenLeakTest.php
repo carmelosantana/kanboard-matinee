@@ -173,9 +173,19 @@ class NoTokenLeakTest extends Base
         $this->assertNoTokenAnywhere();
     }
 
-    public function testRemoveErrorPaths(): void
+    public function testShareAndRemovePaths(): void
     {
+        $share = fn (string $on, int $server = 0) => fn () => $this->call(self::SRV, 'share', ['server_id' => $server ?: $this->server], ['shared' => $on]);
+        $this->capture($share('1'));
+        $this->capture(fn () => $this->get(self::SRV, 'show', ['server_id' => $this->server]));
+        $this->capture($share('0'));
+        $this->capture($share(self::TOKEN));
+        $this->capture($share('1', $this->server + 9));
+        $this->loginAs(self::ADMIN);
+        $this->capture($share('1'));
+        $this->capture(fn () => $this->get(self::ADM, 'show'));
         $this->loginAs($this->outsider);
+        $this->capture($share('1'));
         $this->capture(fn () => $this->call(self::SRV, 'remove', ['server_id' => $this->server]));
         $this->loginAs($this->owner);
         $this->capture(fn () => $this->call(self::SRV, 'remove', ['server_id' => $this->server]));

@@ -69,6 +69,7 @@ class ControllerTest extends Base
             [self::SRV, 'save', [], ['server_id' => $server, 'name' => 'Renamed', 'url' => self::BASE, 'token' => '']],
             [self::SRV, 'verify', ['server_id' => $server], []],
             [self::SRV, 'remove', ['server_id' => $server], []],
+            [self::SRV, 'share', ['server_id' => $server], ['shared' => '1']],
         ];
         foreach ($posts as [$controller, $action, $get, $post]) {
             $this->forbidden(fn () => $this->call($controller, $action, $get, $post, false), $action);
@@ -110,6 +111,7 @@ class ControllerTest extends Base
             ['save', [], ['name' => 'Den', 'url' => 'https://den.example.test:32400', 'token' => self::TOKEN]],
             ['save', [], ['server_id' => $server, 'name' => 'Renamed', 'url' => self::BASE, 'token' => '']],
             ['verify', ['server_id' => $server], []],
+            ['share', ['server_id' => $server], ['shared' => '1']],
             ['remove', ['server_id' => $server], []],
         ] as [$action, $get, $post]) {
             $this->forbidden(fn () => $getWithToken(self::SRV, $action, $get, $post), $action);
@@ -163,7 +165,7 @@ class ControllerTest extends Base
     {
         $map = $this->container['applicationAccessMap'];
         $auth = $this->container['applicationAuthorization'];
-        $this->assertSame(['create', 'edit', 'index', 'remove', 'save', 'show', 'verify'], self::actions(MatineeServerController::class));
+        $this->assertSame(['create', 'edit', 'index', 'remove', 'save', 'share', 'show', 'verify'], self::actions(MatineeServerController::class));
         $this->assertSame(['save', 'show', 'toggle'], self::actions(MatineeAdminController::class));
 
         foreach (self::actions(MatineeServerController::class) as $action) {
@@ -223,12 +225,15 @@ class ControllerTest extends Base
         $this->forbidden(fn () => $this->get(self::SRV, 'edit', $id), 'edit');
         $this->forbidden(fn () => $this->call(self::SRV, 'verify', $id), 'verify');
         $this->forbidden(fn () => $this->call(self::SRV, 'remove', $id), 'remove');
+        $this->forbidden(fn () => $this->call(self::SRV, 'share', $id, ['shared' => '1']), 'share');
+        $this->forbidden(fn () => $this->call(self::SRV, 'share', ['server_id' => $server + 100], ['shared' => '1']), 'share missing');
         $this->forbidden(fn () => $this->call(self::SRV, 'save', [], ['server_id' => $server, 'name' => 'Mine now', 'url' => self::BASE, 'token' => '']), 'save');
         // An id that does not exist reads the same.
         $this->forbidden(fn () => $this->get(self::SRV, 'show', ['server_id' => $server + 100]), 'missing');
 
         $this->assertSame('Living room', $this->container['matineeServerModel']->get($server)['name']);
         $this->assertSame(1, $this->serverCount());
+        $this->assertSame(0, (int) $this->container['matineeServerModel']->get($server)['is_shared']);
         // The outsider's list shows only their own servers.
         $this->assertStringNotContainsString('Living room', $this->get(self::SRV, 'index')->body());
     }
@@ -239,6 +244,10 @@ class ControllerTest extends Base
         $this->loginAs(self::ADMIN);
         $this->assertStringContainsString('Living room', $this->get(self::SRV, 'show', ['server_id' => $server])->body());
         $this->forbidden(fn () => $this->get(self::SRV, 'edit', ['server_id' => $server]), 'edit');
+        // An admin can't flip someone's sharing, and the page offers no switch.
+        $this->assertSame('', $this->shareForm($this->get(self::SRV, 'show', ['server_id' => $server])->body()));
+        $this->forbidden(fn () => $this->call(self::SRV, 'share', ['server_id' => $server], ['shared' => '1']), 'share');
+        $this->assertSame(0, (int) $this->container['matineeServerModel']->get($server)['is_shared']);
         $this->call(self::SRV, 'remove', ['server_id' => $server]);
         $this->assertSame(0, $this->serverCount());
     }
@@ -365,6 +374,57 @@ class ControllerTest extends Base
         $this->assertSame('reconnect', $this->container['matineeServerModel']->get($server)['status']);
     }
 
+    // ── sharing ──────────────────────────────────────────────────────────────
+
+    private function isShared(int $server): int
+    {
+        return (int) $this->container['matineeServerModel']->get($server)['is_shared'];
+    }
+
+    /** The share form on $html, or '' when the page has none. */
+    private function shareForm(string $html): string
+    {
+        return preg_match('#<form[^>]*action="[^"]*controller=MatineeServerController&amp;action=share&amp;[^"]*"[^>]*>.*?</form>#s', $html, $m) === 1 ? $m[0] : '';
+    }
+
+    public function testTheOwnerSharesTheWholeServerWithEveryoneAndMakesItPrivateAgain(): void
+    {
+        $server = $this->server($this->owner);
+        $show = $this->get(self::SRV, 'show', ['server_id' => $server])->body();
+        $form = $this->shareForm($show);
+        $this->assertStringContainsString('method="post"', $form);
+        $this->assertStringContainsString('name="csrf_token"', $form);
+        $this->assertStringContainsString('name="shared" value="1"', $form);
+        $this->assertStringContainsString('Shared with everyone', $show);
+        $this->assertStringContainsString('every Kanboard user browse and play this whole server', $show);
+        $this->assertStringContainsString('Plex will show all of their playback as you', $show);
+
+        $response = $this->call(self::SRV, 'share', ['server_id' => $server], ['shared' => '1']);
+        $this->assertSame(1, $this->isShared($server));
+        $this->assertSame('Server shared with everyone.', $this->flash('success'));
+        $this->assertStringContainsString('server_id='.$server, $response->headers()['Location']);
+        // The wanted state is in the body: a repeated submit changes nothing.
+        $this->call(self::SRV, 'share', ['server_id' => $server], ['shared' => '1']);
+        $this->assertSame(1, $this->isShared($server));
+        $this->assertStringContainsString('name="shared" value="0"', $this->shareForm($this->get(self::SRV, 'show', ['server_id' => $server])->body()));
+
+        session_set('flash', []);
+        foreach (['0', '', 'yes'] as $value) {
+            $this->call(self::SRV, 'share', ['server_id' => $server], ['shared' => $value]);
+            $this->assertSame(0, $this->isShared($server), $value);
+        }
+        $this->assertSame('Server is private.', $this->flash('success'));
+    }
+
+    public function testADisabledServerCannotBeShared(): void
+    {
+        $server = $this->server($this->owner);
+        $this->container['matineeServerModel']->setEnabled($server, false, self::ADMIN);
+        $this->assertSame('', $this->shareForm($this->get(self::SRV, 'show', ['server_id' => $server])->body()));
+        $this->forbidden(fn () => $this->call(self::SRV, 'share', ['server_id' => $server], ['shared' => '1']));
+        $this->assertSame(0, $this->isShared($server));
+    }
+
     /** Every string a user or a Plex server controls is escaped on every page that shows it. */
     public function testUserControlledStringsAreEscaped(): void
     {
@@ -372,6 +432,9 @@ class ControllerTest extends Base
         $this->loginAs($owner);
         $this->queueOk();
         $server = $this->container['matineeServerModel']->connect($owner, '<b>x</b>"\'', self::BASE, self::TOKEN);
+        // Shared, so the pages render the toggle's other state and the admin list's Yes.
+        $this->call(self::SRV, 'share', ['server_id' => $server], ['shared' => '1']);
+        $this->assertSame(1, (int) $this->container['matineeServerModel']->get($server)['is_shared']);
 
         $pages = [
             'index' => $this->get(self::SRV, 'index')->body(),
@@ -555,6 +618,10 @@ class ControllerTest extends Base
         $this->assertStringContainsString('plex.example.test', $page);
         $this->assertStringNotContainsString(self::BASE, $page);
         $this->assertStringNotContainsString(self::TOKEN, $page);
+        $this->assertStringContainsString('<th>Shared</th>', $page);
+        $this->assertMatchesRegularExpression('#<td>\s*No\s*</td>#', $page);
+        $this->container['matineeServerModel']->setShared($server, $this->owner, true);
+        $this->assertMatchesRegularExpression('#<td>\s*Yes\s*</td>#', $this->get(self::ADM, 'show')->body());
 
         $this->call(self::ADM, 'toggle', ['server_id' => $server], ['enabled' => '0']);
         $this->assertSame(0, (int) $this->container['matineeServerModel']->get($server)['is_enabled']);

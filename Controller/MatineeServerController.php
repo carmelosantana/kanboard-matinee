@@ -114,6 +114,24 @@ class MatineeServerController extends MatineeBaseController
         $this->response->redirect($this->helper->url->to('MatineeServerController', 'index', ['plugin' => 'Matinee']));
     }
 
+    /**
+     * The owner's "Shared with everyone" switch (MatineePolicy::canToggleShared, in the model). `shared` is the state
+     * wanted (1 or anything else for private), so a repeated submit changes nothing.
+     */
+    public function share(): void
+    {
+        $this->checkPost();
+        $serverId = $this->request->getIntegerParam('server_id');
+        $on = $this->field('shared') === '1';
+        try {
+            $this->servers()->setShared($serverId, $this->actorId(), $on);
+        } catch (MatineeForbiddenException) {
+            throw new AccessForbiddenException();
+        }
+        $this->flash->success($on ? t('Server shared with everyone.') : t('Server is private.'));
+        $this->redirectToServer($serverId);
+    }
+
     // ── internals ────────────────────────────────────────────────────────────
 
     /** The server in the URL, if the signed-in user owns it; anything else is 403 (missing reads the same). */
@@ -135,6 +153,7 @@ class MatineeServerController extends MatineeBaseController
             'host' => self::host($server),
             'status' => $this->statusLabel($server),
             'is_enabled' => (int) $server['is_enabled'] === 1,
+            'is_shared' => (int) $server['is_shared'] === 1,
             'last_checked_at' => (int) $server['last_checked_at'],
         ];
     }

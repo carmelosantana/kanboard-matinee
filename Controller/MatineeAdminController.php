@@ -11,7 +11,7 @@ use Kanboard\Plugin\Matinee\Model\Settings;
 
 /**
  * Settings → Matinee (spec §4 admin list, §11 S1): who may connect, private targets, allowed hosts and the two limits,
- * and every server with its owner, host and status behind an enable/disable switch. No token, no edit.
+ * and every server with its owner, host, status and shared flag behind an enable/disable switch. No token, no edit.
  * ACL is APP_ADMIN; each action checks again.
  */
 class MatineeAdminController extends MatineeBaseController
@@ -35,6 +35,7 @@ class MatineeAdminController extends MatineeBaseController
                 'host' => self::host($server),
                 'status' => $this->statusLabel($server),
                 'is_enabled' => (int) $server['is_enabled'] === 1,
+                'is_shared' => (int) $server['is_shared'] === 1,
             ];
         }
 

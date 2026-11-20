@@ -60,7 +60,7 @@ class Plugin extends Base
 
     /** [controller, actions, lowest application role]: every Matinee action. */
     public const ACL = [
-        ['MatineeServerController', ['index', 'create', 'edit', 'save', 'show', 'verify', 'remove'], Role::APP_USER],
+        ['MatineeServerController', ['index', 'create', 'edit', 'save', 'show', 'verify', 'remove', 'share'], Role::APP_USER],
         ['MatineeAdminController', ['show', 'save', 'toggle'], Role::APP_ADMIN],
     ];
 
@@ -73,6 +73,7 @@ class Plugin extends Base
         ['matinee/servers/:server_id/edit', 'MatineeServerController', 'edit'],
         ['matinee/servers/:server_id/verify', 'MatineeServerController', 'verify'],
         ['matinee/servers/:server_id/remove', 'MatineeServerController', 'remove'],
+        ['matinee/servers/:server_id/share', 'MatineeServerController', 'share'],
         ['matinee/admin', 'MatineeAdminController', 'show'],
         ['matinee/admin/save', 'MatineeAdminController', 'save'],
         ['matinee/admin/servers/:server_id/toggle', 'MatineeAdminController', 'toggle'],
