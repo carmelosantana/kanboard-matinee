@@ -49,5 +49,7 @@ audiences and project-role abilities were removed; schema v1 was edited in place
 
 ### Tests
 
-- `./testing/run-plugin-tests.sh Matinee`: OK (668 tests, 5530 assertions).
+- `./testing/run-plugin-tests.sh Matinee`: OK (584 tests, 4857 assertions) after the light scope.
+- `./testing/run-realdb-tests.sh Matinee mariadb` and `postgres`: 584 tests, 4856 assertions, 1 skipped (the
+  SQLite-only foreign-key pragma check).
 - `./testing/run-plugin-tests.sh --all`: all 29 plugin suites pass ("All suites passed.").
