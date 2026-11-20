@@ -3,7 +3,6 @@
 namespace Kanboard\Plugin\Matinee\Model;
 
 use Kanboard\Core\Base;
-use Kanboard\Core\Security\Role;
 
 /**
  * Shares and their sections (spec §5; §11 S5, S6, S13). Every ability is SharePolicy's: create asks canEditShare of
@@ -61,9 +60,10 @@ final class ShareModel extends Base
             $id = (int) $this->db->getLastId();
             $this->writeSections($id, $sections);
             $this->db->closeTransaction();
-        } catch (\Throwable) {
-            // A concurrent create that won the unique key lands here too.
+        } catch (\Throwable $e) {
+            // A concurrent create that won the unique key lands here too. The message may hold SQL: log the class only.
             $this->db->cancelTransaction();
+            $this->logger->info('Matinee: share create failed (server '.$serverId.', '.$e::class.')');
             throw new MatineeShareException();
         }
         return $id;
@@ -99,16 +99,22 @@ final class ShareModel extends Base
             throw new MatineeForbiddenException();
         }
         $this->db->startTransaction();
-        $this->db->table(self::SECTIONS_TABLE)->eq('share_id', $shareId)->remove();
-        $this->db->table(self::TABLE)->eq('id', $shareId)->remove();
-        $this->db->closeTransaction();
+        try {
+            $this->db->table(self::SECTIONS_TABLE)->eq('share_id', $shareId)->remove();
+            if (! $this->db->table(self::TABLE)->eq('id', $shareId)->remove()) {
+                throw new \RuntimeException('share row not removed');
+            }
+            $this->db->closeTransaction();
+        } catch (\Throwable) {
+            $this->db->cancelTransaction();
+            throw new MatineeShareException();
+        }
     }
 
     /** Active app admin only: the share kill switch. */
     public function setEnabled(int $shareId, bool $on, int $actorId): void
     {
-        $actor = $this->db->table('users')->columns('role', 'is_active')->eq('id', $actorId)->findOne();
-        if (! $actor || (int) $actor['is_active'] !== 1 || $actor['role'] !== Role::APP_ADMIN || $this->get($shareId) === null) {
+        if (! $this->policy()->canToggleShare($actorId) || $this->get($shareId) === null) {
             throw new MatineeForbiddenException();
         }
         $this->db->table(self::TABLE)->eq('id', $shareId)->update(['is_enabled' => $on ? 1 : 0]);
@@ -122,13 +128,17 @@ final class ShareModel extends Base
     }
 
     /**
-     * Every share of a server, for its owner's and the admin's pages. The caller checks
-     * SharePolicy::canManageServer first.
+     * Every share of a server, for its owner's and the admin's pages (SharePolicy::canManageServer). A server id that
+     * does not exist is refused the same way.
      *
      * @return list<array<string, mixed>>
      */
-    public function listForServer(int $serverId): array
+    public function listForServer(int $serverId, int $actorId): array
     {
+        $server = $this->serverModel()->get($serverId);
+        if ($server === null || ! $this->policy()->canManageServer($actorId, $server)) {
+            throw new MatineeForbiddenException();
+        }
         return $this->withSections($this->db->table(self::TABLE)->columns(...self::COLUMNS)->eq('server_id', $serverId)->asc('id')->findAll());
     }
 

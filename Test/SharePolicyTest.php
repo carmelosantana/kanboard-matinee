@@ -120,9 +120,16 @@ class SharePolicyTest extends TestCase
             'custom role is a member, never a manager' => ['project', self::CUSTOM, null, 'BRP--'],
             'non-member gets nothing' => ['project', self::OUTSIDER, null, '-----'],
             'unknown user gets nothing' => ['project', self::GHOST, null, '-----'],
-            // Decision: the owner always uses live shares of their own server, member of the project or not. Editing
-            // scope re-checks the manager rule (S6), so an owner who is not the project's manager cannot edit.
-            'server owner, not a project member' => ['project', self::OWNER, null, 'BRPU-'],
+            // Ruling: the owner browses live shares of their own server, member of the project or not, but rooms and
+            // playlists need a current member+ role like anyone else. Editing scope re-checks the manager rule (S6).
+            // Kills "restore the owner's full bypass".
+            'server owner, not a project member' => ['project', self::OWNER, null, 'B--U-'],
+            'server owner as a project viewer' => ['project', self::OWNER, static function (array &$w) {
+                $w['roles'][self::PROJECT][self::OWNER] = Role::PROJECT_VIEWER;
+            }, 'B--U-'],
+            'server owner as a project member' => ['project', self::OWNER, static function (array &$w) {
+                $w['roles'][self::PROJECT][self::OWNER] = Role::PROJECT_MEMBER;
+            }, 'BRPU-'],
             // §5: an admin with no project role gets no browse; they still unlink. Kills "admin browses".
             'app admin without a project role only unlinks' => ['project', self::ADMIN, null, '---U-'],
             'app admin with a member role' => ['project', self::ADMIN_MEMBER, null, 'BRPU-'],
@@ -283,6 +290,35 @@ class SharePolicyTest extends TestCase
             'another admin-owned server\'s owner' => [self::ADMIN_OWNER, self::ADMIN_OWNER, false],
             'disabled owner' => [self::OWNER, self::OWNER, false],
             'disabled admin' => [self::ADMIN, self::ADMIN, false],
+        ];
+    }
+
+    /** @dataProvider toggleTable */
+    public function testCanToggleShare(int|array $user, ?\Closure $tweak, bool $expected): void
+    {
+        $w = self::world();
+        $w['users'][10] = ['role' => Role::APP_MANAGER, 'is_active' => 1];
+        if ($tweak !== null) {
+            $tweak($w);
+        }
+        $this->assertSame($expected, self::policy($w)->canToggleShare($user));
+    }
+
+    public function toggleTable(): array
+    {
+        return [
+            'admin' => [self::ADMIN, null, true],
+            'admin as a row' => [['id' => self::ADMIN, 'role' => Role::APP_ADMIN, 'is_active' => 1], null, true],
+            'app manager' => [10, null, false],
+            'app user' => [self::OUTSIDER, null, false],
+            'server owner' => [self::OWNER, null, false],
+            'unknown user' => [self::GHOST, null, false],
+            'inactive admin' => [self::ADMIN, static function (array &$w) {
+                $w['users'][self::ADMIN]['is_active'] = 0;
+            }, false],
+            // A stale session row does not count: the live row decides.
+            'stale admin row of a demoted user' => [['id' => self::OUTSIDER, 'role' => Role::APP_ADMIN, 'is_active' => 1], null, false],
+            'row without an id' => [['role' => Role::APP_ADMIN, 'is_active' => 1], null, false],
         ];
     }
 

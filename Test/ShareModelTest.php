@@ -400,6 +400,38 @@ class ShareModelTest extends Base
         $this->assertSame(2, $this->shareRows());
     }
 
+    /** A failed write is logged with the server id and the exception class, never its message (which may hold SQL). */
+    public function testAFailedCreateLogsTheServerAndExceptionClassOnly(): void
+    {
+        $owner = $this->user('owner');
+        $project = $this->project('Film club');
+        $this->role($project, $owner, Role::PROJECT_MANAGER);
+        $server = $this->server($owner);
+        $log = new class () extends \Psr\Log\AbstractLogger {
+            /** @var list<array{string, string}> */
+            public array $records = [];
+
+            public function log($level, $message, array $context = []): void
+            {
+                $this->records[] = [(string) $level, (string) $message];
+            }
+        };
+        $this->container['logger'] = $log;
+        $this->db()->getConnection()->exec('DROP TABLE '.ShareModel::SECTIONS_TABLE);
+
+        $this->queueLive();
+        $this->expectInvalid(fn () => $this->shares()->create($owner, $server, 'project', $project, false, ['1']));
+        $this->assertFalse($this->db()->getConnection()->inTransaction());
+        $this->assertSame(0, $this->shareRows());
+        $this->assertCount(1, $log->records);
+        [$level, $message] = $log->records[0];
+        $this->assertContains($level, ['info', 'error']);
+        $this->assertStringContainsString('server '.$server, $message);
+        $this->assertStringContainsString(\PicoDb\SQLException::class, $message);
+        $this->assertStringNotContainsString('SQL', str_replace(\PicoDb\SQLException::class, '', $message));
+        $this->assertStringNotContainsString(ShareModel::SECTIONS_TABLE, $message);
+    }
+
     public function testASecondShareWithTheSameProjectIsRefused(): void
     {
         $owner = $this->user('owner');
@@ -504,6 +536,56 @@ class ShareModelTest extends Base
         $this->assertSame(0, $this->shareRows());
     }
 
+    /**
+     * A failure partway through unlink (the sections are gone, the share row's DELETE fails: here a test table still
+     * references it) rolls everything back and says nothing about the DB.
+     */
+    public function testAFailedUnlinkRollsBackAndLeavesNoTransactionOpen(): void
+    {
+        $owner = $this->user('owner');
+        $project = $this->project('Film club');
+        $this->role($project, $owner, Role::PROJECT_MANAGER);
+        $id = $this->projectShare($owner, $this->server($owner), $project, ['1', '2']);
+        $pdo = $this->db()->getConnection();
+        $pdo->exec('CREATE TABLE matinee_test_pin (share_id INT NOT NULL, FOREIGN KEY (share_id) REFERENCES '
+            .ShareModel::TABLE.'(id))'.(DB_DRIVER === 'mysql' ? ' ENGINE=InnoDB' : ''));
+        $this->assertTrue($this->db()->table('matinee_test_pin')->insert(['share_id' => $id]));
+
+        $this->expectInvalid(fn () => $this->shares()->unlink($id, $owner));
+        $this->assertFalse($pdo->inTransaction());
+        $this->assertSame(1, $this->shareRows());
+        $this->assertSame(['1', '2'], $this->shares()->get($id)['sections']);
+    }
+
+    /**
+     * The share row survives its DELETE without an error (here a rule or trigger swallows it): unlink must not commit
+     * the section removal it already made. MySQL has no way to swallow a DELETE silently, so it runs the error path
+     * above only.
+     */
+    public function testAnUnlinkThatRemovesNoShareRowRollsBack(): void
+    {
+        if (DB_DRIVER === 'mysql') {
+            $this->markTestSkipped('MySQL cannot ignore a DELETE without raising an error');
+        }
+        $owner = $this->user('owner');
+        $project = $this->project('Film club');
+        $this->role($project, $owner, Role::PROJECT_MANAGER);
+        $id = $this->projectShare($owner, $this->server($owner), $project, ['1', '2']);
+        $this->db()->getConnection()->exec(DB_DRIVER === 'postgres'
+            ? 'CREATE RULE matinee_keep_share AS ON DELETE TO '.ShareModel::TABLE.' DO INSTEAD NOTHING'
+            : 'CREATE TRIGGER matinee_keep_share BEFORE DELETE ON '.ShareModel::TABLE.' BEGIN SELECT RAISE(IGNORE); END');
+
+        $this->expectInvalid(fn () => $this->shares()->unlink($id, $owner));
+        $this->assertFalse($this->db()->getConnection()->inTransaction());
+        $this->assertSame(1, $this->shareRows());
+        $this->assertSame(['1', '2'], $this->shares()->get($id)['sections']);
+        // The connection is usable: a later transaction commits.
+        $this->db()->startTransaction();
+        $this->assertTrue($this->db()->table(ShareModel::SECTIONS_TABLE)->insert(['share_id' => $id, 'section_key' => '9']));
+        $this->db()->closeTransaction();
+        $this->assertSame(['1', '2', '9'], $this->shares()->get($id)['sections']);
+    }
+
     public function testOnlyAnActiveAdminEnablesOrDisablesAShare(): void
     {
         $owner = $this->user('owner');
@@ -512,7 +594,9 @@ class ShareModelTest extends Base
         $this->role($project, $owner, Role::PROJECT_MANAGER);
         $id = $this->shares()->create($owner, $this->server($owner), 'project', $project, true, []);
 
+        $appManager = $this->user('appmanager', Role::APP_MANAGER);
         $this->expectForbidden(fn () => $this->shares()->setEnabled($id, false, $owner));
+        $this->expectForbidden(fn () => $this->shares()->setEnabled($id, false, $appManager));
         $this->shares()->setEnabled($id, false, $admin);
         $this->assertSame(0, (int) $this->shares()->get($id)['is_enabled']);
         $this->shares()->setEnabled($id, true, $admin);
@@ -534,9 +618,39 @@ class ShareModelTest extends Base
         $b = $this->shares()->create($admin, $server, 'everyone', null, true, []);
         $this->shares()->create($admin, $this->server($admin), 'everyone', null, true, []);
 
-        $list = $this->shares()->listForServer($server);
+        $list = $this->shares()->listForServer($server, $admin);
         $this->assertSame([$a, $b], $this->ids($list));
         $this->assertSame(['1'], $list[0]['sections']);
+    }
+
+    /** Only the server's owner or an active app admin lists its shares; a missing id reads the same as a refusal. */
+    public function testListForServerChecksTheActor(): void
+    {
+        $owner = $this->user('owner');
+        $outsider = $this->user('outsider');
+        $otherOwner = $this->user('otherowner');
+        $admin = $this->user('sysadmin', Role::APP_ADMIN);
+        $manager = $this->user('appmanager', Role::APP_MANAGER);
+        $project = $this->project('Film club');
+        $this->role($project, $owner, Role::PROJECT_MANAGER);
+        $this->role($project, $outsider, Role::PROJECT_MANAGER);
+        $server = $this->server($owner);
+        $this->server($otherOwner);
+        $id = $this->shares()->create($owner, $server, 'project', $project, true, []);
+
+        $this->assertSame([$id], $this->ids($this->shares()->listForServer($server, $owner)));
+        $this->assertSame([$id], $this->ids($this->shares()->listForServer($server, $admin)));
+        // IDOR: the project's other manager, another server's owner, an app manager, or a server id that is not there.
+        $this->expectForbidden(fn () => $this->shares()->listForServer($server, $outsider));
+        $this->expectForbidden(fn () => $this->shares()->listForServer($server, $otherOwner));
+        $this->expectForbidden(fn () => $this->shares()->listForServer($server, $manager));
+        $this->expectForbidden(fn () => $this->shares()->listForServer(9999, $admin));
+        $this->expectForbidden(fn () => $this->shares()->listForServer(9999, $owner));
+        // S6: an inactive owner or admin is refused.
+        $this->deactivate($admin);
+        $this->expectForbidden(fn () => $this->shares()->listForServer($server, $admin));
+        $this->deactivate($owner);
+        $this->expectForbidden(fn () => $this->shares()->listForServer($server, $owner));
     }
 
     public function testListVisibleExcludesEverythingItShould(): void

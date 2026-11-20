@@ -20,11 +20,14 @@ use Pimple\Container;
  * - project share: the project role from getUserRole (direct, else group). Viewer browses; member and any custom
  *   role also control rooms and edit playlists; a custom role is never a manager (S6).
  * - everyone-share: any active user browses, controls rooms and edits playlists.
- * - the server owner always uses live shares of their own server, in the audience or not: they own the media.
+ * - the server owner always browses live shares of their own server, in the audience or not: they own the media. That
+ *   is all the ownership gives: rooms and playlists on a project share need a current member+ role like anyone else's,
+ *   and on an everyone-share the owner has them as any active user does.
  * - an app admin is no one special for use: no project role, no browse.
  * Unlinking only removes access, so it does not need a live share: the server owner, an app admin, or a project
  * manager of the share's active project may unlink. Editing scope is the owner's, on an enabled server, and re-checks
- * the creation rule (S6): manager of the active project, or an active app admin for an everyone-share.
+ * the creation rule (S6): manager of the active project, or an active app admin for an everyone-share. The share kill
+ * switch (enable, disable) is an active app admin's alone.
  */
 final class SharePolicy
 {
@@ -74,6 +77,15 @@ final class SharePolicy
     {
         return $this->activeUser($userId) !== null
             && ((int) $server['owner_user_id'] === $userId || $this->isActiveAdmin($userId));
+    }
+
+    /**
+     * The share kill switch: an active app admin. A users row counts only by its id; the live row decides, so a stale
+     * session row of a demoted or disabled user does not.
+     */
+    public function canToggleShare(array|int $user): bool
+    {
+        return $this->isActiveAdmin(is_array($user) ? (int) ($user['id'] ?? 0) : $user);
     }
 
     /** The server owner, on an enabled server, still meeting the rule that let them create the share. */
@@ -181,15 +193,13 @@ final class SharePolicy
         if ($share['audience'] === self::AUDIENCE_EVERYONE) {
             return self::USE_MEMBER;
         }
-        $projectId = (int) $share['project_id'];
-        if ((int) $server['owner_user_id'] === $userId) {
-            return self::USE_MEMBER;
-        }
-        return match ($this->role($projectId, $userId)) {
+        $level = match ($this->role((int) $share['project_id'], $userId)) {
             '' => 0,
             Role::PROJECT_VIEWER => self::USE_BROWSE,
             default => self::USE_MEMBER, // member, manager, or a custom role (S6)
         };
+        // The owner browses their own server's share whatever their role; rooms and playlists still need member+.
+        return (int) $server['owner_user_id'] === $userId ? max($level, self::USE_BROWSE) : $level;
     }
 
     /** The share's server when the share is live (see the class doc), else null. */
