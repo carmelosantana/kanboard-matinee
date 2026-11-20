@@ -36,7 +36,7 @@ final class ServerModel extends Base
     public const ATTEMPTS_TABLE = 'matinee_attempts';
 
     /** The columns any caller may see. */
-    public const COLUMNS = ['id', 'owner_user_id', 'name', 'base_url', 'machine_id', 'is_enabled', 'status', 'last_checked_at', 'created_at', 'updated_at'];
+    public const COLUMNS = ['id', 'owner_user_id', 'name', 'base_url', 'machine_id', 'is_enabled', 'is_shared', 'status', 'last_checked_at', 'created_at', 'updated_at'];
 
     public const STATUS_OK = 'ok';
     public const STATUS_UNREACHABLE = 'unreachable';

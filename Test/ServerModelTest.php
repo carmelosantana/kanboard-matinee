@@ -753,7 +753,7 @@ class ServerModelTest extends Base
         $server = $this->model()->get($id);
         $this->assertSame(0, (int) $server['is_enabled']);
 
-        $public = ['id', 'owner_user_id', 'name', 'base_url', 'machine_id', 'is_enabled', 'status', 'last_checked_at', 'created_at', 'updated_at'];
+        $public = ['id', 'owner_user_id', 'name', 'base_url', 'machine_id', 'is_enabled', 'is_shared', 'status', 'last_checked_at', 'created_at', 'updated_at'];
         $this->assertSame($public, array_keys($server));
         $this->assertSame([$public], array_map('array_keys', $this->model()->listForOwner($alice)));
         $this->assertSame([$public], array_map('array_keys', $this->model()->listAll()));

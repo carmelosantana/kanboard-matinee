@@ -7,6 +7,7 @@ const VERSION = 2;
 
 /**
  * Spec §1 P1 tables, light scope. Syntax follows core app/Schema/Mssql.php.
+ * is_shared: 0 private (the owner only), 1 shared whole with every active user.
  * Untested: the dev stack and CI have no SQL Server. CREATE TABLE has no IF NOT EXISTS, following core
  * app/Schema/Mssql.php (T-SQL has no such clause; migrations run once per version anyway).
  */
@@ -23,6 +24,7 @@ function version_1(PDO $pdo)
           , token_ct nvarchar(max) NOT NULL
           , key_id nvarchar(16) NOT NULL
           , is_enabled smallint NOT NULL DEFAULT 1
+          , is_shared smallint NOT NULL DEFAULT 0
           , status nvarchar(16) NOT NULL DEFAULT \'ok\'
           , last_checked_at bigint NOT NULL DEFAULT 0
           , created_at bigint NOT NULL DEFAULT 0

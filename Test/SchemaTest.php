@@ -65,6 +65,15 @@ class SchemaTest extends Base
         }
     }
 
+    // Light scope: a server is private (0) until its owner shares it with everyone (1).
+    public function testIsSharedDefaultsToPrivate(): void
+    {
+        $serverId = $this->server($this->user('alice'));
+        $this->assertSame(0, (int) $this->db()->table('matinee_servers')->eq('id', $serverId)->findOneColumn('is_shared'));
+        $this->assertTrue($this->db()->table('matinee_servers')->eq('id', $serverId)->update(['is_shared' => 1]));
+        $this->assertSame(1, (int) $this->db()->table('matinee_servers')->eq('id', $serverId)->findOneColumn('is_shared'));
+    }
+
     public function testUserDeleteCascades(): void
     {
         $owner = $this->user('alice');

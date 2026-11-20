@@ -7,6 +7,7 @@ const VERSION = 2;
 
 /**
  * Spec §1 P1 tables, light scope. Deleting a user takes their servers with them.
+ * is_shared: 0 private (the owner only), 1 shared whole with every active user.
  */
 function version_1(PDO $pdo)
 {
@@ -20,6 +21,7 @@ function version_1(PDO $pdo)
         token_ct TEXT NOT NULL,
         key_id VARCHAR(16) NOT NULL,
         is_enabled SMALLINT NOT NULL DEFAULT 1,
+        is_shared SMALLINT NOT NULL DEFAULT 0,
         status VARCHAR(16) NOT NULL DEFAULT \'ok\',
         last_checked_at BIGINT NOT NULL DEFAULT 0,
         created_at BIGINT NOT NULL DEFAULT 0,
