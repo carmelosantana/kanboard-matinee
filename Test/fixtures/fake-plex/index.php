@@ -2,6 +2,7 @@
 // A fake Plex server for CurlTransportTest, run as `php -S 127.0.0.1:<port> index.php`.
 // Every request bumps the hit counter in the file named by FAKE_PLEX_HITS. The X-Plex-Token header is never
 // logged or echoed: /identity reports only whether it arrived and its SHA-256.
+if (!in_array(PHP_SAPI, ['cli', 'cli-server'], true)) { http_response_code(404); exit; }
 
 $hits = getenv('FAKE_PLEX_HITS');
 if (is_string($hits) && $hits !== '') {

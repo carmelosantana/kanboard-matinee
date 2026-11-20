@@ -1,6 +1,7 @@
 <?php
 // Shared by ControllerTest and NoTokenLeakTest: boots Matinee over FakeTransport, signs users in, and calls a
 // controller action with a recorded response (nothing is sent), a collecting logger and the fake token.
+if (!in_array(PHP_SAPI, ['cli', 'cli-server'], true)) { http_response_code(404); exit; }
 
 use Kanboard\Core\Http\Request;
 use Kanboard\Core\Http\Response;

@@ -2,6 +2,7 @@
 // A raw HTTP server for CurlTransportTest, run as `php chunked-trailer.php <port>`: it answers every request on
 // 127.0.0.1:<port> with a chunked JSON body followed by a `Content-Type: text/evil` trailer, which `php -S`
 // cannot send. It serves until it is terminated.
+if (!in_array(PHP_SAPI, ['cli', 'cli-server'], true)) { http_response_code(404); exit; }
 
 $port   = (int) ($argv[1] ?? 0);
 $server = stream_socket_server('tcp://127.0.0.1:' . $port, $errno, $errstr);

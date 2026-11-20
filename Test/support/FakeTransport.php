@@ -3,6 +3,8 @@
 
 namespace Kanboard\Plugin\Matinee\Test;
 
+if (!in_array(PHP_SAPI, ['cli', 'cli-server'], true)) { http_response_code(404); exit; }
+
 use Kanboard\Plugin\Matinee\Http\PlexResponse;
 use Kanboard\Plugin\Matinee\Http\PlexTransport;
 

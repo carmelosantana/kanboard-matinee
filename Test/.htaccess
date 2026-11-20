@@ -1,0 +1,2 @@
+# Test/ is never served: fixtures and support files are for PHPUnit only.
+Require all denied
