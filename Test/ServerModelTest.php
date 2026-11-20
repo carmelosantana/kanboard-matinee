@@ -793,6 +793,73 @@ class ServerModelTest extends Base
         $this->assertSame(self::TOKEN, $this->model()->tokenFor($this->model()->get($id)));
     }
 
+    // ── sharing ──────────────────────────────────────────────────────────────
+
+    public function testSetSharedIsForTheActiveOwnerOfAnEnabledServer(): void
+    {
+        $alice = $this->user('alice');
+        $bob = $this->user('bob');
+        $admin = $this->user('root2', Role::APP_ADMIN);
+        $id = $this->connect($alice);
+        $shared = fn (): int => (int) $this->model()->get($id)['is_shared'];
+        $this->assertSame(0, $shared());
+
+        $this->model()->setShared($id, $alice, true);
+        $this->assertSame(1, $shared());
+        $this->model()->setShared($id, $alice, true); // the wanted state: a repeat changes nothing
+        $this->assertSame(1, $shared());
+
+        // Another user, and an admin, may not flip someone's sharing; a missing id reads the same.
+        $this->expectForbidden(fn () => $this->model()->setShared($id, $bob, false));
+        $this->expectForbidden(fn () => $this->model()->setShared($id, $admin, false));
+        $this->expectForbidden(fn () => $this->model()->setShared(9999, $alice, false));
+        $this->assertSame(1, $shared());
+
+        $this->model()->setShared($id, $alice, false);
+        $this->assertSame(0, $shared());
+
+        // A disabled server, or an owner who is no longer active, cannot be toggled.
+        $this->model()->setEnabled($id, false, $admin);
+        $this->expectForbidden(fn () => $this->model()->setShared($id, $alice, true));
+        $this->model()->setEnabled($id, true, $admin);
+        $this->db()->table('users')->eq('id', $alice)->update(['is_active' => 0]);
+        $this->expectForbidden(fn () => $this->model()->setShared($id, $alice, true));
+        $this->assertSame(0, $shared());
+    }
+
+    public function testListBrowsableIsOwnServersAndLiveSharedOnes(): void
+    {
+        $alice = $this->user('alice');
+        $bob = $this->user('bob');
+        $carol = $this->user('carol');
+        $admin = $this->user('root2', Role::APP_ADMIN);
+        $named = function (int $owner, string $name, string $url, int $shared, int $enabled = 1): int {
+            $id = $this->connect($owner, $url);
+            $this->db()->table('matinee_servers')->eq('id', $id)->update(['name' => $name, 'is_shared' => $shared, 'is_enabled' => $enabled]);
+            return $id;
+        };
+        $alicePrivate = $named($alice, 'Den', 'https://a1.example.test:32400', 0);
+        $aliceShared = $named($alice, 'Attic', 'https://a2.example.test:32400', 1);
+        $bobShared = $named($bob, 'Cellar', 'https://b1.example.test:32400', 1);
+        $bobPrivate = $named($bob, 'Bunker', 'https://b2.example.test:32400', 0);
+        $named($bob, 'Barn', 'https://b3.example.test:32400', 1, 0); // shared but disabled
+        $named($carol, 'Annex', 'https://c1.example.test:32400', 1);
+        $this->db()->table('users')->eq('id', $carol)->update(['is_active' => 0]); // her shared server goes dark
+
+        $ids = fn (int $userId): array => array_map(fn (array $s): int => (int) $s['id'], $this->model()->listBrowsable($userId));
+        // Ordered by name.
+        $this->assertSame([$aliceShared, $bobShared, $alicePrivate], $ids($alice));
+        $this->assertSame([$aliceShared, $bobPrivate, $bobShared], $ids($bob));
+        // An admin browses only what is shared, like anyone else.
+        $this->assertSame([$aliceShared, $bobShared], $ids($admin));
+        // An inactive user browses nothing, their own servers included.
+        $this->assertSame([], $ids($carol));
+        // Never a token column.
+        foreach ($this->model()->listBrowsable($alice) as $row) {
+            $this->assertSame(ServerModel::COLUMNS, array_keys($row));
+        }
+    }
+
     // ── tokenFor ─────────────────────────────────────────────────────────────
 
     public function testTamperedCiphertextMarksTheServerForReconnect(): void

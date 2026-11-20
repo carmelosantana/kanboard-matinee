@@ -18,7 +18,7 @@ use Kanboard\Plugin\Matinee\Http\UrlGuard;
  * Plex servers (spec §4, §2; §11 S1, S6, S7, S12). Every read of a server row goes through here, and tokenFor() is
  * the only place a token is decrypted.
  *
- * - get(), listForOwner() and listAll() select COLUMNS only: never token_nonce, token_ct or key_id.
+ * - get(), listForOwner(), listAll() and listBrowsable() select COLUMNS only: never token_nonce, token_ct or key_id.
  * - Connect, verify and update fail with one MatineeConnectException('matinee.connect_failed'), whatever the stage;
  *   the stage and the host (never the URL or token) go to the log at info level.
  * - Connect and verify (and an update, which probes the server too) each count one attempt toward the actor's limit
@@ -210,6 +210,42 @@ final class ServerModel extends Base
         $this->db->table(self::TABLE)->eq('id', $serverId)->update(['is_enabled' => $on ? 1 : 0, 'updated_at' => time()]);
     }
 
+    /**
+     * The owner shares the whole server with every active user, or makes it private again (MatineePolicy::
+     * canToggleShared: the active owner of an enabled server, never an admin on someone else's). $on is the state
+     * wanted, so a repeat changes nothing.
+     */
+    public function setShared(int $serverId, int $actorId, bool $on): void
+    {
+        $server = $this->get($serverId);
+        if ($server === null || ! $this->policy()->canToggleShared($actorId, $server)) {
+            throw new MatineeForbiddenException();
+        }
+        $this->db->table(self::TABLE)->eq('id', $serverId)->update(['is_shared' => $on ? 1 : 0, 'updated_at' => time()]);
+    }
+
+    /**
+     * The servers this user may browse, by name: their own and every shared one, each enabled with an active owner
+     * (MatineePolicy::canBrowse decides each row). Public columns only.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function listBrowsable(int $userId): array
+    {
+        $rows = $this->db->table(self::TABLE)
+            ->columns(...self::COLUMNS)
+            ->eq('is_enabled', 1)
+            ->beginOr()
+            ->eq('owner_user_id', $userId)
+            ->eq('is_shared', 1)
+            ->closeOr()
+            ->asc('name')
+            ->asc('id')
+            ->findAll();
+        $policy = $this->policy();
+        return array_values(array_filter($rows, static fn (array $row): bool => $policy->canBrowse($userId, $row)));
+    }
+
     /** @return array<string, mixed>|null the public columns only */
     public function get(int $id): ?array
     {
@@ -295,6 +331,11 @@ final class ServerModel extends Base
     private function settings(): Settings
     {
         return new Settings($this->container);
+    }
+
+    private function policy(): MatineePolicy
+    {
+        return $this->container['matineePolicy'];
     }
 
     private function keyStore(): KeyStore
