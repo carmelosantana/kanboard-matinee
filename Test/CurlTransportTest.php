@@ -23,49 +23,83 @@ class CurlTransportTest extends TestCase
 
     private int $resolverCalls = 0;
 
+    /** Why the fixture is unavailable, or '' when it is running. */
+    private static string $unavailable = '';
+
     public static function setUpBeforeClass(): void
     {
-        if (! extension_loaded('curl') || ! function_exists('proc_open')) {
-            return; // setUp skips each test with the reason
+        self::$unavailable = '';
+        if (! extension_loaded('curl')) {
+            self::$unavailable = 'ext-curl is not loaded';
+            return;
+        }
+        if (! function_exists('proc_open')) {
+            self::$unavailable = 'proc_open is not available to start the fixture';
+            return;
         }
         self::$port     = self::freePort();
         self::$hitsFile = (string) tempnam(sys_get_temp_dir(), 'matinee-fake-plex-hits-');
         file_put_contents(self::$hitsFile, '0');
 
+        self::$server = self::startFixture(
+            [PHP_BINARY, '-S', '127.0.0.1:' . self::$port, 'index.php'],
+            __DIR__ . '/fixtures/fake-plex',
+            'tcp://127.0.0.1:' . self::$port
+        );
+        if (self::$server === null) {
+            self::$unavailable = 'could not start the php -S fake Plex fixture';
+        }
+    }
+
+    /**
+     * Start a fixture process and wait until it accepts connections on $probe.
+     *
+     * @param list<string> $command
+     * @return resource|null
+     */
+    private static function startFixture(array $command, string $cwd, string $probe)
+    {
         $env = ['FAKE_PLEX_HITS' => self::$hitsFile];
         foreach (['PATH', 'SYSTEMROOT', 'TMPDIR'] as $name) {
             if (getenv($name) !== false) {
                 $env[$name] = (string) getenv($name);
             }
         }
-        $null = ['file', PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null', 'w'];
-        self::$server = proc_open(
-            [PHP_BINARY, '-S', '127.0.0.1:' . self::$port, 'index.php'],
-            [0 => ['file', PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null', 'r'], 1 => $null, 2 => $null],
+        $devNull = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+        $proc = proc_open(
+            $command,
+            [0 => ['file', $devNull, 'r'], 1 => ['file', $devNull, 'w'], 2 => ['file', $devNull, 'w']],
             $pipes,
-            __DIR__ . '/fixtures/fake-plex',
+            $cwd,
             $env
         ) ?: null;
 
         $deadline = microtime(true) + 10;
-        while (self::$server !== null && microtime(true) < $deadline) {
-            $probe = @stream_socket_client('tcp://127.0.0.1:' . self::$port, $errno, $errstr, 0.2);
-            if ($probe !== false) {
-                fclose($probe);
-                return;
+        while ($proc !== null && microtime(true) < $deadline) {
+            $conn = @stream_socket_client($probe, $errno, $errstr, 0.2);
+            if ($conn !== false) {
+                fclose($conn);
+                return $proc;
             }
             usleep(50_000);
         }
-        self::tearDownAfterClass();
+        self::stopFixture($proc);
+        return null;
+    }
+
+    /** @param resource|null $proc */
+    private static function stopFixture($proc): void
+    {
+        if (is_resource($proc)) {
+            proc_terminate($proc);
+            proc_close($proc);
+        }
     }
 
     public static function tearDownAfterClass(): void
     {
-        if (self::$server !== null) {
-            proc_terminate(self::$server);
-            proc_close(self::$server);
-            self::$server = null;
-        }
+        self::stopFixture(self::$server);
+        self::$server = null;
         if (self::$hitsFile !== '' && is_file(self::$hitsFile)) {
             unlink(self::$hitsFile);
         }
@@ -73,17 +107,23 @@ class CurlTransportTest extends TestCase
 
     protected function setUp(): void
     {
-        if (! extension_loaded('curl')) {
-            $this->markTestSkipped('ext-curl is not loaded');
-        }
-        if (self::$server === null) {
-            $this->markTestSkipped('could not start the php -S fake Plex fixture');
+        if (self::$unavailable !== '') {
+            self::prerequisiteMissing(self::$unavailable);
         }
         $this->resolverCalls = 0;
         UrlGuard::setResolverForTesting(function (string $host): array {
             $this->resolverCalls++;
             return $host === self::HOST ? ['127.0.0.1'] : [];
         });
+    }
+
+    /** Skip locally; in CI a missing prerequisite would hide the whole suite, so it fails instead. */
+    private static function prerequisiteMissing(string $reason): never
+    {
+        if ((bool) getenv('CI')) {
+            self::fail('CI is set, so a missing prerequisite fails: ' . $reason);
+        }
+        self::markTestSkipped($reason);
     }
 
     protected function tearDown(): void
@@ -300,6 +340,149 @@ class CurlTransportTest extends TestCase
         }
     }
 
+    // ── IP literal hosts (no CURLOPT_RESOLVE; the PRIMARY_IP check still applies) ──
+
+    public function testAnIpv4LiteralHostReachesTheFixture(): void
+    {
+        $r = $this->transport()->get('http://127.0.0.1:' . self::$port . '/identity', $this->headers());
+        $this->assertSame(200, $r->status);
+        $this->assertSame(0, $this->resolverCalls, 'a literal needs no DNS');
+    }
+
+    public function testAnIpv6LiteralHostReachesTheFixture(): void
+    {
+        $probe = @stream_socket_server('tcp://[::1]:0', $errno, $errstr);
+        if ($probe === false) {
+            $this->markTestSkipped('IPv6 loopback [::1] is not available here');
+        }
+        $name = (string) stream_socket_get_name($probe, false);
+        fclose($probe);
+        $port = (int) substr($name, strrpos($name, ':') + 1);
+
+        $server = self::startFixture(
+            [PHP_BINARY, '-S', '[::1]:' . $port, 'index.php'],
+            __DIR__ . '/fixtures/fake-plex',
+            'tcp://[::1]:' . $port
+        );
+        if ($server === null) {
+            self::prerequisiteMissing('could not start the php -S fake Plex fixture on [::1]');
+        }
+        try {
+            $r = $this->transport(['[::1]:' . $port])->get('http://[::1]:' . $port . '/identity', $this->headers());
+            $this->assertSame(200, $r->status);
+            $this->assertSame('fake-machine', json_decode($r->body, true)['MediaContainer']['machineIdentifier']);
+        } finally {
+            self::stopFixture($server);
+        }
+    }
+
+    // ── fail closed on curl options; nothing reaches stdout ──────────────────
+
+    /** @dataProvider badLimits */
+    public function testTheConstructorRefusesLimitsBelowOne(int $connectTimeout, int $timeout, int $maxBytes): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new CurlTransport(new UrlGuard(), $connectTimeout, $timeout, $maxBytes);
+    }
+
+    public static function badLimits(): array
+    {
+        return [
+            'maxBytes -1'      => [5, 15, -1],
+            'timeout -1'       => [5, -1, 2097152],
+            'connectTimeout 0' => [0, 15, 2097152],
+        ];
+    }
+
+    public function testARejectedCurlOptionFailsClosedAndEchoesNothing(): void
+    {
+        // Bypass the constructor's check so curl itself rejects CURLOPT_CONNECTTIMEOUT -1 mid-array, leaving the
+        // header and write callbacks unset: get() must stop before curl_exec rather than echo the body.
+        $guard = new UrlGuard([], ['127.0.0.1:' . self::$port]);
+        $t = (new \ReflectionClass(CurlTransport::class))->newInstanceWithoutConstructor();
+        \Closure::bind(function () use ($guard) {
+            $this->guard = $guard;
+            $this->connectTimeout = -1;
+            $this->timeout = 10;
+            $this->maxBytes = 2097152;
+        }, $t, CurlTransport::class)();
+
+        $before = self::hits();
+        ob_start();
+        try {
+            $t->get($this->url('/identity'), $this->headers());
+            $this->fail('expected plex.unreachable');
+        } catch (PlexException $e) {
+            $this->assertSame(PlexException::UNREACHABLE, $e->reason);
+        } finally {
+            $echoed = (string) ob_get_clean();
+        }
+        $this->assertSame('', $echoed);
+        $this->assertSame($before, self::hits(), 'no request was made');
+    }
+
+    public function testGetWritesNothingToTheOutputBuffer(): void
+    {
+        $before = self::hits();
+        ob_start();
+        try {
+            $r = $this->transport()->get($this->url('/identity'), $this->headers());
+            try {
+                $this->transport()->get($this->url('/big'), $this->headers());
+            } catch (PlexException $e) {
+                $this->assertSame(PlexException::TOO_LARGE, $e->reason);
+            }
+        } finally {
+            $echoed = (string) ob_get_clean();
+        }
+        $this->assertSame('', $echoed);
+        $this->assertSame(200, $r->status);
+        $this->assertSame($before + 2, self::hits());
+    }
+
+    // ── headers ──────────────────────────────────────────────────────────────
+
+    /** @dataProvider deniedHeaders */
+    public function testHopAndRoutingHeadersAreRefused(string $name): void
+    {
+        $before = self::hits();
+        try {
+            $this->transport()->get($this->url('/identity'), [$name => 'x'] + $this->headers());
+            $this->fail("expected $name to be refused");
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringNotContainsString(self::TOKEN, $e->getMessage());
+        }
+        $this->assertSame($before, self::hits());
+    }
+
+    public static function deniedHeaders(): array
+    {
+        $names = ['Host', 'host', 'Transfer-Encoding', 'Connection', 'Content-Length', 'Proxy-Authorization',
+            'proxy-connection', 'Upgrade', 'TE', 'Trailer', 'KEEP-ALIVE'];
+        return array_combine($names, array_map(static fn ($n) => [$n], $names));
+    }
+
+    public function testATrailerCannotOverwriteAResponseHeader(): void
+    {
+        $port   = self::freePort();
+        $server = self::startFixture(
+            [PHP_BINARY, 'chunked-trailer.php', (string) $port],
+            __DIR__ . '/fixtures/raw-http',
+            'tcp://127.0.0.1:' . $port
+        );
+        if ($server === null) {
+            self::prerequisiteMissing('could not start the raw chunked-trailer fixture');
+        }
+        try {
+            $r = $this->transport(['127.0.0.1:' . $port])->get('http://127.0.0.1:' . $port . '/identity', $this->headers());
+            $this->assertSame(200, $r->status);
+            $this->assertSame('{"ok":true}', $r->body);
+            $this->assertSame('application/json', $r->headers['content-type'] ?? null);
+        } finally {
+            self::stopFixture($server);
+        }
+    }
+
     // ── pure helpers ─────────────────────────────────────────────────────────
 
     /** @dataProvider resolveEntries */
@@ -313,7 +496,22 @@ class CurlTransportTest extends TestCase
         return [
             'ipv4'           => ['plex.example.test', 32400, '10.0.0.5', 'plex.example.test:32400:10.0.0.5'],
             'ipv6 bracketed' => ['plex.example.test', 443, 'fd12::5', 'plex.example.test:443:[fd12::5]'],
-            'ipv6 literal host' => ['fd12::5', 32400, 'fd12::5', '[fd12::5]:32400:[fd12::5]'],
+            'mapped ipv6'    => ['x.test', 39872, '::ffff:127.0.0.1', 'x.test:39872:[::ffff:127.0.0.1]'],
+        ];
+    }
+
+    /** @dataProvider resolveLists */
+    public function testResolveListPinsHostnamesOnly(string $host, int $port, string $ip, array $expected): void
+    {
+        $this->assertSame($expected, CurlTransport::resolveList($host, $port, $ip));
+    }
+
+    public static function resolveLists(): array
+    {
+        return [
+            'hostname'     => ['plex.example.test', 32400, '10.0.0.5', ['plex.example.test:32400:10.0.0.5']],
+            'ipv4 literal' => ['10.0.0.5', 32400, '10.0.0.5', []],
+            'ipv6 literal' => ['fd12::5', 32400, 'fd12::5', []],
         ];
     }
 
