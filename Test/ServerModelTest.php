@@ -455,6 +455,19 @@ class ServerModelTest extends Base
         $this->assertSame($before, count($this->t->requests));
     }
 
+    /** recordAttempt() is the limit for callers outside the model (the share form's live sections call). */
+    public function testRecordAttemptCountsTowardTheLimitAndThrowsTheGenericFailureOverIt(): void
+    {
+        $alice = $this->user('alice');
+        $this->setConfig(Settings::ATTEMPT_LIMIT_KEY, '2');
+        $this->model()->recordAttempt($alice);
+        $this->assertSame(1, $this->db()->table('matinee_attempts')->eq('user_id', $alice)->count());
+        $this->model()->recordAttempt($alice);
+        $this->expectFailure(fn () => $this->model()->recordAttempt($alice));
+        $this->assertSame(2, $this->db()->table('matinee_attempts')->eq('user_id', $alice)->count());
+        $this->assertStringContainsString('failed at rate_limit', implode("\n", $this->log->lines));
+    }
+
     public function testOldAttemptsDoNotCountAndArePruned(): void
     {
         $alice = $this->user('alice');

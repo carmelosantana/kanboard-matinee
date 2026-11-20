@@ -55,7 +55,7 @@ final class ServerModel extends Base
         if ($this->settings()->connectPolicy() === Settings::POLICY_ADMINS && $actor['role'] !== Role::APP_ADMIN) {
             $this->fail('connect', 'policy');
         }
-        if (! $this->recordAttempt($userId)) {
+        if (! $this->tryAttempt($userId)) {
             $this->fail('connect', 'rate_limit');
         }
         if ($this->db->table(self::TABLE)->eq('owner_user_id', $userId)->count() >= $this->settings()->maxServers()) {
@@ -127,7 +127,7 @@ final class ServerModel extends Base
         if ((int) $server['is_enabled'] !== 1) {
             $this->fail('update', 'disabled', $host);
         }
-        if (! $this->recordAttempt($actorId)) {
+        if (! $this->tryAttempt($actorId)) {
             $this->fail('update', 'rate_limit', $host);
         }
         if ($urlChanged && $this->isDuplicate($actorId, $url, $serverId)) {
@@ -173,7 +173,7 @@ final class ServerModel extends Base
             throw new MatineeForbiddenException();
         }
         $host = self::host($server['base_url']);
-        if (! $this->recordAttempt($actorId)) {
+        if (! $this->tryAttempt($actorId)) {
             $this->fail('verify', 'rate_limit', $host);
         }
         $this->probe('verify', $host, fn () => $this->clientFor($server), function (\Throwable $e) use ($serverId) {
@@ -283,6 +283,17 @@ final class ServerModel extends Base
         $token = $this->tokenFor($row);
         $owner = $this->activeUser((int) $row['owner_user_id']) ?? throw new MatineeForbiddenException();
         return $this->makeClient($row['base_url'], $token, $row['machine_id'], $owner);
+    }
+
+    /**
+     * Counts one attempt toward the actor's limit for a live Plex call made outside this model (the share form's
+     * sections lookup); over the limit it throws the generic MatineeConnectException and records nothing.
+     */
+    public function recordAttempt(int $actorId): void
+    {
+        if (! $this->tryAttempt($actorId)) {
+            $this->fail('sections', 'rate_limit');
+        }
     }
 
     // ── internals ────────────────────────────────────────────────────────────
@@ -404,7 +415,7 @@ final class ServerModel extends Base
     }
 
     /** Counts this user's attempts in the window; under the limit, records one (pruning old rows) and returns true. */
-    private function recordAttempt(int $userId): bool
+    private function tryAttempt(int $userId): bool
     {
         $now = time();
         $recent = $this->db->table(self::ATTEMPTS_TABLE)

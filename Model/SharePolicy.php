@@ -88,6 +88,12 @@ final class SharePolicy
         return $this->isActiveAdmin(is_array($user) ? (int) ($user['id'] ?? 0) : $user);
     }
 
+    /** An active app admin by the live users row (never the session's copy): the one admin check Matinee makes. */
+    public function isActiveAdmin(int $userId): bool
+    {
+        return ($this->activeUser($userId)['role'] ?? null) === Role::APP_ADMIN;
+    }
+
     /** The server owner, on an enabled server, still meeting the rule that let them create the share. */
     public function canEditShare(int $userId, array $share): bool
     {
@@ -264,8 +270,4 @@ final class SharePolicy
         return $user && (int) $user['is_active'] === 1 ? $user : null;
     }
 
-    private function isActiveAdmin(int $id): bool
-    {
-        return ($this->activeUser($id)['role'] ?? null) === Role::APP_ADMIN;
-    }
 }

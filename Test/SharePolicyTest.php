@@ -322,6 +322,34 @@ class SharePolicyTest extends TestCase
         ];
     }
 
+    /** @dataProvider activeAdminTable */
+    public function testIsActiveAdmin(int $user, ?\Closure $tweak, bool $expected): void
+    {
+        $w = self::world();
+        $w['users'][10] = ['role' => Role::APP_MANAGER, 'is_active' => 1];
+        if ($tweak !== null) {
+            $tweak($w);
+        }
+        $this->assertSame($expected, self::policy($w)->isActiveAdmin($user));
+    }
+
+    public function activeAdminTable(): array
+    {
+        return [
+            'admin' => [self::ADMIN, null, true],
+            'app manager' => [10, null, false],
+            'app user' => [self::OUTSIDER, null, false],
+            'unknown user' => [self::GHOST, null, false],
+            'no user' => [0, null, false],
+            'inactive admin' => [self::ADMIN, static function (array &$w) {
+                $w['users'][self::ADMIN]['is_active'] = 0;
+            }, false],
+            'demoted admin' => [self::ADMIN, static function (array &$w) {
+                $w['users'][self::ADMIN]['role'] = Role::APP_USER;
+            }, false],
+        ];
+    }
+
     /** @dataProvider sectionTable */
     public function testSectionAllowed(bool $whole, array $chosen, string $key, bool $expected): void
     {
