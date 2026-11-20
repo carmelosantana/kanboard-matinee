@@ -6,8 +6,10 @@ use Kanboard\Core\Base;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 
 /**
- * Matinee's config keys (spec §3, §4, §11 S1). Values are read straight from the settings table on every call, so a
- * change an admin saves applies at once (ConfigModel::get caches the whole table per request).
+ * Matinee's config keys (spec §3, §4, §11 S1). The methods here read with ConfigModel::getOption, one query per call,
+ * so a change an admin saves applies at once, even later in the same request. UrlGuard::fromConfig reads the allowed
+ * hosts and private targets with ConfigModel::get instead, which goes through the per-request memoryCache of the whole
+ * table: within one request it sees the values as first loaded.
  */
 final class Settings extends Base
 {
