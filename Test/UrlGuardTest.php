@@ -78,7 +78,7 @@ class UrlGuardTest extends TestCase
     // ── private networks need a matching target (S1) ─────────────────────────
 
     /** @dataProvider privateAddresses */
-    public function testPrivateAddressIsRefusedWithoutATarget(string $ip, string $cidr): void
+    public function testPrivateAddressIsRefusedWithoutATarget(string $ip, string $cidr, bool $loopback = false): void
     {
         $this->dns(['plex.lan' => [$ip]]);
         $this->assertRefused(new UrlGuard(), 'http://plex.lan:32400', UnsafeUrlException::PRIVATE_NETWORK);
@@ -87,11 +87,10 @@ class UrlGuardTest extends TestCase
     }
 
     /** @dataProvider privateAddresses */
-    public function testPrivateAddressPassesWithAMatchingTarget(string $ip, string $cidr): void
+    public function testPrivateAddressPassesWithAMatchingTarget(string $ip, string $cidr, bool $loopback = false): void
     {
         $this->dns(['plex.lan' => [$ip]]);
-        $literal = str_contains($ip, ':') ? '[' . $ip . ']' : $ip;
-        foreach (['host' => 'plex.lan', 'ip' => $literal, 'cidr' => $cidr] as $kind => $target) {
+        foreach (self::matchingTargets($ip, $cidr, $loopback) as $kind => $target) {
             $expected = ['host' => 'plex.lan', 'port' => 32400, 'ip' => $ip];
             $this->assertSame($expected, (new UrlGuard([], [$target]))->check('http://plex.lan:32400'), "$kind target $target");
             $this->assertSame(443, (new UrlGuard([], [$target]))->check('https://plex.lan')['port'], "$kind target $target");
@@ -99,11 +98,10 @@ class UrlGuardTest extends TestCase
     }
 
     /** @dataProvider privateAddresses */
-    public function testPrivateAddressIsRefusedOnAPortTheTargetDoesNotName(string $ip, string $cidr): void
+    public function testPrivateAddressIsRefusedOnAPortTheTargetDoesNotName(string $ip, string $cidr, bool $loopback = false): void
     {
         $this->dns(['plex.lan' => [$ip]]);
-        $literal = str_contains($ip, ':') ? '[' . $ip . ']' : $ip;
-        foreach (['host' => 'plex.lan', 'ip' => $literal, 'cidr' => $cidr] as $kind => $target) {
+        foreach (self::matchingTargets($ip, $cidr, $loopback) as $kind => $target) {
             // No port in the target: only 32400, 443 and 80.
             $this->assertRefused(new UrlGuard([], [$target]), 'http://plex.lan:22', UnsafeUrlException::PORT_NOT_ALLOWED);
             // A port in the target: that port only.
@@ -115,18 +113,35 @@ class UrlGuardTest extends TestCase
         }
     }
 
-    /** [resolved address, a CIDR target containing it] */
+    /**
+     * The targets that authorise $ip for plex.lan: the name, the IP literal and the CIDR. A name does not
+     * authorise loopback, so a loopback address gets only the IP and CIDR targets.
+     *
+     * @return array<string, string>
+     */
+    private static function matchingTargets(string $ip, string $cidr, bool $loopback): array
+    {
+        $literal = str_contains($ip, ':') ? '[' . $ip . ']' : $ip;
+        $targets = ['host' => 'plex.lan', 'ip' => $literal, 'cidr' => $cidr];
+        if ($loopback) {
+            unset($targets['host']);
+        }
+        return $targets;
+    }
+
+    /** [resolved address, a CIDR target containing it, is loopback] */
     public static function privateAddresses(): array
     {
         return [
-            'loopback v4'           => ['127.0.0.1', '127.0.0.0/8'],
-            'loopback v4 range'     => ['127.1.2.3', '127.0.0.0/8'],
+            'loopback v4'           => ['127.0.0.1', '127.0.0.0/8', true],
+            'loopback v4 range'     => ['127.1.2.3', '127.0.0.0/8', true],
             '10/8'                  => ['10.0.0.5', '10.0.0.0/8'],
             '172.16/12'             => ['172.20.1.1', '172.16.0.0/12'],
             '192.168/16'            => ['192.168.1.20', '192.168.1.0/24'],
             'CGNAT'                 => ['100.64.0.10', '100.64.0.0/10'],
-            'loopback v6'           => ['::1', '::1/128'],
+            'loopback v6'           => ['::1', '::1/128', true],
             'ULA v6'                => ['fd12:3456::1', 'fd12:3456::/32'],
+            'ULA v6 by /16'         => ['fd12:3456::1', 'fd12::/16'],
             'v4-mapped private'     => ['::ffff:10.0.0.1', '10.0.0.0/8'],
             'v4-mapped hex form'    => ['::ffff:a00:1', '10.0.0.0/8'],
             'v4-mapped long form'   => ['0:0:0:0:0:FFFF:10.0.0.1', '10.0.0.0/8'],
@@ -136,21 +151,68 @@ class UrlGuardTest extends TestCase
         ];
     }
 
-    public function testInvalidTargetEntriesMatchNothing(): void
+    /** @dataProvider loopbackAddresses */
+    public function testANameTargetDoesNotAuthoriseLoopback(string $ip, string $ipTarget): void
+    {
+        $this->dns(['plex.lan' => [$ip]]);
+        $this->assertRefused(new UrlGuard([], ['plex.lan']), 'http://plex.lan:32400', UnsafeUrlException::PRIVATE_NETWORK);
+        $this->assertRefused(new UrlGuard([], ['plex.lan:32400']), 'http://plex.lan:32400', UnsafeUrlException::PRIVATE_NETWORK);
+        // An IP or CIDR target that covers the address does.
+        $this->assertSame($ip, (new UrlGuard([], ['plex.lan', $ipTarget]))->check('http://plex.lan:32400')['ip']);
+    }
+
+    public static function loopbackAddresses(): array
+    {
+        return [
+            'v4'                => ['127.0.0.1', '127.0.0.1'],
+            'v4 range'          => ['127.1.2.3', '127.0.0.0/8'],
+            'v6'                => ['::1', '[::1]'],
+            'v4-mapped'         => ['::ffff:127.0.0.1', '127.0.0.0/8'],
+            'v4-translated'     => ['::ffff:0:127.0.0.1', '127.0.0.0/8'],
+            'NAT64'             => ['64:ff9b::7f00:1', '127.0.0.0/8'],
+            'NAT64 local-use'   => ['64:ff9b:1::7f00:1', '127.0.0.0/8'],
+            '6to4'              => ['2002:7f00:1::1', '2002::/16'],
+        ];
+    }
+
+    public function testANameTargetStillAuthorisesOtherPrivateAddresses(): void
     {
         $this->dns(['plex.lan' => ['10.0.0.5']]);
-        $guard = new UrlGuard([], ['10.0.0.0/33', '10.0.0.5:0', '10.0.0.5:70000', '*.lan', 'http://10.0.0.5']);
+        $this->assertSame('10.0.0.5', (new UrlGuard([], ['plex.lan']))->check('http://plex.lan:32400')['ip']);
+    }
+
+    public function testInvalidTargetEntriesMatchNothing(): void
+    {
+        $this->dns(['plex.lan' => ['10.0.0.5'], 'plex6.lan' => ['fd12::5']]);
+        $guard = new UrlGuard([], [
+            '10.0.0.0/33', '10.0.0.5:0', '10.0.0.5:70000', '*.lan', 'http://10.0.0.5',
+            '0.0.0.0/0', '::/0', '10.0.0.0/7', '::/15', 'fc00::/7',
+        ]);
         $this->assertRefused($guard, 'http://plex.lan:32400', UnsafeUrlException::PRIVATE_NETWORK);
+        $this->assertRefused($guard, 'http://plex6.lan:32400', UnsafeUrlException::PRIVATE_NETWORK);
+    }
+
+    public function testA6to4AddressIsNotMatchedByItsEmbeddedIpv4(): void
+    {
+        // 2002:a00:1:: carries 10.0.0.1: judged private by it, but a 10/8 target does not cover the 6to4 address.
+        $this->assertRefused(new UrlGuard([], ['10.0.0.0/8']), 'http://[2002:a00:1::]', UnsafeUrlException::PRIVATE_NETWORK);
+        $this->assertSame('2002:a00:1::', (new UrlGuard([], ['2002::/16']))->check('http://[2002:a00:1::]')['ip']);
     }
 
     // ── always blocked, targets or not (S8) ───────────────────────────────────
 
-    /** @dataProvider blockedAddresses */
-    public function testBlockedAddressIsRefusedEvenWithAMatchingTarget(string $ip): void
+    /**
+     * @dataProvider blockedAddresses
+     * @param string[] $covering valid targets whose networks contain the address (or its embedded IPv4)
+     */
+    public function testBlockedAddressIsRefusedEvenWithAMatchingTarget(string $ip, array $covering): void
     {
         $this->dns(['evil.example' => [$ip]]);
         $literal = str_contains($ip, ':') ? '[' . $ip . ']' : $ip;
-        $everything = ['evil.example', $literal, '0.0.0.0/0', '::/0'];
+        $everything = array_merge(['evil.example', $literal], $covering);
+        foreach ($covering as $target) {
+            $this->assertTrue(UrlGuard::isValidTargetEntry($target), $target);
+        }
         $this->assertRefused(new UrlGuard(), 'http://evil.example:32400', UnsafeUrlException::BLOCKED_ADDRESS);
         $this->assertRefused(new UrlGuard([], $everything), 'http://evil.example:32400', UnsafeUrlException::BLOCKED_ADDRESS);
     }
@@ -158,23 +220,24 @@ class UrlGuardTest extends TestCase
     public static function blockedAddresses(): array
     {
         return [
-            'cloud metadata v4'        => ['169.254.169.254'],
-            'link-local v4'            => ['169.254.10.1'],
-            'Alibaba metadata'         => ['100.100.100.200'],
-            'this network'             => ['0.0.0.0'],
-            'multicast v4'             => ['224.0.0.1'],
-            'broadcast'                => ['255.255.255.255'],
-            'unspecified v6'           => ['::'],
-            'link-local v6'            => ['fe80::1'],
-            'site-local v6 (fec0::/10)' => ['fec0::1'],
-            'multicast v6'             => ['ff02::1'],
-            'AWS metadata v6'          => ['fd00:ec2::254'],
-            'v4-mapped metadata'       => ['::ffff:169.254.169.254'],
-            'v4-translated metadata'   => ['::ffff:0:169.254.169.254'],
-            'NAT64 metadata'           => ['64:ff9b::a9fe:a9fe'],
-            'NAT64 local-use metadata' => ['64:ff9b:1::a9fe:a9fe'],
-            '6to4 metadata'            => ['2002:a9fe:a9fe::1'],
-            'unparseable answer'       => ['not-an-ip'],
+            'cloud metadata v4'        => ['169.254.169.254', ['169.254.0.0/16']],
+            'link-local v4'            => ['169.254.10.1', ['169.254.0.0/16']],
+            'Alibaba metadata'         => ['100.100.100.200', ['100.64.0.0/10']],
+            'this network'             => ['0.0.0.0', ['0.0.0.0/8']],
+            'multicast v4'             => ['224.0.0.1', ['224.0.0.0/8']],
+            'broadcast'                => ['255.255.255.255', ['255.0.0.0/8']],
+            'unspecified v6'           => ['::', ['::/16']],
+            'link-local v6'            => ['fe80::1', ['fe80::/16']],
+            'site-local v6 (fec0::/10)' => ['fec0::1', ['fec0::/16']],
+            'multicast v6'             => ['ff02::1', ['ff02::/16']],
+            'AWS metadata v6'          => ['fd00:ec2::254', ['fd00::/16']],
+            'v4-mapped metadata'       => ['::ffff:169.254.169.254', ['169.254.0.0/16', '::ffff:0:0/96']],
+            'v4-translated metadata'   => ['::ffff:0:169.254.169.254', ['169.254.0.0/16', '::ffff:0:0:0/96']],
+            'NAT64 metadata'           => ['64:ff9b::a9fe:a9fe', ['169.254.0.0/16', '64:ff9b::/96']],
+            'NAT64 local-use metadata' => ['64:ff9b:1::a9fe:a9fe', ['169.254.0.0/16', '64:ff9b:1::/48']],
+            'NAT64 local-use, non-zero middle' => ['64:ff9b:1:a00:0:100:808:808', ['10.0.0.0/8', '8.0.0.0/8', '64:ff9b:1::/48']],
+            '6to4 metadata'            => ['2002:a9fe:a9fe::1', ['169.254.0.0/16', '2002::/16']],
+            'unparseable answer'       => ['not-an-ip', ['10.0.0.0/8']],
         ];
     }
 
@@ -223,7 +286,9 @@ class UrlGuardTest extends TestCase
     {
         $this->dns(['plex.example.test' => [self::PUBLIC_IP], 'cafe.be' => [self::PUBLIC_IP]]);
         $this->assertFalse(UrlGuard::isValidBaseUrl($url), $url);
-        $this->assertRefused(new UrlGuard([], ['0.0.0.0/0', '::/0']), $url, UnsafeUrlException::INVALID_URL);
+        // Targets covering every host these URLs name do not make an invalid URL valid.
+        $targets = ['plex.example.test', 'cafe.be', '127.0.0.0/8', '10.0.0.0/8', '192.168.0.0/16', '[::1]', 'fd12::/16'];
+        $this->assertRefused(new UrlGuard([], $targets), $url, UnsafeUrlException::INVALID_URL);
     }
 
     public static function invalidUrls(): array
@@ -251,6 +316,11 @@ class UrlGuardTest extends TestCase
             'short dotted'      => ['http://127.1/'],
             'backslash'         => ['https://plex.example.test\\@evil.example/'],
             'space'             => ['https://plex example.test/'],
+            'signed port'       => ['http://plex.example.test:+80'],
+            'space before port' => ['http://plex.example.test: 80'],
+            'leading-zero port' => ['http://plex.example.test:080'],
+            'zero-padded port'  => ['https://plex.example.test:00443'],
+            'empty port'        => ['http://plex.example.test:'],
         ];
     }
 
@@ -333,8 +403,8 @@ class UrlGuardTest extends TestCase
     public function testParseTargetList(): void
     {
         $this->assertSame(
-            ['plex.lan', '192.168.1.0/24:32400', '[fd12::1]:8443', 'fd00::/8', '10.0.0.5'],
-            UrlGuard::parseTargetList("Plex.LAN\n\n  192.168.1.0/24:32400 , [FD12::1]:8443\r\nfd00::/8\n10.0.0.5\nplex.lan")
+            ['plex.lan', '192.168.1.0/24:32400', '[fd12::1]:8443', 'fd12::/16', '10.0.0.5'],
+            UrlGuard::parseTargetList("Plex.LAN\n\n  192.168.1.0/24:32400 , [FD12::1]:8443\r\nFD12::/16\n10.0.0.5\nplex.lan")
         );
     }
 
@@ -357,8 +427,9 @@ class UrlGuardTest extends TestCase
             'ipv6'             => ['fd12::1'],
             'ipv6 bracketed'   => ['[fd12::1]'],
             'ipv6 port'        => ['[fd12::1]:32400'],
-            'ipv6 cidr'        => ['fd00::/8'],
-            'ipv6 cidr port'   => ['[fd00::/8]:32400'],
+            'ipv6 cidr'        => ['fd12::/16'],
+            'ipv6 cidr port'   => ['[fd12::/16]:32400'],
+            'ipv4 /8'          => ['10.0.0.0/8'],
         ];
     }
 
@@ -380,6 +451,12 @@ class UrlGuardTest extends TestCase
             'port not numeric' => ['plex.lan:http'],
             'v4 prefix too big' => ['10.0.0.0/33'],
             'v6 prefix too big' => ['fd00::/129'],
+            'v4 everything'    => ['0.0.0.0/0'],
+            'v6 everything'    => ['::/0'],
+            'v4 shorter than /8' => ['10.0.0.0/7'],
+            'v6 shorter than /16' => ['::/15'],
+            'ULA /7 (use /16 or longer)' => ['fc00::/7'],
+            'v4 short cidr port' => ['0.0.0.0/0:32400'],
             'bad cidr net'     => ['plex.lan/24'],
             'numeric shorthand' => ['127.1'],
             'v6 port no brackets' => ['fd12::1:32400:'],

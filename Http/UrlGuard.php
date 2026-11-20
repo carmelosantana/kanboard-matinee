@@ -9,10 +9,18 @@ namespace Kanboard\Plugin\Matinee\Http;
  *  - S1: there is no blanket private opt-in. A private address passes only when an admin "private target"
  *    matches it: a hostname (matched by name, before resolution), an IP literal or a CIDR, each with an optional
  *    `:port` (IPv6 as `[addr]:port` or `[cidr]:port`).
+ *  - A hostname target trusts that name's DNS: whatever private address it resolves to is admitted, except
+ *    loopback (127.0.0.0/8, ::1, and those carried in a mapped, SIIT, NAT64 or 6to4 address). Loopback needs an
+ *    IP or CIDR target that covers the resolved address.
+ *  - A CIDR target is /8 or longer for IPv4 and /16 or longer for IPv6; a shorter prefix is invalid and matches
+ *    nothing. So the whole ULA range fc00::/7 cannot be one target: name each /16 (or narrower) instead.
  *  - Ports: 32400, 443 and 80 only, unless the matching target names another port; then that port only.
  *    Public addresses get the three default ports and nothing else.
  *  - S8: an IPv4 address embedded in ::ffff:0:0/96, ::ffff:0:0:0/96, 64:ff9b::/96 or 64:ff9b:1::/48 (and
- *    6to4) is judged as that IPv4. fec0::/10 is blocked.
+ *    6to4) is judged as that IPv4. fec0::/10 is blocked. In 64:ff9b:1::/48 the IPv4 is the last 4 bytes only
+ *    when bytes 6–11 are zero; any other address in that prefix is blocked. IPv4 targets cover the mapped,
+ *    SIIT and NAT64 forms of their addresses, not the 6to4 form (a 6to4 address routes through a relay, not
+ *    to the IPv4 host): a 6to4 address needs an IPv6 target such as 2002::/16.
  *
  * Every resolved address must pass. check() returns the address to pin the connection to; the transport runs
  * it on every request, so a DNS answer that changes between requests is judged afresh.
@@ -33,11 +41,17 @@ final class UrlGuard
         '198.18.0.0/15', '::1/128', 'fc00::/7',
     ];
 
-    /** Always refused: link-local, cloud metadata, unspecified, multicast, reserved, deprecated site-local. */
+    /**
+     * Always refused: link-local, cloud metadata, unspecified, multicast, reserved, deprecated site-local, and
+     * the 64:ff9b:1::/48 addresses that are not in its embedded-IPv4 form (that form is judged as the IPv4).
+     */
     private const BLOCKED_CIDRS = [
         '0.0.0.0/8', '169.254.0.0/16', '100.100.100.200/32', '192.0.0.0/24', '224.0.0.0/4', '240.0.0.0/4',
-        '::/128', 'fe80::/10', 'fec0::/10', 'fd00:ec2::254/128', 'ff00::/8', '2001::/32', '::/96',
+        '::/128', 'fe80::/10', 'fec0::/10', 'fd00:ec2::254/128', 'ff00::/8', '2001::/32', '::/96', '64:ff9b:1::/48',
     ];
+
+    /** Shortest CIDR prefix a private target may use, by address length in bytes. */
+    private const MIN_TARGET_BITS = [4 => 8, 16 => 16];
 
     /** @var (callable(string): string[])|null  Test seam replacing DNS. */
     private static $resolver = null;
@@ -128,12 +142,17 @@ final class UrlGuard
 
     /**
      * A Plex base URL: http or https, a host (not numeric shorthand), an optional port 1–65535, and an empty or
-     * "/" path. No userinfo, query or fragment.
+     * "/" path. No userinfo, query or fragment. The port is plain decimal digits with no sign and no leading zero,
+     * so each port has one spelling (":080" and ":+80" are refused, not read as 80).
      */
     public static function isValidBaseUrl(string $url): bool
     {
         // '?', '#' and '@' are refused outright, even empty: parse_url is not the only parser that will see this.
         if ($url === '' || preg_match('/[\s\x00-\x1f\x7f\\\\@?#]/', $url) === 1) {
+            return false;
+        }
+        // The whole shape, so nothing parse_url tolerates (a signed or zero-padded port) slips through.
+        if (preg_match('#^https?://(\[[^\]]+\]|[^:/\[\]]+)(:[1-9][0-9]{0,4})?/?$#i', $url) !== 1) {
             return false;
         }
         $parts = parse_url($url);
@@ -264,7 +283,9 @@ final class UrlGuard
         if (str_contains($addr, '/')) {
             [$net, $bits] = explode('/', $addr, 2);
             $netBin = filter_var($net, FILTER_VALIDATE_IP) !== false ? inet_pton($net) : false;
-            if ($netBin === false || preg_match('/^[0-9]{1,3}$/', $bits) !== 1 || (int) $bits > 8 * strlen($netBin)) {
+            if ($netBin === false || preg_match('/^[0-9]{1,3}$/', $bits) !== 1 || (int) $bits > 8 * strlen($netBin)
+                || (int) $bits < self::MIN_TARGET_BITS[strlen($netBin)]
+            ) {
                 return null;
             }
             return ['host' => null, 'net' => $netBin, 'bits' => (int) $bits, 'port' => $port];
@@ -283,22 +304,24 @@ final class UrlGuard
     }
 
     /**
-     * Targets that match $host by name or the address by IP / CIDR. The embedded IPv4 of a mapped or NAT64
-     * address counts too, so "10.0.0.0/8" covers "::ffff:10.0.0.1".
+     * Targets that match $host by name or the address by IP / CIDR. The embedded IPv4 of a mapped, SIIT or NAT64
+     * address counts too, so "10.0.0.0/8" covers "::ffff:10.0.0.1"; a 6to4 address is matched only as itself.
+     * A name target never matches a loopback address.
      *
      * @return list<array{host:?string, net:?string, bits:int, port:?int}>
      */
     private function matchingTargets(string $host, string $bin): array
     {
         $forms = [$bin];
-        $embedded = self::embeddedIpv4($bin);
-        if ($embedded !== null) {
-            $forms[] = $embedded;
+        $translated = self::translatedIpv4($bin);
+        if ($translated !== null) {
+            $forms[] = $translated;
         }
+        $loopback = self::isLoopback($bin);
         $out = [];
         foreach ($this->targets as $target) {
             if ($target['host'] !== null) {
-                if ($target['host'] === $host) {
+                if ($target['host'] === $host && ! $loopback) {
                     $out[] = $target;
                 }
                 continue;
@@ -374,20 +397,35 @@ final class UrlGuard
         return array_values(array_unique($ips));
     }
 
-    /** The 4 bytes of an IPv4 address carried inside an IPv6 one, or null. */
-    private static function embeddedIpv4(string $bin): ?string
+    /** The 4 bytes of the IPv4 address an IPv6 one translates to (mapped, SIIT, NAT64), or null. */
+    private static function translatedIpv4(string $bin): ?string
     {
         if (strlen($bin) !== 16) {
             return null;
         }
         return match (true) {
-            str_starts_with($bin, str_repeat("\0", 10) . "\xff\xff")             => substr($bin, 12, 4), // ::ffff:0:0/96 mapped
-            str_starts_with($bin, str_repeat("\0", 8) . "\xff\xff\0\0")          => substr($bin, 12, 4), // ::ffff:0:0:0/96 SIIT
-            str_starts_with($bin, "\x00\x64\xff\x9b" . str_repeat("\0", 8))      => substr($bin, 12, 4), // 64:ff9b::/96 NAT64
-            str_starts_with($bin, "\x00\x64\xff\x9b\x00\x01")                    => substr($bin, 12, 4), // 64:ff9b:1::/48 local NAT64
-            str_starts_with($bin, "\x20\x02")                                    => substr($bin, 2, 4),  // 2002::/16 6to4
-            default                                                              => null,
+            str_starts_with($bin, str_repeat("\0", 10) . "\xff\xff")                       => substr($bin, 12, 4), // ::ffff:0:0/96 mapped
+            str_starts_with($bin, str_repeat("\0", 8) . "\xff\xff\0\0")                    => substr($bin, 12, 4), // ::ffff:0:0:0/96 SIIT
+            str_starts_with($bin, "\x00\x64\xff\x9b" . str_repeat("\0", 8))                => substr($bin, 12, 4), // 64:ff9b::/96 NAT64
+            str_starts_with($bin, "\x00\x64\xff\x9b\x00\x01" . str_repeat("\0", 6))      => substr($bin, 12, 4), // 64:ff9b:1::/48 local NAT64
+            default                                                                        => null,
         };
+    }
+
+    /** The 4 bytes of an IPv4 address carried inside an IPv6 one (translated, or 6to4 2002::/16), or null. */
+    private static function embeddedIpv4(string $bin): ?string
+    {
+        if (strlen($bin) === 16 && str_starts_with($bin, "\x20\x02")) {
+            return substr($bin, 2, 4);
+        }
+        return self::translatedIpv4($bin);
+    }
+
+    /** 127.0.0.0/8 or ::1, directly or carried in an IPv6 address. */
+    private static function isLoopback(string $bin): bool
+    {
+        $addr = self::embeddedIpv4($bin) ?? $bin;
+        return $addr === inet_pton('::1') || self::inCidr($addr, (string) inet_pton('127.0.0.0'), 8);
     }
 
     /** 'public' | 'private' | 'blocked' for a packed address. */
