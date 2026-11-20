@@ -558,6 +558,27 @@ class ServerModelTest extends Base
         $this->assertSame(self::TOKEN, $this->model()->tokenFor($this->model()->get($id)));
     }
 
+    public function testUpdateOfTheUrlOrTokenFollowsTheConnectPolicy(): void
+    {
+        $alice = $this->user('alice');
+        $id = $this->connect($alice);
+        $this->setConfig(Settings::CONNECT_POLICY, Settings::POLICY_ADMINS);
+        $before = $this->row($id);
+        $sent = count($this->t->requests);
+
+        foreach ([['https://new.example.test:32400', self::TOKEN2], [self::BASE, self::TOKEN2], ['https://new.example.test:32400', null]] as [$url, $token]) {
+            $this->expectFailure(fn () => $this->model()->update($id, $alice, 'Den', $url, $token));
+            $this->assertStringContainsString('at policy', $this->lastLog());
+        }
+        $this->assertSame($sent, count($this->t->requests));
+        $this->assertSame($before, $this->row($id));
+
+        // A rename keeps the stored address and token, so it is still the owner's to make.
+        $this->queueOk();
+        $this->model()->update($id, $alice, 'Den', self::BASE, null);
+        $this->assertSame('Den', $this->model()->get($id)['name']);
+    }
+
     public function testUpdateWithAMachineIdChangeNeedsTheToken(): void
     {
         $alice = $this->user('alice');

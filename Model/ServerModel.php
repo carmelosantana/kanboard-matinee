@@ -52,7 +52,7 @@ final class ServerModel extends Base
         if ($actor === null) {
             $this->fail('connect', 'actor');
         }
-        if ($this->settings()->connectPolicy() === Settings::POLICY_ADMINS && $actor['role'] !== Role::APP_ADMIN) {
+        if (! $this->mayConnect($actor)) {
             $this->fail('connect', 'policy');
         }
         if (! $this->tryAttempt($userId)) {
@@ -104,8 +104,9 @@ final class ServerModel extends Base
     }
 
     /**
-     * Owner only. A changed URL needs a token, and so does a changed machine id: the server is probed with the given
-     * token, or the stored one, before anything is written.
+     * Owner only. A changed URL or token must pass the connect policy, as a connect does; a rename need not. A changed
+     * URL needs a token, and so does a changed machine id: the server is probed with the given token, or the stored
+     * one, before anything is written.
      */
     public function update(int $serverId, int $actorId, string $name, string $url, #[\SensitiveParameter] ?string $token): void
     {
@@ -117,6 +118,10 @@ final class ServerModel extends Base
         $url = $this->normalise('update', $url);
         $host = self::host($url);
         $urlChanged = $url !== $server['base_url'];
+        // A new address or token is a new connection: the connect policy applies. A rename does not.
+        if (($urlChanged || $token !== null) && ! $this->mayConnect($actor)) {
+            $this->fail('update', 'policy', $host);
+        }
         if ($urlChanged && $token === null) {
             $this->fail('update', 'token_required', $host, null, MatineeConnectException::TOKEN_REQUIRED);
         }
@@ -338,6 +343,12 @@ final class ServerModel extends Base
     }
 
     /** Logs the stage with the host only, then throws the one generic failure. */
+    /** The connect policy (D3) for an active user row: everyone, or app admins only. */
+    private function mayConnect(array $actor): bool
+    {
+        return $this->settings()->connectPolicy() !== Settings::POLICY_ADMINS || $actor['role'] === Role::APP_ADMIN;
+    }
+
     private function fail(string $op, string $stage, string $host = '-', ?string $reason = null, string $code = MatineeConnectException::CONNECT_FAILED): never
     {
         $this->logger->info(sprintf('Matinee: %s failed at %s (host %s%s)', $op, $stage, $host, $reason === null ? '' : ', '.$reason));
