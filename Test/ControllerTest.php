@@ -7,6 +7,7 @@ use Kanboard\Core\Controller\AccessForbiddenException;
 use Kanboard\Core\Security\Role;
 use Kanboard\Plugin\Matinee\Controller\MatineeAdminController;
 use Kanboard\Plugin\Matinee\Controller\MatineeServerController;
+use Kanboard\Plugin\Matinee\Crypto\KeyStore;
 use Kanboard\Plugin\Matinee\Model\Settings;
 use Kanboard\Plugin\Matinee\Model\SharePolicy;
 
@@ -592,6 +593,47 @@ class ControllerTest extends Base
         $this->assertStringContainsString('&lt;i&gt;p&lt;/i&gt;', $pages['shareCreate']);
         $this->assertStringContainsString('&lt;i&gt;p&lt;/i&gt;', $pages['show']);
         $this->assertStringContainsString('&lt;u&gt;own&quot;er', $pages['admin']);
+    }
+
+    /**
+     * Spec §2: a bad key fails closed with a notice the admin sees; it names neither the key nor where it lives. A
+     * good key shows where it comes from and its 8-hex id.
+     */
+    public function testTheAdminPageReportsTheKeyStore(): void
+    {
+        $this->loginAs(self::ADMIN);
+        $notice = 'The Matinee key could not be loaded. Check MATINEE_KEY or the key file.';
+
+        $badEnv = base64_encode(random_bytes(16)); // 16 bytes: valid base64, wrong size
+        $this->container['matineeKeyStore'] = new KeyStore($this->keyDir, $badEnv);
+        $body = $this->get(self::ADM, 'show')->body();
+        $this->assertStringContainsString('<p class="alert alert-error">'.$notice.'</p>', $body);
+        foreach ([$badEnv, $this->keyDir, 'secret.key', 'keystore:'] as $secret) {
+            $this->assertStringNotContainsString($secret, $body);
+        }
+
+        // A key file of the wrong size reads the same.
+        mkdir($this->keyDir, 0700, true);
+        file_put_contents($this->keyDir.'/secret.key', random_bytes(7));
+        chmod($this->keyDir.'/secret.key', 0600);
+        $this->container['matineeKeyStore'] = new KeyStore($this->keyDir, null);
+        $body = $this->get(self::ADM, 'show')->body();
+        $this->assertStringContainsString($notice, $body);
+        $this->assertStringNotContainsString($this->keyDir, $body);
+        unlink($this->keyDir.'/secret.key');
+
+        $env = random_bytes(32);
+        $this->container['matineeKeyStore'] = new KeyStore($this->keyDir, base64_encode($env));
+        $body = $this->get(self::ADM, 'show')->body();
+        $this->assertStringNotContainsString($notice, $body);
+        $this->assertStringContainsString('Encryption key: the MATINEE_KEY environment variable, key id '.KeyStore::keyIdFor($env), $body);
+        $this->assertStringNotContainsString(base64_encode($env), $body);
+
+        $store = new KeyStore($this->keyDir, null);
+        $this->container['matineeKeyStore'] = $store;
+        $body = $this->get(self::ADM, 'show')->body();
+        $this->assertStringContainsString('Encryption key: the key file in the data directory, key id '.$store->activeKeyId(), $body);
+        $this->assertStringNotContainsString($this->keyDir, $body);
     }
 
     /**

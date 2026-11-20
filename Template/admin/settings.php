@@ -2,6 +2,12 @@
     <h2>Matinee</h2>
 </div>
 
+<?php if ($key === null): ?>
+    <p class="alert alert-error"><?= t('The Matinee key could not be loaded. Check MATINEE_KEY or the key file.') ?></p>
+<?php else: ?>
+    <p class="alert alert-info"><?= t('Encryption key: %s, key id %s', $key['source'] === 'env' ? t('the MATINEE_KEY environment variable') : t('the key file in the data directory'), $this->text->e($key['id'])) ?></p>
+<?php endif ?>
+
 <form method="post" action="<?= $this->url->href('MatineeAdminController', 'save', ['plugin' => 'Matinee']) ?>" autocomplete="off">
     <?= $this->form->csrf() ?>
 

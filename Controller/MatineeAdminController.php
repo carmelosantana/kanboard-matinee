@@ -3,6 +3,8 @@
 namespace Kanboard\Plugin\Matinee\Controller;
 
 use Kanboard\Core\Controller\AccessForbiddenException;
+use Kanboard\Plugin\Matinee\Crypto\CryptoException;
+use Kanboard\Plugin\Matinee\Crypto\KeyStoreException;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
 use Kanboard\Plugin\Matinee\Model\Settings;
@@ -49,7 +51,24 @@ class MatineeAdminController extends MatineeBaseController
             ],
             'policies' => [Settings::POLICY_EVERYONE => t('Every user'), Settings::POLICY_ADMINS => t('Administrators only')],
             'servers' => $rows,
+            'key' => $this->keyStatus(),
         ]));
+    }
+
+    /**
+     * Spec §2: where the root key comes from ("env" or "file") and its 8-hex id, or null when it cannot be loaded. The
+     * page then shows one fixed notice: never the key, the env value, the path or the exception's message.
+     *
+     * @return array{source: string, id: string}|null
+     */
+    private function keyStatus(): ?array
+    {
+        try {
+            $store = $this->container['matineeKeyStore'];
+            return ['source' => $store->keyId(), 'id' => $store->activeKeyId()];
+        } catch (KeyStoreException|CryptoException) {
+            return null;
+        }
     }
 
     /** Every field is checked before anything is saved; a bad list entry is named by its line number only. */
