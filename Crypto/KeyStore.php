@@ -8,8 +8,11 @@ namespace Kanboard\Plugin\Matinee\Crypto;
  * - A non-null $envValue (the caller passes getenv('MATINEE_KEY') ?: null) must be base64 of exactly
  *   32 bytes, or every call fails closed. When valid it is the active key.
  * - Otherwise the key lives in "$dir/secret.key". It is created once, under an flock on "$dir/.lock",
- *   with fopen 'x' (never over an existing file), chmod 0600, then re-read so the bytes on disk win.
- *   A key file of the wrong size fails closed and is never replaced.
+ *   with fopen 'x' (never over an existing file), chmod 0600 before the write, then re-read so the bytes
+ *   on disk win. A key file of the wrong size fails closed and is never replaced; a failed write removes
+ *   the partial file it created.
+ * - An existing key dir that is a symlink or group/world-writable is refused, otherwise it is tightened
+ *   to 0700. A symlinked key file or lock file is refused; a key file readable by others is tightened to 0600.
  *
  * Exception messages are fixed strings and never carry key bytes or paths.
  */
@@ -93,18 +96,33 @@ final class KeyStore
         return $this->envKey;
     }
 
+    /** Redacted: var_dump and print_r never show key material, the env value or the path. */
+    public function __debugInfo(): array
+    {
+        return [
+            'envKey' => $this->envValue === null ? null : '[redacted]',
+            'fileKey' => $this->fileKey === null ? null : '[redacted]',
+        ];
+    }
+
     private function fileKey(bool $create): ?string
     {
         if ($this->fileKey !== null) {
             return $this->fileKey;
         }
         $path = $this->dir.'/'.self::FILE;
+        // fopen 'x' and file_get_contents would follow a planted symlink.
+        if (is_link($path)) {
+            throw new CryptoException('keystore: unsafe key file');
+        }
         if (!$create) {
             return file_exists($path) ? $this->fileKey = $this->readKeyFile($path) : null;
         }
 
         $this->ensureDir();
-        $lock = @fopen($this->dir.'/.lock', 'c');
+        $lockPath = $this->dir.'/.lock';
+        // fopen 'c' follows a symlink and would create its target.
+        $lock = is_link($lockPath) ? false : @fopen($lockPath, 'c');
         if ($lock === false || !flock($lock, LOCK_EX)) {
             throw new CryptoException('keystore: cannot lock key dir');
         }
@@ -119,18 +137,32 @@ final class KeyStore
         }
     }
 
+    /**
+     * An existing dir must be a real directory that only its owner can write; it is then tightened to 0700.
+     * A new one is created and set to 0700 exactly (mkdir's mode is filtered by the umask).
+     */
     private function ensureDir(): void
     {
+        if (is_link($this->dir)) {
+            throw new CryptoException('keystore: unsafe key dir');
+        }
         if (is_dir($this->dir)) {
+            if ((fileperms($this->dir) & 0022) !== 0 || !@chmod($this->dir, 0700)) {
+                throw new CryptoException('keystore: unsafe key dir');
+            }
             return;
         }
         if (!@mkdir($this->dir, 0700, true) && !is_dir($this->dir)) {
             throw new CryptoException('keystore: cannot create key dir');
         }
-        // mkdir's mode is filtered by the umask; set it exactly.
-        chmod($this->dir, 0700);
+        if (!@chmod($this->dir, 0700)) {
+            throw new CryptoException('keystore: cannot create key dir');
+        }
     }
 
+    /**
+     * Runs under the lock with no key file present, so a file this call created is its own to remove on failure.
+     */
     private function createKeyFile(string $path): void
     {
         $fh = @fopen($path, 'x');
@@ -140,19 +172,26 @@ final class KeyStore
             }
             throw new CryptoException('keystore: cannot create key file');
         }
-        $key = random_bytes(self::KEY_BYTES);
-        $written = fwrite($fh, $key);
-        sodium_memzero($key);
-        $flushed = fflush($fh);
-        fclose($fh);
-        // fopen's mode is 0666 filtered by the umask; set it exactly.
-        if ($written !== self::KEY_BYTES || !$flushed || !chmod($path, 0600)) {
+        // fopen's mode is 0666 filtered by the umask; narrow it before any key byte is written.
+        $ok = @chmod($path, 0600);
+        if ($ok) {
+            $key = random_bytes(self::KEY_BYTES);
+            $ok = fwrite($fh, $key) === self::KEY_BYTES && fflush($fh) && @fsync($fh);
+            sodium_memzero($key);
+        }
+        $ok = fclose($fh) && $ok;
+        if (!$ok) {
+            @unlink($path);
             throw new CryptoException('keystore: cannot create key file');
         }
     }
 
     private function readKeyFile(string $path): string
     {
+        $mode = @fileperms($path);
+        if ($mode !== false && ($mode & 0077) !== 0 && !@chmod($path, 0600)) {
+            throw new CryptoException('keystore: unsafe key file');
+        }
         $key = @file_get_contents($path);
         if ($key === false || strlen($key) !== self::KEY_BYTES) {
             if (is_string($key)) {

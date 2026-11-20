@@ -6,6 +6,16 @@ use PHPUnit\Framework\TestCase;
 
 class TokenBoxTest extends TestCase
 {
+    /**
+     * print_r of the trace frames inside Matinee code. The full trace drags in PHPUnit's suite objects, whose
+     * data providers (other tests') can hold the same fixture strings.
+     */
+    private static function matineeFrames(\Throwable $e): string
+    {
+        $frames = array_filter($e->getTrace(), fn (array $f) => str_starts_with($f['class'] ?? '', 'Kanboard\\Plugin\\Matinee\\'));
+        return print_r(array_values($frames), true);
+    }
+
     private const TOKEN = 'test-token-NOT-REAL-0000';
     private const BASE_URL = 'https://plex.example.test:32400';
     private const MACHINE = 'abc123machine';
@@ -129,7 +139,7 @@ class TokenBoxTest extends TestCase
         } catch (CryptoException $e) {
             $this->assertSame('token: bad machine id', $e->getMessage());
             $this->assertStringNotContainsString(self::TOKEN, (string) $e);
-            $this->assertStringNotContainsString(self::TOKEN, print_r($e->getTrace(), true));
+            $this->assertStringNotContainsString(self::TOKEN, self::matineeFrames($e));
         } finally {
             ini_set('zend.exception_ignore_args', (string) $previous);
         }
@@ -146,6 +156,33 @@ class TokenBoxTest extends TestCase
         $this->expectException(CryptoException::class);
         $this->expectExceptionMessage('token: bad key');
         new TokenBox(random_bytes(16));
+    }
+
+    public function testAWrongSizeKeyIsNotInTheTrace(): void
+    {
+        $key = random_bytes(16);
+        $previous = ini_set('zend.exception_ignore_args', '0');
+        try {
+            new TokenBox($key);
+            $this->fail('expected CryptoException');
+        } catch (CryptoException $e) {
+            $trace = (string) $e.self::matineeFrames($e);
+            $this->assertStringNotContainsString($key, $trace);
+            $this->assertStringNotContainsString(bin2hex($key), $trace);
+        } finally {
+            ini_set('zend.exception_ignore_args', (string) $previous);
+        }
+    }
+
+    public function testDebugOutputCarriesNoKeyBytes(): void
+    {
+        $box = $this->box();
+        ob_start();
+        var_dump($box);
+        $dump = ob_get_clean().print_r($box, true);
+        $this->assertStringNotContainsString($this->key, $dump);
+        $this->assertStringNotContainsString(bin2hex($this->key), $dump);
+        $this->assertStringNotContainsString(base64_encode($this->key), $dump);
     }
 
     // The fixed message, and nothing in the exception's string form, carries the token.

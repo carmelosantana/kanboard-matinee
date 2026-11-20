@@ -7,6 +7,16 @@ use PHPUnit\Framework\TestCase;
 
 class KeyStoreTest extends TestCase
 {
+    /**
+     * print_r of the trace frames inside Matinee code. The full trace drags in PHPUnit's suite objects, whose
+     * data providers (other tests') can hold the same fixture strings.
+     */
+    private static function matineeFrames(\Throwable $e): string
+    {
+        $frames = array_filter($e->getTrace(), fn (array $f) => str_starts_with($f['class'] ?? '', 'Kanboard\\Plugin\\Matinee\\'));
+        return print_r(array_values($frames), true);
+    }
+
     private string $base;
     private string $dir;
     private int $umask;
@@ -26,6 +36,10 @@ class KeyStoreTest extends TestCase
 
     private function rmTree(string $path): void
     {
+        if (is_link($path)) {
+            unlink($path);
+            return;
+        }
         if (!file_exists($path)) {
             return;
         }
@@ -246,10 +260,280 @@ class KeyStoreTest extends TestCase
         $this->assertSame(sodium_crypto_kdf_derive_from_key(32, 2, 'mtnrefs_', $root), $refs);
     }
 
+    private function assertRefused(KeyStore $store, string $message, string $method = 'rootKey'): void
+    {
+        try {
+            $store->$method();
+            $this->fail('expected CryptoException');
+        } catch (CryptoException $e) {
+            $this->assertSame($message, $e->getMessage());
+        }
+    }
+
+    // fopen 'x' / 'c' and file_get_contents follow symlinks; a planted link must never be used or created through.
+    public function testDanglingSymlinkKeyFileIsRefusedAndItsTargetIsNotCreated(): void
+    {
+        mkdir($this->dir, 0700, true);
+        $target = $this->base.'/elsewhere.key';
+        symlink($target, $this->keyFile());
+
+        $this->assertRefused(new KeyStore($this->dir, null), 'keystore: unsafe key file');
+        $this->assertFileDoesNotExist($target);
+        // The read-only path (env key set) refuses it too.
+        $this->assertRefused(new KeyStore($this->dir, base64_encode(random_bytes(32))), 'keystore: unsafe key file', 'allKeys');
+        $this->assertFileDoesNotExist($target);
+    }
+
+    public function testSymlinkToAnExistingKeyFileIsRefused(): void
+    {
+        mkdir($this->dir, 0700, true);
+        $target = $this->base.'/elsewhere.key';
+        file_put_contents($target, random_bytes(32));
+        symlink($target, $this->keyFile());
+
+        $this->assertRefused(new KeyStore($this->dir, null), 'keystore: unsafe key file');
+        $this->assertRefused(new KeyStore($this->dir, base64_encode(random_bytes(32))), 'keystore: unsafe key file', 'allKeys');
+    }
+
+    public function testSymlinkedLockIsRefusedAndItsTargetIsNotCreated(): void
+    {
+        mkdir($this->dir, 0700, true);
+        $target = $this->base.'/elsewhere.lock';
+        symlink($target, $this->dir.'/.lock');
+
+        $this->assertRefused(new KeyStore($this->dir, null), 'keystore: cannot lock key dir');
+        $this->assertFileDoesNotExist($target);
+        $this->assertFileDoesNotExist($this->keyFile());
+    }
+
+    public static function unsafeDirModes(): array
+    {
+        return ['world-writable' => [0777], 'group-writable' => [0770], 'other-writable only' => [0702]];
+    }
+
+    /** @dataProvider unsafeDirModes */
+    public function testGroupOrWorldWritableExistingDirIsRefused(int $mode): void
+    {
+        mkdir($this->dir, 0700, true);
+        chmod($this->dir, $mode);
+
+        $this->assertRefused(new KeyStore($this->dir, null), 'keystore: unsafe key dir');
+        $this->assertFileDoesNotExist($this->keyFile());
+        $this->assertSame($mode, $this->mode($this->dir));
+    }
+
+    public function testSymlinkedDirIsRefused(): void
+    {
+        $real = $this->base.'/real';
+        mkdir($real, 0700, true);
+        symlink($real, $this->dir);
+
+        $this->assertRefused(new KeyStore($this->dir, null), 'keystore: unsafe key dir');
+        $this->assertFileDoesNotExist($real.'/secret.key');
+    }
+
+    // Kills dropping the chmod on an existing dir: 0755 is not writable by others but is still too open.
+    public function testExistingReadableDirIsTightenedTo0700(): void
+    {
+        mkdir($this->dir, 0700, true);
+        chmod($this->dir, 0755);
+
+        (new KeyStore($this->dir, null))->rootKey();
+        $this->assertSame(0700, $this->mode($this->dir));
+    }
+
+    // Kills dropping the tightening of an existing key file, on both the create and the read-only path.
+    public function testExistingLooseKeyFileIsTightenedTo0600(): void
+    {
+        $bytes = random_bytes(32);
+        $this->writeKeyFile($bytes);
+        chmod($this->keyFile(), 0644);
+        $this->assertSame($bytes, (new KeyStore($this->dir, null))->rootKey());
+        $this->assertSame(0600, $this->mode($this->keyFile()));
+
+        chmod($this->keyFile(), 0640);
+        (new KeyStore($this->dir, base64_encode(random_bytes(32))))->allKeys();
+        $this->assertSame(0600, $this->mode($this->keyFile()));
+    }
+
+    // Kills dropping the unlink on a failed write: a short write must not leave a partial key behind,
+    // or every later request would fail closed on it.
+    public function testAFailedWriteLeavesNoKeyFile(): void
+    {
+        stream_wrapper_register('mtnshort', ShortWriteStream::class);
+        try {
+            ShortWriteStream::$entries = ['mtnshort://k' => ['dir' => true, 'mode' => 0700, 'data' => '']];
+            try {
+                (new KeyStore('mtnshort://k', null))->rootKey();
+                $this->fail('expected CryptoException');
+            } catch (CryptoException $e) {
+                $this->assertSame('keystore: cannot create key file', $e->getMessage());
+            }
+            $this->assertTrue(ShortWriteStream::$created, 'the key file was opened for creation');
+            $this->assertArrayNotHasKey('mtnshort://k/secret.key', ShortWriteStream::$entries);
+        } finally {
+            stream_wrapper_unregister('mtnshort');
+            ShortWriteStream::$created = false;
+        }
+    }
+
+    // The env value never reaches a trace argument (#[\SensitiveParameter]). The constructor only stores it, so
+    // its frame is never in a trace; the attribute is pinned directly for when a constructor throw is added.
+    public function testABadEnvValueIsNotInTheTrace(): void
+    {
+        $param = new ReflectionParameter([KeyStore::class, '__construct'], 'envValue');
+        $this->assertNotEmpty($param->getAttributes(SensitiveParameter::class));
+
+        $env = base64_encode(random_bytes(31));
+        $previous = ini_set('zend.exception_ignore_args', '0');
+        try {
+            (new KeyStore($this->dir, $env))->rootKey();
+            $this->fail('expected CryptoException');
+        } catch (CryptoException $e) {
+            $this->assertStringNotContainsString($env, (string) $e);
+            $this->assertStringNotContainsString($env, self::matineeFrames($e));
+        } finally {
+            ini_set('zend.exception_ignore_args', (string) $previous);
+        }
+    }
+
+    public function testDebugOutputCarriesNoKeyBytes(): void
+    {
+        $env = random_bytes(32);
+        $store = new KeyStore($this->dir, base64_encode($env));
+        $store->rootKey();
+        $file = new KeyStore($this->base.'/file', null);
+        $fileKey = $file->rootKey();
+
+        foreach ([[$store, $env], [$file, $fileKey]] as [$subject, $key]) {
+            ob_start();
+            var_dump($subject);
+            $dump = ob_get_clean().print_r($subject, true);
+            $this->assertStringNotContainsString($key, $dump);
+            $this->assertStringNotContainsString(bin2hex($key), $dump);
+            $this->assertStringNotContainsString(base64_encode($key), $dump);
+        }
+    }
+
+    public function testAWrongSizeRootIsNotInTheSubkeysTrace(): void
+    {
+        $root = random_bytes(16);
+        $previous = ini_set('zend.exception_ignore_args', '0');
+        try {
+            Subkeys::token($root);
+            $this->fail('expected CryptoException');
+        } catch (CryptoException $e) {
+            $trace = (string) $e.self::matineeFrames($e);
+            $this->assertStringNotContainsString($root, $trace);
+            $this->assertStringNotContainsString(bin2hex($root), $trace);
+        } finally {
+            ini_set('zend.exception_ignore_args', (string) $previous);
+        }
+    }
+
     public function testSubkeysRejectAWrongSizeRoot(): void
     {
         $this->expectException(CryptoException::class);
         $this->expectExceptionMessage('subkeys: bad root key');
         Subkeys::token(random_bytes(16));
+    }
+}
+
+/**
+ * In-memory stream wrapper whose writes always come up short, so KeyStore's failed-write path can run.
+ * Paths are whole URLs; entries hold dirs and files.
+ */
+class ShortWriteStream
+{
+    /** @var array<string, array{dir: bool, mode: int, data: string}> */
+    public static array $entries = [];
+    public static bool $created = false;
+
+    /** @var resource|null */
+    public $context;
+    private string $path = '';
+    private int $pos = 0;
+
+    public function url_stat(string $path, int $flags): array|false
+    {
+        $e = self::$entries[$path] ?? null;
+        if ($e === null) {
+            return false;
+        }
+        $mode = ($e['dir'] ? 0040000 : 0100000) | $e['mode'];
+        return ['mode' => $mode, 'size' => strlen($e['data'])] + array_fill(0, 13, 0);
+    }
+
+    public function mkdir(string $path, int $mode, int $options): bool
+    {
+        self::$entries[$path] = ['dir' => true, 'mode' => $mode, 'data' => ''];
+        return true;
+    }
+
+    public function stream_metadata(string $path, int $option, mixed $value): bool
+    {
+        if ($option !== STREAM_META_ACCESS || !isset(self::$entries[$path])) {
+            return false;
+        }
+        self::$entries[$path]['mode'] = $value;
+        return true;
+    }
+
+    public function stream_open(string $path, string $mode, int $options, ?string &$opened): bool
+    {
+        $exists = isset(self::$entries[$path]);
+        if ($mode[0] === 'x' && $exists || $mode[0] === 'r' && !$exists) {
+            return false;
+        }
+        if (!$exists) {
+            self::$entries[$path] = ['dir' => false, 'mode' => 0644, 'data' => ''];
+            if ($mode[0] === 'x') {
+                self::$created = true;
+            }
+        }
+        $this->path = $path;
+        return true;
+    }
+
+    public function stream_write(string $data): int
+    {
+        return 0;
+    }
+
+    public function stream_read(int $count): string
+    {
+        $chunk = substr(self::$entries[$this->path]['data'] ?? '', $this->pos, $count);
+        $this->pos += strlen($chunk);
+        return $chunk;
+    }
+
+    public function stream_eof(): bool
+    {
+        return $this->pos >= strlen(self::$entries[$this->path]['data'] ?? '');
+    }
+
+    public function stream_stat(): array|false
+    {
+        return $this->url_stat($this->path, 0);
+    }
+
+    public function stream_lock(int $operation): bool
+    {
+        return true;
+    }
+
+    public function stream_flush(): bool
+    {
+        return true;
+    }
+
+    public function stream_close(): void
+    {
+    }
+
+    public function unlink(string $path): bool
+    {
+        unset(self::$entries[$path]);
+        return true;
     }
 }

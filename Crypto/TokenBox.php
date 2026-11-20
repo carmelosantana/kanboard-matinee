@@ -22,6 +22,12 @@ final class TokenBox
         }
     }
 
+    /** Redacted: var_dump and print_r never show the key. */
+    public function __debugInfo(): array
+    {
+        return ['tokenKey' => '[redacted]'];
+    }
+
     /** @return array{nonce: string, ct: string} */
     public function seal(#[\SensitiveParameter] string $token, int $serverId, int $ownerId, string $baseUrl, string $machineId): array
     {
