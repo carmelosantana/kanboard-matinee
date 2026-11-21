@@ -34,6 +34,7 @@ class ResponseSinkTest extends TestCase
             output: function (string $chunk): void { $this->calls[] = 'output:' . $chunk; },
             aborted: fn (): bool => $this->gone,
             endBuffers: function (): void { $this->calls[] = 'endBuffers'; },
+            flush: function (): void { $this->calls[] = 'flush'; },
         );
     }
 
@@ -102,7 +103,41 @@ class ResponseSinkTest extends TestCase
             'canonical spelling'  => [['Content-Type' => 'text/html']],
             'a line break'        => [['content-type' => "audio/mpeg\r\nSet-Cookie: x=1"]],
             'a NUL'               => [['content-type' => "audio/mpeg\0"]],
+            'a 19-digit length'   => [['content-length' => '1234567890123456789']],
+            'a length list'       => [['content-length' => '3, 3']],
+            'a negative length'   => [['content-length' => '-5']],
+            'an empty length'     => [['content-length' => '']],
+            'a length with a sp'  => [['content-length' => '3 ']],
+            'a bogus range unit'  => [['accept-ranges' => 'chunks']],
+            'two range units'     => [['accept-ranges' => 'bytes, none']],
         ];
+    }
+
+    /** @dataProvider allowedValues */
+    public function testWellFormedLengthsAndRangeUnitsAreForwarded(string $name, string $value, string $line): void
+    {
+        $this->sink()->open(200, [$name => $value]);
+        $this->assertSame($line, $this->headerLines()[0]);
+    }
+
+    public static function allowedValues(): array
+    {
+        return [
+            'length 0'           => ['content-length', '0', 'Content-Length: 0'],
+            'an 18-digit length' => ['content-length', '123456789012345678', 'Content-Length: 123456789012345678'],
+            'bytes'              => ['accept-ranges', 'bytes', 'Accept-Ranges: bytes'],
+            'none'               => ['accept-ranges', 'none', 'Accept-Ranges: none'],
+        ];
+    }
+
+    public function testEveryWriteIsFlushedRightAfterItsOutput(): void
+    {
+        $sink = $this->sink();
+        $sink->open(200, []);
+        $this->calls = [];
+        $sink->write('a');
+        $sink->write('b');
+        $this->assertSame(['output:a', 'flush', 'output:b', 'flush'], $this->calls);
     }
 
     public function testWriteOutputsThenReportsAnAbort(): void

@@ -488,6 +488,78 @@ class CurlTransportTest extends TestCase
         }
     }
 
+    /**
+     * Runs $fn(transport, base URL) against the raw canned-response fixture, then stops it.
+     *
+     * @param \Closure(CurlTransport, string): void $fn
+     */
+    private function withCanned(\Closure $fn): void
+    {
+        $port   = self::freePort();
+        $server = self::startFixture(
+            [PHP_BINARY, 'canned.php', (string) $port],
+            __DIR__ . '/fixtures/raw-http',
+            'tcp://127.0.0.1:' . $port
+        );
+        if ($server === null) {
+            self::prerequisiteMissing('could not start the raw canned-response fixture');
+        }
+        try {
+            $fn($this->transport(['127.0.0.1:' . $port]), 'http://127.0.0.1:' . $port);
+        } finally {
+            self::stopFixture($server);
+        }
+    }
+
+    public function testATrailerOnAnEmptyChunkedBodyCannotOverwriteTheHeaders(): void
+    {
+        $this->withCanned(function (CurlTransport $t, string $base): void {
+            $r = $t->get($base . '/trailer-empty', $this->headers());
+            $this->assertSame(200, $r->status);
+            $this->assertSame('', $r->body);
+            $this->assertSame('audio/mpeg', $r->headers['content-type'] ?? null, 'get()');
+            $this->assertArrayNotHasKey('content-length', $r->headers, 'get()');
+
+            $sink = self::sink();
+            $r = $t->stream($base . '/trailer-empty', $this->headers(), self::opts(), $sink);
+            $this->assertCount(1, $sink->opens);
+            $this->assertSame('audio/mpeg', $sink->opens[0][1]['content-type'] ?? null, 'stream() open');
+            $this->assertArrayNotHasKey('content-length', $sink->opens[0][1], 'stream() open');
+            $this->assertSame('audio/mpeg', $r->headers['content-type'] ?? null, 'stream() response');
+            $this->assertArrayNotHasKey('content-length', $r->headers, 'stream() response');
+        });
+    }
+
+    public function testContentLengthBesideTransferEncodingIsDropped(): void
+    {
+        $this->withCanned(function (CurlTransport $t, string $base): void {
+            $r = $t->get($base . '/cl-te', $this->headers());
+            $this->assertSame('abc', $r->body);
+            $this->assertSame('audio/mpeg', $r->headers['content-type'] ?? null);
+            $this->assertArrayNotHasKey('content-length', $r->headers, 'get()');
+
+            $sink = self::sink();
+            $r = $t->stream($base . '/cl-te', $this->headers(), self::opts(), $sink);
+            $this->assertSame(['abc'], $sink->writes);
+            $this->assertArrayNotHasKey('content-length', $sink->opens[0][1], 'stream() open');
+            $this->assertArrayNotHasKey('content-length', $r->headers, 'stream() response');
+        });
+    }
+
+    public function testAnInformationalResponseLeavesNoHeaderBehind(): void
+    {
+        $this->withCanned(function (CurlTransport $t, string $base): void {
+            $r = $t->get($base . '/early-hints', $this->headers());
+            $this->assertSame(200, $r->status);
+            $this->assertSame('abc', $r->body);
+            $this->assertSame(['content-type' => 'audio/mpeg', 'content-length' => '3'], $r->headers, 'get()');
+
+            $sink = self::sink();
+            $t->stream($base . '/early-hints', $this->headers(), self::opts(), $sink);
+            $this->assertSame([[200, ['content-type' => 'audio/mpeg', 'content-length' => '3']]], $sink->opens, 'stream()');
+        });
+    }
+
     // ── stream() (spec §3; C3a, C3c, C3f) ────────────────────────────────────
 
     /** The S3-shaped opts every stream must carry; tests override one key at a time. */
@@ -619,6 +691,19 @@ class CurlTransportTest extends TestCase
         $this->assertSame(str_repeat('a', 700) . str_repeat('b', 300), $written);
     }
 
+    public function testTheCutStillThrowsTooLargeWhenTheCutWriteSaysStop(): void
+    {
+        // The second write is the 300-byte cut, and the sink answers false to it: the cut wins (too_large).
+        $sink = self::sink(true, 2);
+        try {
+            $this->transport()->stream($this->url('/stream/big'), $this->headers(), self::opts(['maxBytes' => 1000]), $sink);
+            $this->fail('expected plex.too_large');
+        } catch (PlexException $e) {
+            $this->assertSame(PlexException::TOO_LARGE, $e->reason);
+        }
+        $this->assertSame(str_repeat('a', 700) . str_repeat('b', 300), implode('', $sink->writes));
+    }
+
     public function testABodyOfExactlyMaxBytesCompletes(): void
     {
         $sink = self::sink();
@@ -738,7 +823,7 @@ class CurlTransportTest extends TestCase
             'timeout 0'             => [['timeout' => 0] + $full],
             'maxBytes -1'           => [['maxBytes' => -1] + $full],
             'a string'              => [['lowSpeedTime' => '30'] + $full],
-            'an unknown key'        => [$full + ['range' => 'bytes=0-']],
+            'an unknown key'        => [$full + ['range' => 5]],
         ];
     }
 

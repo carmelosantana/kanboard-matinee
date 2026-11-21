@@ -71,6 +71,7 @@ class FakeTransport implements PlexTransport
 
     public function get(string $url, #[\SensitiveParameter] array $headers, array $opts = []): PlexResponse
     {
+        $opts = CurlTransport::checkGetOpts($opts);
         $this->requests[] = ['url' => $url, 'headers' => $headers, 'opts' => $opts];
         $next = $this->next();
         if (! $next instanceof PlexResponse) {

@@ -18,8 +18,9 @@ namespace Kanboard\Plugin\Matinee\Http;
  *   limit and byte cap come from opts; the cap is counted in the write callback and cut exactly. The first write
  *   checks the connected address through the $primaryIp seam before the sink is opened (after the transfer for an
  *   empty body). No callback lets an exception through libcurl: a sink exception is stored and rethrown after.
- * - Response headers go to PlexResponse, which keeps only the forwardable ones. Header lines that arrive after the
- *   body has started (chunked trailers) are ignored. Callers cannot set hop-by-hop or routing headers.
+ * - Response headers go to PlexResponse, which keeps only the forwardable ones. Only the final response's header
+ *   block counts: lines after it (chunked trailers) are ignored, and a Content-Length beside Transfer-Encoding is
+ *   dropped. Callers cannot set hop-by-hop or routing headers.
  * - curl errors become `plex.unreachable` with nothing else: no curl message, URL or query (S9). Nothing here
  *   turns on CURLOPT_VERBOSE or CURLINFO_HEADER_OUT, or logs curl_getinfo().
  * - discoverPlexDirect() is the one place host-name verification is off: a guarded, pinned TLS handshake to an
@@ -65,17 +66,15 @@ final class CurlTransport implements PlexTransport
         [$requestUrl, $pin] = $this->target($url);
         $headerLines = self::headerLines($headers);
 
-        $body        = '';
-        $tooLarge    = false;
-        $bodyStarted = false;
-        $received    = [];
+        $body     = '';
+        $tooLarge = false;
+        $received = [];
         $ch = null;
         try {
             $ch = curl_init();
-            $set = curl_setopt_array($ch, $this->requestOptions($requestUrl, $pin, $headerLines, $timeout, $received, $bodyStarted) + [
+            $set = curl_setopt_array($ch, $this->requestOptions($requestUrl, $pin, $headerLines, $timeout, $received) + [
                 CURLOPT_MAXFILESIZE    => $this->maxBytes,
-                CURLOPT_WRITEFUNCTION  => function ($ch, string $chunk) use (&$body, &$tooLarge, &$bodyStarted): int {
-                    $bodyStarted = true;
+                CURLOPT_WRITEFUNCTION  => function ($ch, string $chunk) use (&$body, &$tooLarge): int {
                     if (strlen($body) + strlen($chunk) > $this->maxBytes) {
                         $tooLarge = true;
                         return 0; // aborts the transfer
@@ -121,7 +120,6 @@ final class CurlTransport implements PlexTransport
         [$requestUrl, $pin] = $this->target($url);
         $headerLines = self::headerLines($headers);
 
-        $bodyStarted = false;
         $received    = [];
         $opened      = false; // open() has been attempted (the pin was checked first)
         $refused     = false; // the pin failed, open() refused or write() said stop: write nothing more
@@ -148,12 +146,11 @@ final class CurlTransport implements PlexTransport
 
         try {
             $ch = curl_init();
-            $set = curl_setopt_array($ch, $this->requestOptions($requestUrl, $pin, $headerLines, $opts['timeout'], $received, $bodyStarted) + [
+            $set = curl_setopt_array($ch, $this->requestOptions($requestUrl, $pin, $headerLines, $opts['timeout'], $received) + [
                 CURLOPT_LOW_SPEED_LIMIT => $opts['lowSpeedLimit'],
                 CURLOPT_LOW_SPEED_TIME  => $opts['lowSpeedTime'],
-                CURLOPT_WRITEFUNCTION   => static function (\CurlHandle $ch, string $chunk) use ($sink, $begin, $opts, &$bodyStarted, &$opened, &$refused, &$tooLarge, &$written, &$sinkError): int {
+                CURLOPT_WRITEFUNCTION   => static function (\CurlHandle $ch, string $chunk) use ($sink, $begin, $opts, &$opened, &$refused, &$tooLarge, &$written, &$sinkError): int {
                     try {
-                        $bodyStarted = true;
                         if ($refused || (! $opened && ! $begin($ch))) {
                             return 0;
                         }
@@ -246,7 +243,7 @@ final class CurlTransport implements PlexTransport
     }
 
     /** @return array{timeout?: int} get()'s opts: nothing, or a timeout of at least 1 */
-    private static function checkGetOpts(array $opts): array
+    public static function checkGetOpts(array $opts): array
     {
         if (array_diff(array_keys($opts), ['timeout']) !== []
             || (array_key_exists('timeout', $opts) && (! is_int($opts['timeout']) || $opts['timeout'] < 1))) {
@@ -257,18 +254,24 @@ final class CurlTransport implements PlexTransport
 
     /**
      * The options get() and stream() share: protocols, trust, the pin, no redirects or proxy, timeouts, the
-     * request headers and the response-header callback (which ignores trailers).
+     * request headers and the response-header callback.
+     *
+     * The callback keeps the final response's header block only: a status line starts a block afresh (dropping a
+     * 1xx's headers), and the blank line ending a non-1xx block closes it, so a trailer or anything later is
+     * ignored. When that block named Transfer-Encoding, its Content-Length is dropped (RFC 9112 §6.3).
      *
      * @param array{host:string, port:int, ip:string} $pin
      * @param list<string> $headerLines
      * @param array<string, string> $received
      * @return array<int, mixed>
      */
-    private function requestOptions(string $requestUrl, array $pin, #[\SensitiveParameter] array $headerLines, int $timeout, array &$received, bool &$bodyStarted): array
+    private function requestOptions(string $requestUrl, array $pin, #[\SensitiveParameter] array $headerLines, int $timeout, array &$received): array
     {
         $protocols = defined('CURLOPT_PROTOCOLS_STR')
             ? [CURLOPT_PROTOCOLS_STR => 'http,https', CURLOPT_REDIR_PROTOCOLS_STR => 'http,https']
             : [CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS, CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS];
+        $informational = false; // the current block answers a 1xx
+        $headersDone   = false; // the final block has ended: ignore every later line
         return $protocols + $this->trustOptions() + [
             CURLOPT_URL            => $requestUrl,
             CURLOPT_HTTPGET        => true,
@@ -281,14 +284,22 @@ final class CurlTransport implements PlexTransport
             CURLOPT_CONNECTTIMEOUT => $this->connectTimeout,
             CURLOPT_TIMEOUT        => $timeout,
             CURLOPT_HTTPHEADER     => $headerLines,
-            CURLOPT_HEADERFUNCTION => static function ($ch, string $line) use (&$received, &$bodyStarted): int {
+            CURLOPT_HEADERFUNCTION => static function ($ch, string $line) use (&$received, &$informational, &$headersDone): int {
                 try {
-                    if ($bodyStarted) {
+                    if ($headersDone) {
                         // a chunked trailer: never let it overwrite the response headers
-                    } elseif (preg_match('#^HTTP/\S+\s+\d{3}#', $line) === 1) {
-                        $received = []; // a new response (after 100 Continue): start over
+                    } elseif (preg_match('#^HTTP/\S+\s+(\d{3})#', $line, $m) === 1) {
+                        $received      = []; // a new response (after a 1xx): start over
+                        $informational = $m[1][0] === '1';
+                    } elseif (trim($line) === '') {
+                        if (! $informational) {
+                            $headersDone = true;
+                            if (array_key_exists('transfer-encoding', $received)) {
+                                unset($received['content-length']);
+                            }
+                        }
                     } elseif (preg_match('/^([^:\s]+):[ \t]*(.*?)\s*$/', $line, $m) === 1) {
-                        $received[$m[1]] = $m[2];
+                        $received[strtolower($m[1])] = $m[2];
                     }
                     return strlen($line);
                 } catch (\Throwable) {

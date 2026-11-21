@@ -95,6 +95,31 @@ class FakeTransportTest extends TestCase
         $this->assertSame(['timeout' => 3], $t->requests[1]['opts']);
     }
 
+    /** @dataProvider badOpts */
+    public function testBadOptsAreRefusedAsCurlTransportRefusesThem(string $method, array $opts): void
+    {
+        $t = (new FakeTransport())->respond(200, 'ok')->streams(200, [], ['a']);
+        try {
+            $method === 'get'
+                ? $t->get('https://p.test/x', [], $opts)
+                : $t->stream('https://p.test/x', [], $opts, self::sink());
+            $this->fail('expected the opts to be refused');
+        } catch (\InvalidArgumentException) {
+        }
+        $this->assertSame([], $t->requests);
+    }
+
+    public static function badOpts(): array
+    {
+        $noMaxBytes = self::OPTS;
+        unset($noMaxBytes['maxBytes']);
+        return [
+            'get: an unknown key'      => ['get', ['maxBytes' => 5]],
+            'get: timeout 0'           => ['get', ['timeout' => 0]],
+            'stream: missing maxBytes' => ['stream', $noMaxBytes],
+        ];
+    }
+
     public function testAQueuedStreamIsNotAGetAnswer(): void
     {
         $t = (new FakeTransport())->streams(200, [], ['a']);

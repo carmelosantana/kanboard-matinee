@@ -65,6 +65,7 @@ class ByteRangeTest extends TestCase
             'trailing junk'       => ['bytes 100-199/1000, x', null],
             'unsatisfied form'    => ['bytes */1000', null],
             'end equals total-1'  => ['bytes 100-199/200', [100, 199, 200]],
+            'end equals total'    => ['bytes 100-199/199', null],
         ];
     }
 
