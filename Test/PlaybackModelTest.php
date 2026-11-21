@@ -281,6 +281,9 @@ class PlaybackModelTest extends Base
             'mp4 aac in .m4a direct' => [self::item(['container' => 'mp4', 'audioCodec' => 'aac'] + $part('m4a')), '7', '/library/parts/9/9/file.m4a'],
             'mp4 alac transcode'     => [self::item(['container' => 'mp4', 'audioCodec' => 'alac'] + $part('m4a')), '7', null],
             'mp3 with mjpeg video'   => [self::item(['container' => 'mp3', 'audioCodec' => 'mp3', 'videoCodec' => 'mjpeg'] + $part('mp3')), '7', null],
+            'mp4 aac with a malformed video codec' => [self::item(['container' => 'mp4', 'audioCodec' => 'aac', 'videoCodec' => 'h264-main'] + $part('mp4')), '7', null],
+            'mp4 aac with an empty video codec'    => [self::item(['container' => 'mp4', 'audioCodec' => 'aac', 'videoCodec' => ''] + $part('mp4')), '7', null],
+            'mp3 with a null video codec direct'   => [self::item(['container' => 'mp3', 'audioCodec' => 'mp3', 'videoCodec' => null] + $part('mp3')), '7', '/library/parts/9/9/file.mp3'],
             'ogg vorbis transcode'   => [self::item(['container' => 'ogg', 'audioCodec' => 'vorbis'] + $part('ogg')), '7', null],
             'mp3 in a .flac part'    => [self::item(['container' => 'mp3', 'audioCodec' => 'mp3'] + $part('flac')), '7', null],
             'flac codec in mp3'      => [self::item(['container' => 'mp3', 'audioCodec' => 'flac'] + $part('mp3')), '7', null],
@@ -425,6 +428,22 @@ class PlaybackModelTest extends Base
         $this->assertArrayNotHasKey('Range', $req['headers']);
         $this->assertSame(['content-type' => 'audio/mpeg', 'accept-ranges' => 'none'], $sink->headers);
         $this->assertSame('ID3more', $sink->body);
+    }
+
+    /** m4: the stop and the shutdown net use the id claim() returned; nothing looks the row up by its session again. */
+    public function testATranscodeUsesTheClaimedRowIdWithNoSecondLookup(): void
+    {
+        $db = $this->container['db'];
+        $db->getStatementHandler()->withLogging();
+        $db->setLogMessages([]);
+        $this->queueTranscode();
+        $this->media($this->alice, $this->ref($this->alice, 'media', '/library/metadata/3003'), null, new RecordingSink());
+
+        $sql = $db->getLogMessages();
+        $this->assertNotSame([], $sql, 'queries were logged');
+        $this->assertSame([], array_values(preg_grep('/\bWHERE\b.*\bsession\b/i', $sql)), 'a lookup by session');
+        $this->assertSame(1, (int) $this->rows()[0]['stopped']);
+        $this->assertCount(1, $this->shutdowns);
     }
 
     public function testATranscodeThatFailsStillStopsItsRow(): void

@@ -119,18 +119,23 @@ class TranscodeModelTest extends Base
         $alice = $this->user('alice');
         $serverId = $this->server($alice);
 
-        $session = $this->model()->claim($alice, $serverId, 'hls', self::NOW);
+        $claim = $this->model()->claim($alice, $serverId, 'hls', self::NOW);
+        $session = $claim['session'];
 
+        $this->assertSame(['id', 'session'], array_keys($claim));
         $this->assertMatchesRegularExpression(self::UUID, $session);
         $rows = $this->db()->table(TranscodeModel::TABLE)->findAll();
         $this->assertCount(1, $rows);
+        $this->assertSame((int) $rows[0]['id'], $claim['id'], 'claim() returns the new row id');
         $this->assertSame(
             ['server_id' => $serverId, 'user_id' => $alice, 'session' => $session, 'kind' => 'hls', 'created_at' => self::NOW, 'last_seen_at' => self::NOW, 'stopped' => 0],
             ['server_id' => (int) $rows[0]['server_id'], 'user_id' => (int) $rows[0]['user_id'], 'session' => $rows[0]['session'], 'kind' => $rows[0]['kind'],
                 'created_at' => (int) $rows[0]['created_at'], 'last_seen_at' => (int) $rows[0]['last_seen_at'], 'stopped' => (int) $rows[0]['stopped']]
         );
         $this->assertSame(1, $this->lockCount(), 'the claim went through the lock row');
-        $this->assertNotSame($session, $this->model()->claim($alice, $serverId, 'mp3', self::NOW), 'each claim mints a new session');
+        $second = $this->model()->claim($alice, $serverId, 'mp3', self::NOW);
+        $this->assertNotSame($session, $second['session'], 'each claim mints a new session');
+        $this->assertSame((int) $this->model()->find($second['session'], $alice)['id'], $second['id'], 'the second row id, not the first');
     }
 
     public function testUnknownKindIsRefused(): void
@@ -153,7 +158,7 @@ class TranscodeModelTest extends Base
         $u3 = $this->user('u3');
 
         $this->assertBusy(fn () => $this->model()->claim($u3, $a, 'hls', self::NOW));
-        $this->assertMatchesRegularExpression(self::UUID, $this->model()->claim($u3, $b, 'hls', self::NOW));
+        $this->assertMatchesRegularExpression(self::UUID, $this->model()->claim($u3, $b, 'hls', self::NOW)['session']);
         $this->assertSame([], $this->log->lines, 'a reached cap is not a lock failure');
     }
 
@@ -167,7 +172,7 @@ class TranscodeModelTest extends Base
         $this->row($b, $u);
 
         $this->assertBusy(fn () => $this->model()->claim($u, $c, 'mp3', self::NOW));
-        $this->assertMatchesRegularExpression(self::UUID, $this->model()->claim($v, $c, 'mp3', self::NOW));
+        $this->assertMatchesRegularExpression(self::UUID, $this->model()->claim($v, $c, 'mp3', self::NOW)['session']);
     }
 
     public function testGlobalCap(): void
@@ -210,7 +215,7 @@ class TranscodeModelTest extends Base
 
         $this->row($a, $u, ['last_seen_at' => self::NOW - 121]);
         $this->row($a, $u, ['stopped' => 1]);
-        $this->assertMatchesRegularExpression(self::UUID, $this->model()->claim($u, $a, 'hls', self::NOW));
+        $this->assertMatchesRegularExpression(self::UUID, $this->model()->claim($u, $a, 'hls', self::NOW)['session']);
     }
 
     public function testARowSeenExactlyAtTheWindowEdgeStillCounts(): void
@@ -390,7 +395,7 @@ class TranscodeModelTest extends Base
         $alice = $this->user('alice');
         $bob = $this->user('bob');
         $a = $this->server($alice);
-        $session = $this->model()->claim($alice, $a, 'hls', self::NOW);
+        $session = $this->model()->claim($alice, $a, 'hls', self::NOW)['session'];
 
         $row = $this->model()->find($session, $alice);
         $this->assertSame(['id', 'server_id', 'user_id', 'session', 'kind', 'last_seen_at', 'stopped'], array_keys($row));
@@ -418,8 +423,8 @@ class TranscodeModelTest extends Base
     {
         $alice = $this->user('alice');
         $a = $this->server($alice);
-        $session = $this->model()->claim($alice, $a, 'hls', self::NOW);
-        $other = $this->model()->claim($alice, $a, 'hls', self::NOW);
+        $session = $this->model()->claim($alice, $a, 'hls', self::NOW)['session'];
+        $other = $this->model()->claim($alice, $a, 'hls', self::NOW)['session'];
         $id = (int) $this->model()->find($session, $alice)['id'];
 
         $this->assertTrue($this->model()->heartbeat($id, self::NOW + 30));
@@ -468,7 +473,7 @@ class TranscodeModelTest extends Base
     {
         $alice = $this->user('alice');
         $a = $this->server($alice);
-        $session = $this->model()->claim($alice, $a, 'hls', self::NOW);
+        $session = $this->model()->claim($alice, $a, 'hls', self::NOW)['session'];
         $id = (int) $this->model()->find($session, $alice)['id'];
 
         $this->assertTrue($this->model()->stop($id));
@@ -502,7 +507,7 @@ class TranscodeModelTest extends Base
         $keptStopped = $this->row($a, $alice, ['stopped' => 1, 'last_seen_at' => self::NOW - TranscodeModel::RETENTION]);
         $keptStale = $this->row($a, $alice, ['last_seen_at' => self::NOW - TranscodeModel::RETENTION - 1]);
 
-        $new = $this->model()->claim($alice, $a, 'hls', self::NOW);
+        $new = $this->model()->claim($alice, $a, 'hls', self::NOW)['session'];
 
         $this->assertEqualsCanonicalizing([$keptStopped, $keptStale, $new], $this->db()->table(TranscodeModel::TABLE)->findAllByColumn('session'));
     }

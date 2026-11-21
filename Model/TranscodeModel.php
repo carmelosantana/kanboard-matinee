@@ -42,13 +42,15 @@ final class TranscodeModel extends Base
     }
 
     /**
-     * Claims a long-stream slot for $userId on $serverId and returns its new session uuid.
+     * Claims a long-stream slot for $userId on $serverId and returns the new row's id with its session uuid, so the
+     * caller stops and heartbeats that row without a second lookup.
      *
+     * @return array{id: int, session: string}
      * @throws MatineeBusyException a cap is reached, or the lock row is missing or could not be taken in time
      * @throws \InvalidArgumentException an unknown kind
      * @throws \LogicException called inside an open transaction, whose commit or rollback claim() would take over
      */
-    public function claim(int $userId, int $serverId, string $kind, int $now): string
+    public function claim(int $userId, int $serverId, string $kind, int $now): array
     {
         if (! in_array($kind, self::KINDS, true)) {
             throw new \InvalidArgumentException('Unknown Matinee stream kind.');
@@ -96,7 +98,7 @@ final class TranscodeModel extends Base
             }
 
             $session = ($this->uuid)();
-            $ok = $this->db->table(self::TABLE)->insert([
+            $id = $this->db->table(self::TABLE)->persist([
                 'server_id' => $serverId,
                 'user_id' => $userId,
                 'session' => $session,
@@ -105,11 +107,11 @@ final class TranscodeModel extends Base
                 'last_seen_at' => $now,
                 'stopped' => 0,
             ]);
-            if (! $ok) {
+            if ($id === false || (int) $id < 1) {
                 throw new \RuntimeException('Matinee: could not record the stream.');
             }
             $this->db->closeTransaction();
-            return $session;
+            return ['id' => (int) $id, 'session' => $session];
         } catch (\Throwable $e) {
             $this->db->cancelTransaction();
             throw $e;

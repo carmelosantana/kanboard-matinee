@@ -105,8 +105,7 @@ final class PlaybackModel extends Base
 
         $transcodes = $this->transcodes();
         $now = $this->now();
-        $session = $transcodes->claim($userId, $serverId, 'mp3', $now);
-        $rowId = (int) ($transcodes->find($session, $userId)['id'] ?? 0);
+        ['id' => $rowId, 'session' => $session] = $transcodes->claim($userId, $serverId, 'mp3', $now);
         try {
             ($this->container['matineeShutdown'])(static function () use ($transcodes, $rowId): void {
                 $transcodes->stop($rowId);
@@ -134,11 +133,11 @@ final class PlaybackModel extends Base
 
     // ── internals ────────────────────────────────────────────────────────────
 
-    /** The part path when a track plays directly (C1a), else null. */
+    /** The part path when a track plays directly (C1a: no video codec at all, so null), else null. */
     private static function directPart(array $item): ?string
     {
         $codecs = self::DIRECT_AUDIO[$item['container']] ?? null;
-        if ($codecs === null || ! in_array($item['audioCodec'], $codecs, true) || $item['videoCodec'] !== '' || $item['part'] === null) {
+        if ($codecs === null || ! in_array($item['audioCodec'], $codecs, true) || $item['videoCodec'] !== null || $item['part'] === null) {
             return null;
         }
         $ext = substr($item['part'], strrpos($item['part'], '.') + 1);

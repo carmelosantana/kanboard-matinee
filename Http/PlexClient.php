@@ -265,11 +265,12 @@ final class PlexClient
     /**
      * One item's metadata for the player (spec §7, S13; C1a, C5b), whitelisted. `section` is
      * `MediaContainer.librarySectionID` (null when absent); the rest comes from `Metadata[0]`, whose ratingKey must be the
-     * path's. Codecs and the container come from `Media[0]`, lowercased, and are '' unless they match CODEC; `part` is
+     * path's. Codecs and the container come from `Media[0]`, lowercased, and are '' unless they match CODEC, except
+     * `videoCodec`: null when absent, '?' when present but malformed, so it never reads as "no video"; `part` is
      * `Media[0].Part[0].key` when it is a part path, else null. Anything malformed is `plex.bad_json`.
      *
      * @return array{section: ?string, ratingKey: string, type: string, title: string, parentTitle: string,
-     *   grandparentTitle: string, duration: ?int, container: string, audioCodec: string, videoCodec: string, part: ?string}
+     *   grandparentTitle: string, duration: ?int, container: string, audioCodec: string, videoCodec: ?string, part: ?string}
      */
     public function item(string $path): array
     {
@@ -297,6 +298,9 @@ final class PlexClient
 
         $media = self::first($m['Media'] ?? null);
         $part = self::first($media['Part'] ?? null)['key'] ?? null;
+        $video = $media['videoCodec'] ?? null;
+        $video = $video === null ? null : self::codec($video);
+        $video = $video === '' ? '?' : $video;
 
         return [
             'section'          => $section,
@@ -308,19 +312,22 @@ final class PlexClient
             'duration'         => self::uint($m['duration'] ?? null),
             'container'        => self::codec($media['container'] ?? null),
             'audioCodec'       => self::codec($media['audioCodec'] ?? null),
-            'videoCodec'       => self::codec($media['videoCodec'] ?? null),
+            'videoCodec'       => $video,
             'part'             => is_string($part) && PlexPaths::isPart($part) ? $part : null,
         ];
     }
 
     /**
      * Streams one window of a direct part into $sink (C1b, C1d; S11). The request carries `Range: bytes=start-end` and
-     * the S3 opts; `maxBytes` is the window length, so at most that many bytes reach $sink.
+     * the S3 opts, with `maxBytes` at WINDOW as a backstop.
      *
      * Before $sink opens: a 401 is `plex.token_rejected`; a 416 returns its total with $sink unopened (`plex.bad_range`
-     * with no total); a 206 must carry a Content-Range inside the window; a 200 is a whole small file only from byte 0
-     * with a length of 1 to the window, and is rebuilt as a 206; anything else is `plex.http_error`. The type must be on
-     * the part's container list (by its extension). $sink then opens with 206 and the rebuilt headers.
+     * with no total); a 206 must carry a Content-Range inside the window, and a Content-Length, when present, of
+     * exactly e - s + 1 (`plex.bad_range`); a 200 is a whole small file only from byte 0 with a length of 1 to WINDOW
+     * (not to the requested length, so Safari's `bytes=0-1` probe works), and is rebuilt as a 206; anything else is
+     * `plex.http_error`. The type must be on the part's container list (by its extension). $sink then opens with 206
+     * and the rebuilt headers, and the body is cut at the validated length (e - s + 1, or the 200's length): a body
+     * that runs past it writes exactly that prefix, then is `plex.too_large`.
      *
      * @return array{status: int, total: ?int}
      */
@@ -336,10 +343,8 @@ final class PlexClient
         if ($types === null) {
             throw PlexException::badType();
         }
-        $length = $end - $start + 1;
-
         $result = null;
-        $guard = function (int $status, array $headers) use ($start, $end, $length, $types, &$result): ?array {
+        $guard = function (int $status, array $headers) use ($start, $end, $types, &$result): ?array {
             if ($status === 401) {
                 throw PlexException::tokenRejected();
             }
@@ -353,11 +358,12 @@ final class PlexClient
             }
             if ($status === 206) {
                 $range = ByteRange::upstream($headers['content-range'] ?? null, $start, $end);
-                if ($range === null) {
+                if ($range === null || (array_key_exists('content-length', $headers)
+                    && self::uint($headers['content-length']) !== $range[1] - $range[0] + 1)) {
                     throw PlexException::badRange();
                 }
             } elseif ($status === 200 && $start === 0 && ($len = self::uint($headers['content-length'] ?? null)) !== null
-                && $len >= 1 && $len <= $length) {
+                && $len >= 1 && $len <= ByteRange::WINDOW) {
                 $range = [0, $len - 1, $len];
             } else {
                 throw PlexException::httpError($status);
@@ -373,11 +379,11 @@ final class PlexClient
                 'content-range'  => 'bytes ' . $s . '-' . $e . '/' . $total,
                 'content-length' => (string) ($e - $s + 1),
                 'accept-ranges'  => 'bytes',
-            ]];
+            ], $e - $s + 1];
         };
 
         $this->stream($partPath, ['Range' => 'bytes=' . $start . '-' . $end], [
-            'timeout' => 60, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15, 'maxBytes' => $length,
+            'timeout' => 60, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15, 'maxBytes' => ByteRange::WINDOW,
         ], $guard, $sink);
         if ($result === null) {
             throw PlexException::unreachable();
@@ -607,11 +613,12 @@ final class PlexClient
     /**
      * Streams GET base + $path into $sink through $guard (spec §3; C3a). $guard sees the upstream status and forwardable
      * headers before $sink: it throws to refuse, returns null to stop with $sink unopened, or returns the
-     * [status, headers] $sink opens with. The body is never read before that. Transport failures other than a
+     * [status, headers] $sink opens with, plus an optional byte limit: a chunk that crosses it writes only the prefix
+     * that fits, then is `plex.too_large`. The body is never read before that. Transport failures other than a
      * PlexException or UnsafeUrlException are `plex.unreachable`, with nothing chained.
      *
      * @param array<string, string> $extraHeaders
-     * @param \Closure(int, array<string, string>): ?array{0: int, 1: array<string, string>} $guard
+     * @param \Closure(int, array<string, string>): ?array{0: int, 1: array<string, string>, 2?: int} $guard
      * @param array<string, string>|null $headers the set sent in place of the client's base headers (HLS)
      */
     private function stream(
@@ -623,6 +630,8 @@ final class PlexClient
         #[\SensitiveParameter] ?array $headers = null,
     ): void {
         $guarded = new class ($guard, $sink) implements PlexStreamSink {
+            private ?int $remaining = null;
+
             public function __construct(private readonly \Closure $guard, private readonly PlexStreamSink $inner)
             {
             }
@@ -630,11 +639,26 @@ final class PlexClient
             public function open(int $status, array $headers): bool
             {
                 $open = ($this->guard)($status, $headers);
-                return $open !== null && $this->inner->open($open[0], $open[1]);
+                if ($open === null) {
+                    return false;
+                }
+                $this->remaining = $open[2] ?? null;
+                return $this->inner->open($open[0], $open[1]);
             }
 
             public function write(string $chunk): bool
             {
+                if ($this->remaining === null) {
+                    return $this->inner->write($chunk);
+                }
+                if (strlen($chunk) > $this->remaining) {
+                    if ($this->remaining > 0) {
+                        $this->inner->write(substr($chunk, 0, $this->remaining));
+                    }
+                    $this->remaining = 0;
+                    throw PlexException::tooLarge();
+                }
+                $this->remaining -= strlen($chunk);
                 return $this->inner->write($chunk);
             }
         };

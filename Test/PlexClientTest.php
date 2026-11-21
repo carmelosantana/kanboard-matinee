@@ -1054,13 +1054,13 @@ class PlexClientTest extends TestCase
             'mp3 track' => ['item-track-mp3', '/library/metadata/3001', [
                 'section' => '3', 'ratingKey' => '3001', 'type' => 'track', 'title' => 'Fake Song',
                 'parentTitle' => 'Fake Album', 'grandparentTitle' => 'Fake Artist', 'duration' => 215000,
-                'container' => 'mp3', 'audioCodec' => 'mp3', 'videoCodec' => '',
+                'container' => 'mp3', 'audioCodec' => 'mp3', 'videoCodec' => null,
                 'part' => '/library/parts/5001/1700000000/file.mp3',
             ]],
             'flac track' => ['item-track-flac', '/library/metadata/3002', [
                 'section' => '3', 'ratingKey' => '3002', 'type' => 'track', 'title' => 'Fake Lossless',
                 'parentTitle' => 'Fake Album', 'grandparentTitle' => 'Fake Artist', 'duration' => 301000,
-                'container' => 'flac', 'audioCodec' => 'flac', 'videoCodec' => '',
+                'container' => 'flac', 'audioCodec' => 'flac', 'videoCodec' => null,
                 'part' => '/library/parts/5002/1700000001/file.flac',
             ]],
             'h263 track' => ['item-track-h263', '/library/metadata/3003', [
@@ -1078,7 +1078,7 @@ class PlexClientTest extends TestCase
             'no section' => ['item-no-section', '/library/metadata/3001', [
                 'section' => null, 'ratingKey' => '3001', 'type' => 'track', 'title' => 'Fake Song',
                 'parentTitle' => '', 'grandparentTitle' => '', 'duration' => null,
-                'container' => 'mp3', 'audioCodec' => 'mp3', 'videoCodec' => '',
+                'container' => 'mp3', 'audioCodec' => 'mp3', 'videoCodec' => null,
                 'part' => '/library/parts/5001/1700000000/file.mp3',
             ]],
         ];
@@ -1095,15 +1095,34 @@ class PlexClientTest extends TestCase
         $this->expectPlexError(fn () => $this->client()->item('/library/metadata/3999'), PlexException::BAD_JSON);
     }
 
-    /** @dataProvider badCodecs */
-    public function testItemCodecsOutsideTheShapeAreEmpty(mixed $codec): void
+    /**
+     * A malformed container or audio codec is ''; a malformed video codec is '?', so it can never read as "no video"
+     * (absent, which is null).
+     *
+     * @dataProvider badCodecs
+     */
+    public function testItemCodecsOutsideTheShapeAreEmptyOrAnUnknownVideoCodec(mixed $codec): void
     {
         $this->t->respond(200, self::itemJson(['ratingKey' => '7', 'type' => 'track', 'Media' => [[
             'container' => $codec, 'audioCodec' => $codec, 'videoCodec' => $codec,
             'Part' => [['key' => '/library/parts/1/2/file.mp3']],
         ]]]));
         $item = $this->client()->item('/library/metadata/7');
-        $this->assertSame(['', '', ''], [$item['container'], $item['audioCodec'], $item['videoCodec']]);
+        $this->assertSame(['', '', '?'], [$item['container'], $item['audioCodec'], $item['videoCodec']]);
+    }
+
+    /** @dataProvider absentVideoCodecs */
+    public function testAnAbsentVideoCodecIsNull(array $media): void
+    {
+        $this->t->respond(200, self::itemJson(['ratingKey' => '7', 'type' => 'track', 'Media' => [$media + [
+            'container' => 'mp3', 'audioCodec' => 'mp3', 'Part' => [['key' => '/library/parts/1/2/file.mp3']],
+        ]]]));
+        $this->assertNull($this->client()->item('/library/metadata/7')['videoCodec']);
+    }
+
+    public function absentVideoCodecs(): array
+    {
+        return ['missing' => [[]], 'json null' => [['videoCodec' => null]]];
     }
 
     public function badCodecs(): array
@@ -1116,6 +1135,7 @@ class PlexClientTest extends TestCase
             'number'         => [3],
             'array'          => [['mp3']],
             'underscore'     => ['amr_nb'],
+            'hyphen'         => ['h264-main'],
         ];
     }
 
@@ -1226,7 +1246,7 @@ class PlexClientTest extends TestCase
         $this->assertSame(self::BASE . self::MP3_PART, $req['url']);
         $this->assertSame('bytes=0-999', $req['headers']['Range']);
         $this->assertOnlyHeaderCarriesTheToken($req);
-        $this->assertSame(['timeout' => 60, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15, 'maxBytes' => 1000], $req['opts']);
+        $this->assertSame(['timeout' => 60, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15, 'maxBytes' => ByteRange::WINDOW], $req['opts']);
     }
 
     public function testA206IsRebuiltFromTheValidatedRange(): void
@@ -1234,7 +1254,7 @@ class PlexClientTest extends TestCase
         $sink = $this->sink();
         $this->t->streams(206, [
             'Content-Type' => 'audio/mpeg; charset=binary', 'Content-Range' => 'bytes 0-999/5000',
-            'Content-Length' => '99999', 'Accept-Ranges' => 'none',
+            'Content-Length' => '1000', 'Accept-Ranges' => 'none',
         ], ['abc', 'def']);
         $result = $this->client()->part(self::MP3_PART, 0, 999, $sink);
 
@@ -1345,7 +1365,7 @@ class PlexClientTest extends TestCase
     {
         return [
             'not from 0'      => [100, '700'],
-            'longer than window' => [0, '1001'],
+            'longer than window' => [0, (string) (ByteRange::WINDOW + 1)],
             'no length'       => [0, null],
             'zero length'     => [0, '0'],
             'not a number'    => [0, '7e2'],
@@ -1408,6 +1428,78 @@ class PlexClientTest extends TestCase
         $this->expectPlexError(fn () => $this->client()->part(self::MP3_PART, 0, 999, $sink), PlexException::TOO_LARGE);
         $this->assertSame(1, $sink->opens);
         $this->assertSame(1000, strlen($sink->body));
+    }
+
+    /** H1: a 206 is cut at its validated length e - s + 1, not at the window. */
+    public function testA206BodyPastItsContentRangeWritesExactlyThatLengthThenIsTooLarge(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-499/5000'], [str_repeat('a', 1000)]);
+        $this->expectPlexError(fn () => $this->client()->part(self::MP3_PART, 0, 999, $sink), PlexException::TOO_LARGE);
+        $this->assertSame(1, $sink->opens);
+        $this->assertSame('500', $sink->headers['content-length']);
+        $this->assertSame(500, strlen($sink->body));
+    }
+
+    public function testTheCutCountsAcrossChunks(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 100-599/5000'],
+            [str_repeat('a', 300), str_repeat('b', 200), 'c']);
+        $this->expectPlexError(fn () => $this->client()->part(self::MP3_PART, 100, 999, $sink), PlexException::TOO_LARGE);
+        $this->assertSame(str_repeat('a', 300) . str_repeat('b', 200), $sink->body);
+    }
+
+    public function testABodyOfExactlyTheValidatedLengthEndsNormally(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-499/5000'], [str_repeat('a', 250), str_repeat('b', 250)]);
+        $this->assertSame(['status' => 206, 'total' => 5000], $this->client()->part(self::MP3_PART, 0, 999, $sink));
+        $this->assertSame(500, strlen($sink->body));
+    }
+
+    /**
+     * H1: a 206 whose upstream Content-Length is present and is not e - s + 1 is refused before the sink opens.
+     *
+     * @dataProvider mismatchedLengths
+     */
+    public function testA206WhoseContentLengthIsNotItsRangeIsBadRange(string $length): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-499/5000', 'Content-Length' => $length], [str_repeat('a', 500)]);
+        $this->expectPlexError(fn () => $this->client()->part(self::MP3_PART, 0, 999, $sink), PlexException::BAD_RANGE);
+        $this->assertSame(0, $sink->opens);
+        $this->assertSame('', $sink->body);
+    }
+
+    public function mismatchedLengths(): array
+    {
+        return [
+            'the window' => ['1000'],
+            'one short'  => ['499'],
+            'one over'   => ['501'],
+            'junk'       => ['5e2'],
+            'empty'      => [''],
+        ];
+    }
+
+    /** H1: Safari's `bytes=0-1` probe of a 4 KB file Plex answers whole is still served, cut at the file's length. */
+    public function testSafarisTwoByteProbeAnsweredWithA200IsTheWholeSmallFile(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(200, ['Content-Type' => 'audio/mpeg', 'Content-Length' => '4096'], [str_repeat('z', 4096)]);
+        $this->assertSame(['status' => 206, 'total' => 4096], $this->client()->part(self::MP3_PART, 0, 1, $sink));
+        $this->assertSame('bytes 0-4095/4096', $sink->headers['content-range']);
+        $this->assertSame('4096', $sink->headers['content-length']);
+        $this->assertSame(4096, strlen($sink->body));
+    }
+
+    public function testA200BodyPastItsLengthWritesExactlyThatLengthThenIsTooLarge(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(200, ['Content-Type' => 'audio/mpeg', 'Content-Length' => '700'], [str_repeat('z', 650), str_repeat('y', 100)]);
+        $this->expectPlexError(fn () => $this->client()->part(self::MP3_PART, 0, 999, $sink), PlexException::TOO_LARGE);
+        $this->assertSame(700, strlen($sink->body));
     }
 
     public function testASinkThatStopsEndsThePartNormally(): void
