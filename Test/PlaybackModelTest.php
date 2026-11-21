@@ -129,6 +129,9 @@ class PlaybackModelTest extends Base
         }
         @rmdir($this->keyDir);
         parent::tearDown();
+        // PHPUnit keeps every finished test object, and Base's dispatcher holds the whole container through the
+        // plugin's listeners: drop it so these ~100 tests don't push the suite past a 128 MiB memory_limit.
+        $this->dispatcher = null;
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -224,11 +227,14 @@ class PlaybackModelTest extends Base
         return $this->container['db']->table(TranscodeModel::TABLE)->asc('id')->findAll();
     }
 
-    private function media(int $userId, string $ref, ?string $range, PlexStreamSink $sink, ?int &$authorized = null): void
+    /** How often the last media(), hlsMaster() or hlsChild() call ran $onAuthorized (a property, so arrow functions see it). */
+    private int $authorized = 0;
+
+    private function media(int $userId, string $ref, ?string $range, PlexStreamSink $sink): void
     {
-        $authorized = 0;
-        $this->model()->media($userId, $ref, $range, $sink, function () use (&$authorized): void {
-            $authorized++;
+        $this->authorized = 0;
+        $this->model()->media($userId, $ref, $range, $sink, function (): void {
+            $this->authorized++;
         });
     }
 
@@ -372,9 +378,9 @@ class PlaybackModelTest extends Base
     {
         $sink = new RecordingSink();
         $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-9/10'], ['0123456789']);
-        $this->media($this->alice, $this->ref($this->alice, 'media', self::MP3_PART), 'bytes=0-', $sink, $authorized);
+        $this->media($this->alice, $this->ref($this->alice, 'media', self::MP3_PART), 'bytes=0-', $sink);
 
-        $this->assertSame(1, $authorized);
+        $this->assertSame(1, $this->authorized);
         [$req] = $this->t->requests;
         $this->assertSame(self::BASE.self::MP3_PART, $req['url']);
         $this->assertSame('bytes=0-'.(ByteRange::WINDOW - 1), $req['headers']['Range']);
@@ -416,9 +422,9 @@ class PlaybackModelTest extends Base
     {
         $sink = new RecordingSink();
         $this->queueTranscode();
-        $this->media($this->alice, $this->ref($this->alice, 'media', '/library/metadata/3003'), 'bytes=0-', $sink, $authorized);
+        $this->media($this->alice, $this->ref($this->alice, 'media', '/library/metadata/3003'), 'bytes=0-', $sink);
 
-        $this->assertSame(1, $authorized);
+        $this->assertSame(1, $this->authorized);
         $rows = $this->rows();
         $this->assertCount(1, $rows);
         $this->assertSame(['mp3', $this->alice, $this->serverId, 1], [$rows[0]['kind'], (int) $rows[0]['user_id'], (int) $rows[0]['server_id'], (int) $rows[0]['stopped']]);
@@ -496,13 +502,12 @@ class PlaybackModelTest extends Base
                 'created_at' => self::T0, 'last_seen_at' => self::T0, 'stopped' => 0,
             ]);
         }
-        $authorized = 0;
         try {
-            $this->media($this->alice, $this->ref($this->alice, 'media', '/library/metadata/3003'), null, new RecordingSink(), $authorized);
+            $this->media($this->alice, $this->ref($this->alice, 'media', '/library/metadata/3003'), null, new RecordingSink());
             $this->fail('expected MatineeBusyException');
         } catch (MatineeBusyException) {
         }
-        $this->assertSame(1, $authorized);
+        $this->assertSame(1, $this->authorized);
         $this->assertSame([], $this->t->requests);
         $this->assertCount(2, $this->rows());
         $this->assertSame([], $this->shutdowns);
@@ -571,9 +576,8 @@ class PlaybackModelTest extends Base
             $this->ref($this->alice, 'art', '/library/metadata/7/thumb/1'),
             $this->ref($this->bob),
         ] as $ref) {
-            $authorized = 0;
-            $this->expectForbidden(fn () => $this->media($this->alice, $ref, null, new RecordingSink(), $authorized));
-            $this->assertSame(0, $authorized);
+            $this->expectForbidden(fn () => $this->media($this->alice, $ref, null, new RecordingSink()));
+            $this->assertSame(0, $this->authorized);
         }
     }
 
@@ -582,9 +586,8 @@ class PlaybackModelTest extends Base
         $this->share();
         $ref = $this->ref($this->bob, 'media', self::MP3_PART);
         $this->share(false);
-        $authorized = 0;
-        $this->expectForbidden(fn () => $this->media($this->bob, $ref, null, new RecordingSink(), $authorized));
-        $this->assertSame(0, $authorized);
+        $this->expectForbidden(fn () => $this->media($this->bob, $ref, null, new RecordingSink()));
+        $this->assertSame(0, $this->authorized);
     }
 
     public function testAnExpiredMediaRefIsRefused(): void
@@ -650,14 +653,13 @@ class PlaybackModelTest extends Base
     public function testATokenThatWillNotOpenFailsAtTheClientStage(): void
     {
         $this->container['db']->table('matinee_servers')->eq('id', $this->serverId)->update(['token_ct' => base64_encode(random_bytes(40))]);
-        $authorized = 0;
         try {
-            $this->media($this->alice, $this->ref($this->alice, 'media', self::MP3_PART), null, new RecordingSink(), $authorized);
+            $this->media($this->alice, $this->ref($this->alice, 'media', self::MP3_PART), null, new RecordingSink());
             $this->fail('expected MatineeConnectException');
         } catch (MatineeConnectException) {
         }
         // Authorized (C3d: the session is dropped once the ref and the server pass), then the client could not be built.
-        $this->assertSame(1, $authorized);
+        $this->assertSame(1, $this->authorized);
         $this->assertSame(['info Matinee: playback failed at client (server '.$this->serverId.', token unopenable)'], $this->log->lines);
         $this->assertSame([], $this->t->requests);
     }
@@ -769,6 +771,20 @@ class PlaybackModelTest extends Base
         $this->assertSame(['warning Matinee: transcode stop failed (server '.$this->serverId.', plex.http_error)'], $this->log->lines);
         $this->assertCleanLog();
         $this->assertSame('Matinee: transcode stop failed (server %d, %s)', PlaybackModel::STOP_FAILED_LOG);
+    }
+
+    /** Anything without a reason of its own (here a LogicException while the client is built) logs as "error". */
+    public function testAnUnexpectedStopFailureIsLoggedAsError(): void
+    {
+        $row = $this->claimRow($this->alice);
+        $this->container['matineePlexClientFactory'] = $this->container->protect(static function (): PlexClient {
+            throw new \LogicException('UNEXPECTED '.self::TOKEN);
+        });
+        $this->model()->stop($this->alice, $row['session']);
+
+        $this->assertSame(1, (int) $this->row((int) $row['id'])['stopped']);
+        $this->assertSame(['warning Matinee: transcode stop failed (server '.$this->serverId.', error)'], $this->log->lines);
+        $this->assertCleanLog();
     }
 
     public function testStopNeedsNoBrowseRightAndSkipsPlexOnADisabledServer(): void
@@ -943,9 +959,6 @@ class PlaybackModelTest extends Base
         return static fn (string $u): string => 'P('.$u.')';
     }
 
-    /** How often the last hlsMaster() or hlsChild() call ran $onAuthorized (a property, so arrow functions see it). */
-    private int $authorized = 0;
-
     private function hlsMaster(int $userId, string $ref, string $session): string
     {
         $this->authorized = 0;
@@ -1080,10 +1093,26 @@ class PlaybackModelTest extends Base
         $this->assertSame('Matinee (alice)', $req['headers']['X-Plex-Device-Name']);
     }
 
-    public function testHlsMasterRefusesBeforePlex(): void
+    /** @return array<string, array{string, string}> each refusal, through hlsMaster and hlsChild */
+    public static function hlsRefusals(): array
+    {
+        $cases = [];
+        foreach (['hlsMaster', 'hlsChild'] as $method) {
+            foreach ([
+                'another user\'s session', 'a session on another server', 'a stopped session', 'an mp3 row',
+                'an unknown session', 'a media ref', 'another user\'s ref', 'a server unshared since the page', 'a stale session',
+            ] as $case) {
+                $cases[$method.': '.$case] = [$method, $case];
+            }
+        }
+        return $cases;
+    }
+
+    /** @dataProvider hlsRefusals */
+    public function testHlsMasterAndChildRefuseBeforePlex(string $method, string $case): void
     {
         $this->share();
-        $mine = $this->claimRow($this->alice)['session'];
+        $mine = $this->claimRow($this->alice);
         $bobs = $this->claimRow($this->bob)['session'];
         $mp3 = $this->claimRow($this->alice, 'mp3')['session'];
         $stopped = $this->claimRow($this->bob, 'hls');
@@ -1091,32 +1120,32 @@ class PlaybackModelTest extends Base
         $den = $this->secondServer();
         ['session' => $onDen] = $this->container['matineeTranscodeModel']->claim($this->bob, $den, 'hls', $this->now);
 
-        foreach ([
+        [$user, $ref, $session] = match ($case) {
             'another user\'s session' => [$this->alice, $this->hlsRef($this->alice), $bobs],
             'a session on another server' => [$this->bob, $this->hlsRef($this->bob), $onDen],
             'a stopped session' => [$this->bob, $this->hlsRef($this->bob), $stopped['session']],
             'an mp3 row' => [$this->alice, $this->hlsRef($this->alice), $mp3],
             'an unknown session' => [$this->alice, $this->hlsRef($this->alice), '00000000-0000-4000-8000-000000000009'],
-            'a media ref' => [$this->alice, $this->ref($this->alice, 'media', self::MOVIE, '1'), $mine],
-            'another user\'s ref' => [$this->alice, $this->hlsRef($this->bob), $mine],
-        ] as $case => [$user, $ref, $session]) {
-            $this->expectForbidden(fn () => $this->hlsMaster($user, $ref, $session));
-            $this->assertSame(0, $this->authorized, $case);
+            'a media ref' => [$this->alice, $this->ref($this->alice, 'media', self::MOVIE, '1'), $mine['session']],
+            'another user\'s ref' => [$this->alice, $this->hlsRef($this->bob), $mine['session']],
+            'a server unshared since the page' => [$this->bob, $this->hlsRef($this->bob), $bobs],
+            'a stale session' => [$this->alice, $this->hlsRef($this->alice), $mine['session']],
+        };
+        if ($case === 'a server unshared since the page') {
+            $this->share(false);
+        }
+        if ($case === 'a stale session') {
+            $this->container['db']->table(TranscodeModel::TABLE)->eq('id', $mine['id'])->update(['last_seen_at' => self::T0 - 121]);
         }
 
-        // Unshared since the page was opened.
-        $ref = $this->hlsRef($this->bob);
-        $this->share(false);
-        $this->expectForbidden(fn () => $this->hlsMaster($this->bob, $ref, $bobs));
-        $this->assertSame(0, $this->authorized);
-    }
-
-    /** Addendum: a heartbeat that finds the row stale is Forbidden, and Plex is never asked. */
-    public function testHlsMasterOnAStaleRowIsForbidden(): void
-    {
-        $row = $this->claimRow($this->alice, 'hls', self::T0 - 121);
-        $this->expectForbidden(fn () => $this->hlsMaster($this->alice, $this->hlsRef($this->alice), $row['session']));
-        $this->assertSame(self::T0 - 121, (int) $this->row((int) $row['id'])['last_seen_at']);
+        $this->expectForbidden(fn () => $method === 'hlsMaster'
+            ? $this->hlsMaster($user, $ref, $session)
+            : $this->hlsChild($user, $ref, self::child($session, 'base/00000.ts'), new RecordingSink()));
+        // A stale row is found only by the heartbeat, which runs after $onAuthorized (C3d); the rest refuse before it.
+        $this->assertSame($case === 'a stale session' ? 1 : 0, $this->authorized);
+        if ($case === 'a stale session') {
+            $this->assertSame(self::T0 - 121, (int) $this->row((int) $mine['id'])['last_seen_at']);
+        }
     }
 
     public function testAFailingHeartbeatIsLoggedAndTheMasterStillPlays(): void
