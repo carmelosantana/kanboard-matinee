@@ -46,6 +46,7 @@ class NoTokenLeakTest extends Base
     {
         $this->cleanKeyDir();
         parent::tearDown();
+        $this->releaseContainer();
     }
 
     /** Runs a request (queueing $plex first) and keeps its body, headers, flash and any refusal message. */
@@ -254,6 +255,66 @@ class NoTokenLeakTest extends Base
         // The sweep looked at real streams and real refusals.
         foreach (['0123456789', 'ID3-bytes', 'sink 206', 'status 403', 'status 416', 'status 502', 'stream ended early'] as $shown) {
             $this->assertStringContainsString($shown, $all."\n".implode("\n", $this->log->lines));
+        }
+        $this->assertNoTokenAnywhere();
+    }
+
+    /** P3 Task 15: every hls start, proxy, ping and stop response, served or refused: status, headers, body and log. */
+    public function testEveryHlsResponse(): void
+    {
+        $signer = $this->container['matineeRefSigner'];
+        $transcodes = $this->container['matineeTranscodeModel'];
+        $this->container->offsetUnset('matineeShutdown');
+        $this->container['matineeShutdown'] = $this->container->protect(static function (callable $fn): void {
+        });
+        $this->container['matineeServerModel']->setShared($this->server, $this->owner, true);
+        $friend = $this->user('fern');
+        $playlist = ['Content-Type' => 'application/vnd.apple.mpegurl'];
+        $child = fn (string $session, string $rest): string => '/video/:/transcode/universal/session/'.$session.'/'.$rest;
+        $master = fn (string $session, string $uri = ''): string => "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=8000000\n".($uri ?: 'session/'.$session.'/base/index.m3u8')."\n";
+        $keep = function (MatineeTestResponse $r): MatineeTestResponse {
+            $this->seen[] = 'sink '.$this->sinkStatus.' '.json_encode($this->sinkHeaders).' '.json_encode($this->sinkRemoved).' '.$this->sinkBody;
+            $this->seen[] = 'status '.$r->code();
+            return $r;
+        };
+        $start = fn (string $ref, string $session) => fn () => $keep($this->call(self::PLAY, 'hlsStart', ['ref' => $ref, 'session' => $session], [], false, 'GET'));
+        $proxy = fn (string $ref, string $u) => fn () => $keep($this->call(self::PLAY, 'hlsProxy', ['ref' => $ref, 'u' => $u], [], false, 'GET'));
+        $post = fn (string $action, string $session, ?string $token = null) => fn () => $keep($this->call(self::PLAY, $action, [], ['session' => $session, 'csrf_token' => $token ?? $this->container['token']->getReusableCSRFToken()], false));
+
+        foreach ([$this->owner, $friend, $this->outsider] as $userId) {
+            $this->loginAs($userId);
+            ['session' => $session] = $transcodes->claim($userId, $this->server, 'hls', time());
+            $ref = $signer->sign($userId, $this->server, '1', 'hls', '/library/metadata/7', 28800);
+            $this->capture($start($ref, $session), fn () => $this->t->respond(200, $master($session), $playlist));
+            $this->capture($proxy($ref, $child($session, 'base/index.m3u8')), fn () => $this->t->respond(200, (string) file_get_contents(__DIR__.'/fixtures/plex/hls-index.m3u8'), $playlist));
+            $this->capture($proxy($ref, $child($session, 'base/00000.ts')), fn () => $this->t->streams(200, ['Content-Type' => 'video/mp2t'], ['ts-bytes']));
+            $this->capture($post('hlsPing', $session));
+            // Failures: an error body, a playlist naming the token, a transport message, a 401, a segment that runs
+            // past its cap, a u carrying the token, a ref that is the token, and a bad CSRF token.
+            $this->capture($start($ref, $session), fn () => $this->t->respond(500, '<html>'.self::TOKEN.'</html>', ['Content-Type' => 'text/html']));
+            $this->capture($start($ref, $session), fn () => $this->t->respond(200, $master($session, 'session/'.$session.'/base/index.m3u8?X-Plex-Token='.self::TOKEN), $playlist));
+            $this->capture($start($ref, $session), fn () => $this->t->fail(new \RuntimeException('curl said '.self::TOKEN)));
+            $this->capture($proxy($ref, $child($session, 'base/index.m3u8')), fn () => $this->t->respond(401, self::TOKEN));
+            $this->capture($proxy($ref, $child($session, 'base/00001.ts')), fn () => $this->t->streams(500, ['Content-Type' => 'text/html'], [self::TOKEN]));
+            $this->sinkAborted = static function (): bool {
+                throw new \RuntimeException('client sink said '.self::TOKEN);
+            };
+            $this->capture($proxy($ref, $child($session, 'base/00002.ts')), fn () => $this->t->streams(200, ['Content-Type' => 'video/mp2t'], ['abc', self::TOKEN]));
+            $this->sinkAborted = static fn (): bool => false;
+            $this->capture($proxy($ref, $child($session, 'base/x.ts?X-Plex-Token='.self::TOKEN)));
+            $this->capture($proxy(self::TOKEN, $child($session, 'base/00000.ts')));
+            $this->capture($post('hlsPing', $session, self::TOKEN));
+            $this->capture($post('hlsStop', self::TOKEN));
+            $this->capture($post('hlsStop', $session), fn () => $this->t->fail(new \RuntimeException('stop said '.self::TOKEN)));
+            $this->capture($post('hlsStop', $session));
+            $this->capture($post('hlsPing', $session));
+        }
+
+        $this->assertSame(51, $this->pages);
+        $all = implode("\n", $this->seen)."\n".implode("\n", $this->log->lines);
+        // The sweep looked at real playlists, segments and refusals.
+        foreach (['action=hlsProxy', 'ts-bytes', 'sink 200', 'status 204', 'status 403', 'status 502', 'transcode stop failed', 'stream ended early'] as $shown) {
+            $this->assertStringContainsString($shown, $all);
         }
         $this->assertNoTokenAnywhere();
     }

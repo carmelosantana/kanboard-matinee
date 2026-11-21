@@ -82,6 +82,7 @@ class PlayControllerTest extends Base
     {
         $this->cleanKeyDir();
         parent::tearDown();
+        $this->releaseContainer();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -152,7 +153,7 @@ class PlayControllerTest extends Base
     {
         $map = $this->container['applicationAccessMap'];
         $auth = $this->container['applicationAuthorization'];
-        $this->assertSame(['keepalive', 'media'], self::actions());
+        $this->assertSame(['hlsPing', 'hlsProxy', 'hlsStart', 'hlsStop', 'keepalive', 'media'], self::actions());
         $rows = array_values(array_filter(\Kanboard\Plugin\Matinee\Plugin::ACL, fn (array $row): bool => $row[0] === self::PLAY));
         $this->assertCount(1, $rows);
         $this->assertSame([self::actions(), Role::APP_USER], [$rows[0][1], $rows[0][2]]);
@@ -399,5 +400,456 @@ class PlayControllerTest extends Base
         $this->assertSame(1, (int) $this->container['db']->table(TranscodeModel::TABLE)->findOneColumn('stopped'));
         $this->assertSame('', $r->body());
         $this->assertSame(200, $r->code());
+    }
+
+    // ── HLS (Task 15; C2d, C2g, C3d, C3f, C4c, C4d, C5d, C6b) ────────────────
+
+    private const MOVIE = '/library/metadata/7';
+    private const PLAYLIST = 'Content-Type: application/vnd.apple.mpegurl';
+    private const PLAYLIST_TYPE = ['Content-Type' => 'application/vnd.apple.mpegurl'];
+    /** C2d: a rewritten URI, in the style of P2's regexes (BrowseControllerTest's art src). */
+    private const PROXY_URI = '#^/[^?]*\?controller=MatineePlayController&action=hlsProxy&plugin=Matinee&ref=[A-Za-z0-9_.-]+&u=%2Fvideo%2F%3A%2Ftranscode%2Funiversal%2Fsession%2F[0-9a-f-]{36}%2F[^"\s]+$#';
+
+    private function hlsRef(int $userId): string
+    {
+        return $this->ref($userId, 'hls', self::MOVIE);
+    }
+
+    /** A live hls row of $userId's on the server: [id, session]. */
+    private function claim(int $userId, string $kind = 'hls'): array
+    {
+        ['id' => $id, 'session' => $session] = $this->container['matineeTranscodeModel']->claim($userId, $this->server, $kind, $this->now);
+        return [(int) $id, $session];
+    }
+
+    private function row(int $id): array
+    {
+        return $this->container['db']->table(TranscodeModel::TABLE)->eq('id', $id)->findOne();
+    }
+
+    private static function child(string $session, string $rest = 'base/index.m3u8'): string
+    {
+        return '/video/:/transcode/universal/session/'.$session.'/'.$rest;
+    }
+
+    private static function master(string $session): string
+    {
+        return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=8000000,RESOLUTION=1920x1080,CODECS=\"avc1.640028,mp4a.40.2\"\n"
+            .'session/'.$session."/base/index.m3u8\n";
+    }
+
+    private function hlsStart(mixed $ref, mixed $session, string $method = 'GET'): MatineeTestResponse
+    {
+        return $this->call(self::PLAY, 'hlsStart', ['ref' => $ref, 'session' => $session], [], false, $method, [], MatineePlayControllerSpy::class);
+    }
+
+    private function hlsProxy(mixed $ref, mixed $u, string $method = 'GET'): MatineeTestResponse
+    {
+        return $this->call(self::PLAY, 'hlsProxy', ['ref' => $ref, 'u' => $u], [], false, $method, [], MatineePlayControllerSpy::class);
+    }
+
+    /** POST matinee/hls/ping or stop with the session and $token (none when null) as form fields. */
+    private function sessionPost(string $action, mixed $session, ?string $token, string $method = 'POST'): MatineeTestResponse
+    {
+        $post = ['session' => $session] + ($token === null ? [] : ['csrf_token' => $token]);
+        return $this->call(self::PLAY, $action, [], $post, false, $method, [], MatineePlayControllerSpy::class);
+    }
+
+    private function reusable(): string
+    {
+        return $this->container['token']->getReusableCSRFToken();
+    }
+
+    /** @return list<string> the URI lines of a playlist body */
+    private static function uris(string $body): array
+    {
+        return array_values(array_filter(explode("\n", $body), static fn (string $l): bool => $l !== '' && $l[0] !== '#'));
+    }
+
+    /** A playlist sent through the sink: 200, the one content type, the C3e set, nothing from upstream. */
+    private function assertPlaylist(MatineeTestResponse $r): void
+    {
+        $this->assertSame(200, $this->sinkStatus);
+        $this->assertSame(array_merge([self::PLAYLIST], self::FIXED), $this->sinkHeaders);
+        $this->assertSame(['Pragma', 'Expires', 'X-Powered-By'], $this->sinkRemoved);
+        $this->assertSame('', $r->body());
+        $this->assertSame(200, $r->code());
+    }
+
+    public function testHlsStartAnswersTheRewrittenMasterWithExactlyThePlaylistHeaders(): void
+    {
+        [$id, $session] = $this->claim($this->owner);
+        $this->now += 60;
+        $this->t->respond(200, self::master($session), self::PLAYLIST_TYPE + ['X-Upstream' => 'leak']);
+        $r = $this->hlsStart($this->hlsRef($this->owner), $session);
+
+        $this->assertPlaylist($r);
+        $uris = self::uris($this->sinkBody);
+        $this->assertCount(1, $uris);
+        foreach ($uris as $uri) {
+            $this->assertMatchesRegularExpression(self::PROXY_URI, $uri);
+        }
+        $this->assertStringContainsString('&u='.rawurlencode(self::child($session)), $uris[0]);
+        foreach (explode("\n", $this->sinkBody) as $line) {
+            foreach (['/library/', 'X-Plex-Token', 'plex.example.test', '&amp;', self::TOKEN] as $bad) {
+                $this->assertStringNotContainsString($bad, $line);
+            }
+        }
+        $this->assertStringStartsWith("#EXTM3U\n", $this->sinkBody);
+        $this->assertSame($this->now, (int) $this->row($id)['last_seen_at'], 'the master heartbeats');
+        $this->assertStringStartsWith(self::BASE.'/video/:/transcode/universal/start.m3u8?', $this->t->requests[0]['url']);
+        $this->assertSame(1, MatineePlayControllerSpy::$closed);
+    }
+
+    /** C3d, C3f: the abort seam runs first; the session closes once the model has authorized, before any Plex call. */
+    public function testHlsStartAndProxyCloseTheSessionAfterAuthorization(): void
+    {
+        $signer = $this->container->raw('matineeRefSigner');
+        $this->container->offsetUnset('matineeRefSigner');
+        $this->container['matineeRefSigner'] = $this->container->factory(function ($c) use ($signer) {
+            MatineePlayControllerSpy::$events[] = 'model';
+            return $signer($c);
+        });
+        [, $session] = $this->claim($this->owner);
+        $ref = $this->hlsRef($this->owner);
+
+        $cases = [
+            'start' => fn () => $this->hlsStart($ref, $session),
+            'proxy' => fn () => $this->hlsProxy($ref, self::child($session, 'base/00000.ts')),
+        ];
+        foreach ($cases as $label => $request) {
+            $this->t = new \Kanboard\Plugin\Matinee\Test\FakeTransport();
+            $label === 'start'
+                ? $this->t->respond(200, self::master($session), self::PLAYLIST_TYPE)
+                : $this->t->streams(200, ['Content-Type' => 'video/mp2t'], ['seg']);
+            MatineePlayControllerSpy::$events = [];
+            $request();
+            $this->assertSame(['ignore', 'model', 'close'], MatineePlayControllerSpy::$events, $label);
+        }
+
+        // A refusal never closes the session.
+        $this->loginAs($this->outsider);
+        $ref = $this->ref($this->outsider, 'hls', self::MOVIE);
+        foreach ([fn () => $this->hlsStart($ref, $session), fn () => $this->hlsProxy($ref, self::child($session, 'base/00000.ts'))] as $i => $request) {
+            MatineePlayControllerSpy::$events = [];
+            $this->assertRefused(403, $request(), (string) $i);
+            $this->assertSame(['ignore', 'model'], MatineePlayControllerSpy::$events);
+        }
+    }
+
+    public function testHlsStartAndProxyServeGetOnly(): void
+    {
+        [, $session] = $this->claim($this->owner);
+        $ref = $this->hlsRef($this->owner);
+        foreach (['HEAD', 'POST', 'PUT'] as $method) {
+            foreach ([$this->hlsStart($ref, $session, $method), $this->hlsProxy($ref, self::child($session), $method)] as $r) {
+                $this->assertRefused(405, $r, $method);
+                $this->assertSame('GET', $r->headers()['Allow'] ?? null, $method);
+            }
+        }
+        $this->assertSame([], MatineePlayControllerSpy::$events);
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testHlsStartRefusesWithAnEmpty403(): void
+    {
+        $this->share();
+        [, $mine] = $this->claim($this->owner);
+        [$stoppedId, $stopped] = $this->claim($this->owner);
+        $this->container['matineeTranscodeModel']->stop($stoppedId);
+        [, $freds] = $this->claim($this->friend);
+        $cases = [
+            'another user\'s session' => [$this->hlsRef($this->owner), $freds],
+            'a stopped session'       => [$this->hlsRef($this->owner), $stopped],
+            'an unknown session'      => [$this->hlsRef($this->owner), '00000000-0000-4000-8000-000000000009'],
+            'a media ref'             => [$this->ref($this->owner, 'media', self::MOVIE), $mine],
+            'a forged ref'            => ['x'.$this->hlsRef($this->owner), $mine],
+            'an array ref'            => [['x'], $mine],
+            'an array session'        => [$this->hlsRef($this->owner), [$mine]],
+        ];
+        foreach ($cases as $label => [$ref, $session]) {
+            $this->assertRefused(403, $this->hlsStart($ref, $session), $label);
+        }
+        $this->assertSame([], $this->t->requests);
+        $this->assertSame(0, MatineePlayControllerSpy::$closed);
+    }
+
+    public function testHlsStartUpstreamFailuresAreAnEmpty502(): void
+    {
+        [, $session] = $this->claim($this->owner);
+        $this->t->respond(500, '<html>UPSTREAM-BODY</html>', ['Content-Type' => 'text/html'])
+            ->respond(200, self::master('0f1e2d3c-4b5a-4987-8a6b-5c4d3e2f1a0b'), self::PLAYLIST_TYPE)
+            ->fail(new \RuntimeException('curl said no'));
+        foreach (['500', 'a foreign session', 'an exception'] as $label) {
+            $this->assertRefused(502, $this->hlsStart($this->hlsRef($this->owner), $session), $label);
+        }
+    }
+
+    public function testHlsProxyAnswersAChildPlaylistLikeStart(): void
+    {
+        [, $session] = $this->claim($this->owner);
+        $this->t->respond(200, (string) file_get_contents(__DIR__.'/fixtures/plex/hls-index.m3u8'), self::PLAYLIST_TYPE);
+        $r = $this->hlsProxy($this->hlsRef($this->owner), self::child($session).'?x=1');
+
+        $this->assertPlaylist($r);
+        $uris = self::uris($this->sinkBody);
+        $this->assertCount(3, $uris);
+        foreach ($uris as $uri) {
+            $this->assertMatchesRegularExpression(self::PROXY_URI, $uri);
+            $this->assertStringNotContainsString('&amp;', $uri);
+        }
+        $this->assertStringEndsWith('&u='.rawurlencode(self::child($session, 'base/00002.ts?x=1')), $uris[2]);
+        $this->assertSame([self::BASE.self::child($session).'?x=1'], array_column($this->t->requests, 'url'));
+        $this->assertSame(1, MatineePlayControllerSpy::$closed);
+    }
+
+    public function testHlsProxyStreamsASegmentWithTheStreamHeaders(): void
+    {
+        [$id, $session] = $this->claim($this->owner);
+        $this->now += 30;
+        $this->t->streams(200, ['Content-Type' => 'video/MP2T; charset=x', 'Content-Length' => '7', 'Set-Cookie' => 'a=b', 'Server' => 'Plex'], ['seg', 'ment!']);
+        $r = $this->hlsProxy($this->hlsRef($this->owner), self::child($session, 'base/00000.ts'));
+
+        $this->assertSame(200, $this->sinkStatus);
+        $this->assertSame(array_merge(['Content-Type: video/mp2t', 'Content-Length: 7'], self::FIXED), $this->sinkHeaders);
+        $this->assertSame(['Pragma', 'Expires', 'X-Powered-By'], $this->sinkRemoved);
+        $this->assertSame('segment!', $this->sinkBody);
+        $this->assertSame('', $r->body());
+        $this->assertSame($this->now, (int) $this->row($id)['last_seen_at']);
+        $this->assertSame(1, MatineePlayControllerSpy::$closed);
+    }
+
+    /** @dataProvider badChildren */
+    public function testHlsProxyRefusesAChildFailingS2WithNoPlexRequest(string $rest): void
+    {
+        [, $session] = $this->claim($this->owner);
+        $this->assertRefused(403, $this->hlsProxy($this->hlsRef($this->owner), str_replace('{s}', $session, $rest)));
+        $this->assertSame([], $this->t->requests);
+        $this->assertSame(0, MatineePlayControllerSpy::$closed);
+    }
+
+    public function badChildren(): array
+    {
+        $base = '/video/:/transcode/universal/session/{s}/';
+        return [
+            'an item path'    => ['/library/metadata/7'],
+            'dot segments'    => [$base.'base/../../library/x.ts'],
+            'percent'         => [$base.'base/a%2e.ts'],
+            'an at sign'      => [$base.'base/a@b.ts'],
+            'a backslash'     => [$base.'base\\x.ts'],
+            'a token'         => [$base.'base/x.ts?X-Plex-Token=t'],
+            'an X-Plex key'   => [$base.'base/x.ts?X-Plex-Device-Name=me'],
+            'an absolute url' => ['https://evil.test'.$base.'base/x.ts'],
+            'a scheme'        => ['file://'.$base.'base/x.ts'],
+            'a double slash'  => [$base.'base//x.ts'],
+            'a bad extension' => [$base.'base/x.mp4'],
+            'empty'           => [''],
+        ];
+    }
+
+    public function testHlsProxyRefusesAnotherUsersSessionAndAnArrayU(): void
+    {
+        $this->share();
+        [, $freds] = $this->claim($this->friend);
+        [, $mine] = $this->claim($this->owner);
+        $this->assertRefused(403, $this->hlsProxy($this->hlsRef($this->owner), self::child($freds, 'base/00000.ts')));
+        $this->assertRefused(403, $this->hlsProxy($this->hlsRef($this->owner), [self::child($mine, 'base/00000.ts')]));
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testHlsProxyUpstreamErrorsAreAnEmpty502(): void
+    {
+        [, $session] = $this->claim($this->owner);
+        $this->t->streams(500, ['Content-Type' => 'text/html'], ['<html>UPSTREAM-BODY</html>']);
+        $this->assertRefused(502, $this->hlsProxy($this->hlsRef($this->owner), self::child($session, 'base/00000.ts')));
+        $this->t->respond(500, '<html>UPSTREAM-BODY</html>', ['Content-Type' => 'text/html']);
+        $this->assertRefused(502, $this->hlsProxy($this->hlsRef($this->owner), self::child($session)));
+    }
+
+    /** C3g: once the segment's response opened, a failure appends nothing, and Kanboard's response sends nothing. */
+    public function testASegmentThatDiesAfterOpeningSendsNothingMore(): void
+    {
+        [, $session] = $this->claim($this->owner);
+        $this->sinkAborted = static function (): bool {
+            throw new \RuntimeException('the client sink broke');
+        };
+        $this->t->streams(200, ['Content-Type' => 'video/mp2t'], ['ab', 'cdef']);
+        $r = $this->hlsProxy($this->hlsRef($this->owner), self::child($session, 'base/00000.ts'));
+        $this->assertSame(200, $this->sinkStatus);
+        $this->assertSame('ab', $this->sinkBody);
+        $this->assertSame(['warning Matinee: stream ended early (server '.$this->server.', plex.unreachable)'], $this->log->lines);
+        $this->assertSame('', $r->body());
+        $this->assertSame(200, $r->code());
+        $this->assertArrayNotHasKey('Cache-Control', $r->headers());
+    }
+
+    // ── ping and stop (C2g, C5d, C6b) ────────────────────────────────────────
+
+    public function testPingAnswers204AndRefreshesTheRow(): void
+    {
+        [$id, $session] = $this->claim($this->owner);
+        $this->now += 90;
+        $r = $this->sessionPost('hlsPing', $session, $this->reusable());
+        $this->assertSame(204, $r->code());
+        $this->assertSame('', $r->body());
+        $this->assertSame('no-store', $r->headers()['Cache-Control'] ?? null);
+        $this->assertArrayNotHasKey('Content-Type', $r->headers());
+        $this->assertSame($this->now, (int) $this->row($id)['last_seen_at']);
+        $this->assertSame(0, MatineePlayControllerSpy::$closed, 'ping writes the session normally');
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testPingRefusesAStoppedUnknownOrUnbrowsableSession(): void
+    {
+        $this->share();
+        [$stoppedId, $stopped] = $this->claim($this->owner);
+        $this->container['matineeTranscodeModel']->stop($stoppedId);
+        $this->assertRefused(403, $this->sessionPost('hlsPing', $stopped, $this->reusable()), 'stopped');
+        $this->assertRefused(403, $this->sessionPost('hlsPing', '00000000-0000-4000-8000-000000000009', $this->reusable()), 'unknown');
+        $this->assertRefused(403, $this->sessionPost('hlsPing', ['x'], $this->reusable()), 'array');
+
+        $this->loginAs($this->friend);
+        [$id, $freds] = $this->claim($this->friend);
+        $this->share(false);
+        $this->assertRefused(403, $this->sessionPost('hlsPing', $freds, $this->reusable()), 'unshared');
+        $this->assertSame(1, (int) $this->row($id)['stopped'], 'an unbrowsable row is stopped');
+    }
+
+    public function testPingAndStopNeedTheReusableToken(): void
+    {
+        [$id, $session] = $this->claim($this->owner);
+        foreach (['hlsPing', 'hlsStop'] as $action) {
+            foreach (['none' => null, 'bad' => 'not-a-token', 'single-use' => $this->container['token']->getCSRFToken()] as $label => $token) {
+                $this->assertRefused(403, $this->sessionPost($action, $session, $token), "$action $label");
+            }
+        }
+        $this->assertSame([0, $this->now], [(int) $this->row($id)['stopped'], (int) $this->row($id)['last_seen_at']]);
+        $this->assertSame([], $this->t->requests);
+    }
+
+    /** Addendum (Tasks 8–10): a state change is POST only; any other method is an empty 405 with `Allow: POST`. */
+    public function testPingAndStopRefuseEveryOtherMethodWithAnEmpty405(): void
+    {
+        [$id, $session] = $this->claim($this->owner);
+        foreach (['hlsPing', 'hlsStop'] as $action) {
+            foreach (['GET', 'HEAD', 'PUT'] as $method) {
+                $r = $this->sessionPost($action, $session, $this->reusable(), $method);
+                $this->assertRefused(405, $r, "$action $method");
+                $this->assertSame('POST', $r->headers()['Allow'] ?? null);
+            }
+        }
+        $this->assertSame(0, (int) $this->row($id)['stopped']);
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testStopWorksTwiceWithTheReusableTokenAndStopsTheRowOnce(): void
+    {
+        [$id, $session] = $this->claim($this->owner);
+        $token = $this->reusable();
+        $this->t->respond(200, '');
+        foreach ([1, 2] as $n) {
+            $r = $this->sessionPost('hlsStop', $session, $token);
+            $this->assertSame(204, $r->code(), "call $n");
+            $this->assertSame('', $r->body(), "call $n");
+            $this->assertSame('no-store', $r->headers()['Cache-Control'] ?? null);
+        }
+        $this->assertSame(1, (int) $this->row($id)['stopped']);
+        $this->assertSame([self::BASE.'/video/:/transcode/universal/stop?session='.$session], array_column($this->t->requests, 'url'));
+        $this->assertSame(0, MatineePlayControllerSpy::$closed);
+    }
+
+    public function testStopRefusesAnotherUsersOrAnUnknownSession(): void
+    {
+        $this->share();
+        [$id, $freds] = $this->claim($this->friend);
+        $this->assertRefused(403, $this->sessionPost('hlsStop', $freds, $this->reusable()));
+        $this->assertRefused(403, $this->sessionPost('hlsStop', '00000000-0000-4000-8000-000000000009', $this->reusable()));
+        $this->assertSame(0, (int) $this->row($id)['stopped']);
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testAFailedPlexStopIsStillA204(): void
+    {
+        [$id, $session] = $this->claim($this->owner);
+        $this->t->fail(new \RuntimeException('timed out'));
+        $this->assertSame(204, $this->sessionPost('hlsStop', $session, $this->reusable())->code());
+        $this->assertSame(1, (int) $this->row($id)['stopped']);
+    }
+
+    // ── the 1-in-10 sweep listener (C4d) ─────────────────────────────────────
+
+    private int $rolls = 0;
+
+    /** Stubs the dice (counting rolls) and leaves one stale mp3 row the sweep would stop without asking Plex. */
+    private function stubDice(bool|\Throwable $answer): int
+    {
+        $this->rolls = 0;
+        $this->container->offsetUnset('matineeSweepDice');
+        $this->container['matineeSweepDice'] = $this->container->protect(function () use ($answer): bool {
+            $this->rolls++;
+            if ($answer instanceof \Throwable) {
+                throw $answer;
+            }
+            return $answer;
+        });
+        [$id] = $this->claim($this->owner, 'mp3');
+        $this->container['db']->table(TranscodeModel::TABLE)->eq('id', $id)->update(['last_seen_at' => $this->now - 600]);
+        return $id;
+    }
+
+    /** Routes a request to $controller::$action as the router would, then fires app.bootstrap. */
+    private function bootstrap(string $controller, string $action, string $plugin = 'Matinee'): void
+    {
+        unset($this->container['request']);
+        $this->container['request'] = new \Kanboard\Core\Http\Request($this->container, ['REQUEST_METHOD' => 'GET'],
+            ['controller' => $controller, 'action' => $action, 'plugin' => $plugin], [], [], []);
+        unset($this->container['response']);
+        $this->container['response'] = new MatineeTestResponse($this->container);
+        $this->container['router']->dispatch();
+        $this->container['dispatcher']->dispatch(new \Symfony\Contracts\EventDispatcher\Event(), 'app.bootstrap');
+    }
+
+    public function testASignedInMatineeRequestRollsTheDiceAndSweeps(): void
+    {
+        $id = $this->stubDice(true);
+        $this->bootstrap('MatineeBrowseController', 'index');
+        $this->assertSame(1, $this->rolls);
+        $this->assertSame(1, (int) $this->row($id)['stopped']);
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testTheSweepSkipsAnonymousStreamingAndOtherRequests(): void
+    {
+        $id = $this->stubDice(true);
+        foreach ([
+            [self::PLAY, 'media', 'Matinee'],
+            [self::PLAY, 'hlsProxy', 'Matinee'],
+            [self::PLAY, 'hlsPing', 'Matinee'],
+            [self::PLAY, 'keepalive', 'Matinee'],
+            ['DashboardController', 'show', ''],
+        ] as [$controller, $action, $plugin]) {
+            $this->bootstrap($controller, $action, $plugin);
+            $this->assertSame(0, $this->rolls, "$controller::$action");
+        }
+        session_set('user', []);
+        $this->bootstrap('MatineeBrowseController', 'index');
+        $this->assertSame(0, $this->rolls, 'anonymous');
+        $this->assertSame(0, (int) $this->row($id)['stopped']);
+
+        // Start and stop are not skipped.
+        $this->loginAs($this->owner);
+        $this->bootstrap(self::PLAY, 'hlsStart');
+        $this->bootstrap(self::PLAY, 'hlsStop');
+        $this->assertSame(2, $this->rolls);
+    }
+
+    public function testAThrowingSweepNeverBreaksThePage(): void
+    {
+        $this->stubDice(new \RuntimeException('dice broke'));
+        $this->bootstrap('MatineeBrowseController', 'index');
+        $this->assertSame(1, $this->rolls);
+        $r = $this->get('MatineeBrowseController', 'index');
+        $this->assertSame(200, $r->code());
+        $this->assertStringContainsString('Living room', $r->body());
     }
 }

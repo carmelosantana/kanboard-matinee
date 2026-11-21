@@ -82,6 +82,8 @@ class Plugin extends Base
         // Referrer-Policy on every request routed to Matinee, set on app.bootstrap (the router has dispatched by then)
         // so a refusal core's ACL middleware makes before any Matinee controller is built carries it too (§11 S9).
         $this->dispatcher->addListener('app.bootstrap', [$this, 'sendReferrerPolicy']);
+        // The lazy sweep (C4d): one signed-in Matinee request in ten stops up to two idle transcodes.
+        $this->dispatcher->addListener('app.bootstrap', [$this, 'maybeSweep']);
         $this->hook->on('template:user:sidebar:actions', ['template' => 'Matinee:user/sidebar']);
         $this->hook->on('template:config:sidebar', ['template' => 'Matinee:config/sidebar']);
         // Browse is reached from the dashboard (ruling B5); its pages are styled by one stylesheet, no inline CSS.
@@ -93,7 +95,7 @@ class Plugin extends Base
     public const ACL = [
         ['MatineeServerController', ['index', 'create', 'edit', 'save', 'show', 'verify', 'remove', 'share'], Role::APP_USER],
         ['MatineeBrowseController', ['index', 'server', 'listing', 'art'], Role::APP_USER],
-        ['MatineePlayController', ['keepalive', 'media'], Role::APP_USER],
+        ['MatineePlayController', ['hlsPing', 'hlsProxy', 'hlsStart', 'hlsStop', 'keepalive', 'media'], Role::APP_USER],
         ['MatineeAdminController', ['show', 'save', 'toggle'], Role::APP_ADMIN],
     ];
 
@@ -113,6 +115,10 @@ class Plugin extends Base
         ['matinee/art', 'MatineeBrowseController', 'art'],
         ['matinee/media', 'MatineePlayController', 'media'],
         ['matinee/keepalive', 'MatineePlayController', 'keepalive'],
+        ['matinee/hls/start', 'MatineePlayController', 'hlsStart'],
+        ['matinee/hls/proxy', 'MatineePlayController', 'hlsProxy'],
+        ['matinee/hls/ping', 'MatineePlayController', 'hlsPing'],
+        ['matinee/hls/stop', 'MatineePlayController', 'hlsStop'],
         ['matinee/admin', 'MatineeAdminController', 'show'],
         ['matinee/admin/save', 'MatineeAdminController', 'save'],
         ['matinee/admin/servers/:server_id/toggle', 'MatineeAdminController', 'toggle'],
@@ -123,6 +129,28 @@ class Plugin extends Base
     {
         if ($this->router->getPlugin() === 'Matinee') {
             $this->response->withHeader('Referrer-Policy', 'same-origin');
+        }
+    }
+
+    /** The frequent, latency-sensitive actions the sweep never delays (C4d). */
+    public const SWEEP_SKIPS = ['media', 'hlsProxy', 'hlsPing', 'keepalive'];
+
+    /**
+     * On app.bootstrap: for a signed-in user on a Matinee route other than SWEEP_SKIPS, roll the sweep's dice
+     * (PlaybackModel::maybeSweep). Every failure is swallowed: a sweep never breaks a page.
+     */
+    public function maybeSweep(): void
+    {
+        if ($this->router->getPlugin() !== 'Matinee' || ! $this->userSession->isLogged()) {
+            return;
+        }
+        if ($this->router->getController() === 'MatineePlayController' && in_array($this->router->getAction(), self::SWEEP_SKIPS, true)) {
+            return;
+        }
+        try {
+            $this->container['matineePlaybackModel']->maybeSweep();
+        } catch (\Throwable) {
+            // best-effort housekeeping
         }
     }
 

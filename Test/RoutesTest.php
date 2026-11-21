@@ -23,6 +23,10 @@ class RoutesTest extends Base
         'matinee/art' => ['MatineeBrowseController', 'art', []],
         'matinee/media' => ['MatineePlayController', 'media', []],
         'matinee/keepalive' => ['MatineePlayController', 'keepalive', []],
+        'matinee/hls/start' => ['MatineePlayController', 'hlsStart', []],
+        'matinee/hls/proxy' => ['MatineePlayController', 'hlsProxy', []],
+        'matinee/hls/ping' => ['MatineePlayController', 'hlsPing', []],
+        'matinee/hls/stop' => ['MatineePlayController', 'hlsStop', []],
         'matinee/admin' => ['MatineeAdminController', 'show', []],
         'matinee/admin/save' => ['MatineeAdminController', 'save', []],
         'matinee/admin/servers/7/toggle' => ['MatineeAdminController', 'toggle', ['server_id' => '7']],
@@ -52,5 +56,19 @@ class RoutesTest extends Base
         sort($listed);
         sort($registered);
         $this->assertSame($listed, $registered);
+    }
+
+    /** Every routed action has an ACL row for its controller, so no route is reachable without one. */
+    public function testEveryRoutedActionIsCoveredByTheAcl(): void
+    {
+        $acl = [];
+        foreach (Plugin::ACL as [$controller, $actions]) {
+            foreach ($actions as $action) {
+                $acl[] = $controller.'::'.$action;
+            }
+        }
+        foreach (Plugin::ROUTES as [, $controller, $action]) {
+            $this->assertContains($controller.'::'.$action, $acl);
+        }
     }
 }
