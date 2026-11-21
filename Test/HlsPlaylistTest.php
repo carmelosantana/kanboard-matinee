@@ -47,6 +47,19 @@ class HlsPlaylistTest extends TestCase
         );
     }
 
+    /** The child playlist a real Plex transcoder sends (trimmed): it carries `#EXT-X-ALLOW-CACHE:NO`. */
+    public function testPlexsRealIndexShapeRewrites(): void
+    {
+        $this->assertSame(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXT-X-ALLOW-CACHE:NO\n#EXT-X-MEDIA-SEQUENCE:0\n"
+                . "#EXTINF:10, nodesc\nP(" . self::BASE . "/00000.ts)\n"
+                . "#EXTINF:10, nodesc\nP(" . self::BASE . "/00001.ts)\n"
+                . "#EXTINF:1, nodesc\nP(" . self::BASE . "/00002.ts)\n"
+                . "#EXT-X-ENDLIST\n",
+            self::rewrite(self::fixture('hls-index-plex')),
+        );
+    }
+
     public function testTagUrisAreRewrittenAndTheRestOfTheTagIsKept(): void
     {
         $body = "#EXTM3U\n"
@@ -321,6 +334,10 @@ class HlsPlaylistTest extends TestCase
             'START'                     => ["#EXTM3U\n#EXT-X-START:TIME-OFFSET=0\n"],
             'unknown EXT-X tag'         => ["#EXTM3U\n#EXT-X-FOO:URI=\"a.vtt\"\n"],
             'unknown EXT tag'           => ["#EXTM3U\n#EXTGRP:x\n"],
+            // Only the value Plex sends passes.
+            'ALLOW-CACHE:YES'           => ["#EXTM3U\n#EXT-X-ALLOW-CACHE:YES\n"],
+            'ALLOW-CACHE without value' => ["#EXTM3U\n#EXT-X-ALLOW-CACHE\n"],
+            'ALLOW-CACHE with a URI'    => ["#EXTM3U\n#EXT-X-ALLOW-CACHE:NO,URI=\"https:evil.test\"\n"],
             'second EXTM3U'             => ["#EXTM3U\n#EXTM3U\n"],
             'unquoted relative URI'     => ["#EXTM3U\n#EXT-X-MAP:URI=init.m4s\n"],
             'unterminated quoted URI'   => ["#EXTM3U\n#EXT-X-MAP:URI=\"init.m4ss\n"],

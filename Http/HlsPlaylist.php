@@ -48,6 +48,8 @@ final class HlsPlaylist
         'EXT-X-TARGETDURATION'       => '\d{1,10}',
         'EXT-X-MEDIA-SEQUENCE'       => '\d{1,20}',
         'EXT-X-PLAYLIST-TYPE'        => 'VOD|EVENT',
+        // Plex's transcoder sends it on every child playlist; hls.js ignores it. Only Plex's value passes.
+        'EXT-X-ALLOW-CACHE'          => 'NO',
         'EXTINF'                     => '\d{1,10}(?:\.\d{1,10})?,.*',
         'EXT-X-PROGRAM-DATE-TIME'    => '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})',
         'EXT-X-ENDLIST'              => self::BARE,
