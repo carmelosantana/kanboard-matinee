@@ -23,6 +23,8 @@ class PlexException extends \RuntimeException
     public const BAD_TYPE       = 'plex.bad_type';
     /** A direct part whose upstream Content-Range does not fit the requested window, or a 416 with no total (C1b). */
     public const BAD_RANGE      = 'plex.bad_range';
+    /** An HLS playlist that is not UTF-8 #EXTM3U, or names a URI off its session's S2 shape (C2e): refused whole. */
+    public const BAD_PLAYLIST   = 'plex.bad_playlist';
 
     private function __construct(public readonly string $reason, public readonly int $status = 0)
     {
@@ -72,5 +74,10 @@ class PlexException extends \RuntimeException
     public static function badRange(): self
     {
         return new self(self::BAD_RANGE);
+    }
+
+    public static function badPlaylist(): self
+    {
+        return new self(self::BAD_PLAYLIST);
     }
 }
