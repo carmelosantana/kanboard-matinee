@@ -1705,6 +1705,9 @@ class PlexClientTest extends TestCase
         ];
     }
 
+    /** M1: a buffered playlist GET has the streams' low-speed floor, so a zero-byte hang dies in 15 s, not 60. */
+    private const PLAYLIST_OPTS = ['timeout' => 60, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15];
+
     public function testHlsStartRequestsTheC2aStartUrlWithTheC2bHeadersAndTimeout60(): void
     {
         $this->t->respond(200, "#EXTM3U\nraw", ['Content-Type' => 'application/vnd.apple.mpegurl']);
@@ -1723,7 +1726,7 @@ class PlexClientTest extends TestCase
         );
         $this->assertSame($this->hlsHeaders(), $req['headers']);
         $this->assertOnlyHeaderCarriesTheToken($req);
-        $this->assertSame(['timeout' => 60], $req['opts']);
+        $this->assertSame(self::PLAYLIST_OPTS, $req['opts']);
     }
 
     /** @dataProvider playlistTypes */
@@ -1827,7 +1830,7 @@ class PlexClientTest extends TestCase
         $this->assertSame(self::BASE . self::HLS_BASE . '/index.m3u8?x=1', $req['url']);
         $this->assertSame($start['headers'], $req['headers']);
         $this->assertSame($this->hlsHeaders(), $req['headers']);
-        $this->assertSame(['timeout' => 60], $req['opts']);
+        $this->assertSame(self::PLAYLIST_OPTS, $req['opts']);
     }
 
     /** @dataProvider badPlaylistChildren */
@@ -1946,6 +1949,25 @@ class PlexClientTest extends TestCase
         $e = $this->expectPlexError(fn () => $this->client()->hlsSegment(self::HLS_BASE . '/00000.ts', self::SESSION, $sink), $reason);
         $this->assertSame($status, $e->status);
         $this->assertSame(0, $sink->opens);
+    }
+
+    /** I1: a forwarded Content-Length is the exact cut, as for a part: over-delivery writes that prefix, then is too_large. */
+    public function testASegmentIsCutAtItsForwardedLength(): void
+    {
+        $sink = $this->sink();
+        $injected = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 29\r\n\r\n<script>alert(origin)</script>";
+        $this->t->streams(200, ['Content-Type' => 'video/mp2t', 'Content-Length' => '4'], ['AB', 'CD' . $injected]);
+        $this->expectPlexError(fn () => $this->client()->hlsSegment(self::HLS_BASE . '/00000.ts', self::SESSION, $sink), PlexException::TOO_LARGE);
+        $this->assertSame(['content-type' => 'video/mp2t', 'content-length' => '4'], $sink->headers);
+        $this->assertSame('ABCD', $sink->body);
+    }
+
+    public function testASegmentWithoutALengthIsCutOnlyAtTheCap(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(200, ['Content-Type' => 'video/mp2t'], ['AB', 'CDEF']);
+        $this->client()->hlsSegment(self::HLS_BASE . '/00000.ts', self::SESSION, $sink);
+        $this->assertSame('ABCDEF', $sink->body);
     }
 
     public function testASegmentOver64MiBIsTooLargeAfterTheCut(): void

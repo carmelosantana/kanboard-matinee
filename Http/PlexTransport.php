@@ -16,7 +16,9 @@ interface PlexTransport
 {
     /**
      * @param array<string, string> $headers header name => value; carries the token, so never log it
-     * @param array{timeout?: int} $opts only `timeout` (seconds, at least 1); anything else is refused
+     * @param array{timeout?: int, lowSpeedLimit?: int, lowSpeedTime?: int} $opts an optional `timeout` (seconds) and an
+     *   optional low-speed pair (`lowSpeedLimit` bytes/s over `lowSpeedTime` s, both or neither), each an int of at
+     *   least 1; anything else is refused
      */
     public function get(string $url, #[\SensitiveParameter] array $headers, array $opts = []): PlexResponse;
 

@@ -613,11 +613,11 @@ class PlayControllerTest extends Base
     {
         [$id, $session] = $this->claim($this->owner);
         $this->now += 30;
-        $this->t->streams(200, ['Content-Type' => 'video/MP2T; charset=x', 'Content-Length' => '7', 'Set-Cookie' => 'a=b', 'Server' => 'Plex'], ['seg', 'ment!']);
+        $this->t->streams(200, ['Content-Type' => 'video/MP2T; charset=x', 'Content-Length' => '8', 'Set-Cookie' => 'a=b', 'Server' => 'Plex'], ['seg', 'ment!']);
         $r = $this->hlsProxy($this->hlsRef($this->owner), self::child($session, 'base/00000.ts'));
 
         $this->assertSame(200, $this->sinkStatus);
-        $this->assertSame(array_merge(['Content-Type: video/mp2t', 'Content-Length: 7'], self::FIXED), $this->sinkHeaders);
+        $this->assertSame(array_merge(['Content-Type: video/mp2t', 'Content-Length: 8'], self::FIXED), $this->sinkHeaders);
         $this->assertSame(['Pragma', 'Expires', 'X-Powered-By'], $this->sinkRemoved);
         $this->assertSame('segment!', $this->sinkBody);
         $this->assertSame('', $r->body());

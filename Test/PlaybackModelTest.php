@@ -1199,12 +1199,12 @@ class PlaybackModelTest extends Base
     {
         $session = $this->claimRow($this->alice)['session'];
         $sink = new RecordingSink();
-        $this->t->streams(200, ['Content-Type' => 'video/mp2t', 'Content-Length' => '6'], ['seg', 'ment']);
+        $this->t->streams(200, ['Content-Type' => 'video/mp2t', 'Content-Length' => '7'], ['seg', 'ment']);
         $this->assertNull($this->hlsChild($this->alice, $this->hlsRef($this->alice), self::child($session, 'base/00000.ts'), $sink));
 
         $this->assertSame(1, $this->authorized);
         $this->assertSame(200, $sink->status);
-        $this->assertSame(['content-type' => 'video/mp2t', 'content-length' => '6'], $sink->headers);
+        $this->assertSame(['content-type' => 'video/mp2t', 'content-length' => '7'], $sink->headers);
         $this->assertSame('segment', $sink->body);
         $this->assertSame(PlexClient::MAX_SEGMENT_BYTES, $this->t->requests[0]['opts']['maxBytes']);
     }

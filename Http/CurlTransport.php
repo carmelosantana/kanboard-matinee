@@ -58,11 +58,15 @@ final class CurlTransport implements PlexTransport
 
     /**
      * @param array<string, string> $headers
-     * @param array{timeout?: int} $opts
+     * @param array{timeout?: int, lowSpeedLimit?: int, lowSpeedTime?: int} $opts
      */
     public function get(string $url, #[\SensitiveParameter] array $headers, array $opts = []): PlexResponse
     {
-        $timeout = self::checkGetOpts($opts)['timeout'] ?? $this->timeout;
+        $opts = self::checkGetOpts($opts);
+        $timeout = $opts['timeout'] ?? $this->timeout;
+        $lowSpeed = array_key_exists('lowSpeedLimit', $opts)
+            ? [CURLOPT_LOW_SPEED_LIMIT => $opts['lowSpeedLimit'], CURLOPT_LOW_SPEED_TIME => $opts['lowSpeedTime']]
+            : [];
         [$requestUrl, $pin] = $this->target($url);
         $headerLines = self::headerLines($headers);
 
@@ -72,7 +76,7 @@ final class CurlTransport implements PlexTransport
         $ch = null;
         try {
             $ch = curl_init();
-            $set = curl_setopt_array($ch, $this->requestOptions($requestUrl, $pin, $headerLines, $timeout, $received) + [
+            $set = curl_setopt_array($ch, $this->requestOptions($requestUrl, $pin, $headerLines, $timeout, $received) + $lowSpeed + [
                 CURLOPT_MAXFILESIZE    => $this->maxBytes,
                 CURLOPT_WRITEFUNCTION  => function ($ch, string $chunk) use (&$body, &$tooLarge): int {
                     if (strlen($body) + strlen($chunk) > $this->maxBytes) {
@@ -242,12 +246,21 @@ final class CurlTransport implements PlexTransport
         return $opts;
     }
 
-    /** @return array{timeout?: int} get()'s opts: nothing, or a timeout of at least 1 */
+    /**
+     * get()'s opts: an optional timeout, and optionally lowSpeedLimit with lowSpeedTime (both or neither), each an int
+     * of at least 1.
+     *
+     * @return array{timeout?: int, lowSpeedLimit?: int, lowSpeedTime?: int}
+     */
     public static function checkGetOpts(array $opts): array
     {
-        if (array_diff(array_keys($opts), ['timeout']) !== []
-            || (array_key_exists('timeout', $opts) && (! is_int($opts['timeout']) || $opts['timeout'] < 1))) {
-            throw new \InvalidArgumentException('get() opts may carry only a timeout of at least 1.');
+        $ok = array_diff(array_keys($opts), ['timeout', 'lowSpeedLimit', 'lowSpeedTime']) === []
+            && array_key_exists('lowSpeedLimit', $opts) === array_key_exists('lowSpeedTime', $opts);
+        foreach ($opts as $value) {
+            $ok = $ok && is_int($value) && $value >= 1;
+        }
+        if (! $ok) {
+            throw new \InvalidArgumentException('get() opts may carry only a timeout and a low-speed pair, each at least 1.');
         }
         return $opts;
     }

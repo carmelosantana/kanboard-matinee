@@ -750,6 +750,19 @@ class CurlTransportTest extends TestCase
         $this->assertLessThan(4.0, microtime(true) - $start);
     }
 
+    /** M1: get() takes the streams' low-speed floor, so a body that trickles dies long before the timeout. */
+    public function testALowSpeedGetIsUnreachable(): void
+    {
+        $start = microtime(true);
+        try {
+            $this->transport()->get($this->url('/stream/slow'), $this->headers(), ['timeout' => 60, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 2]);
+            $this->fail('expected plex.unreachable');
+        } catch (PlexException $e) {
+            $this->assertSame(PlexException::UNREACHABLE, $e->reason);
+        }
+        $this->assertLessThan(6.0, microtime(true) - $start);
+    }
+
     /** @dataProvider badGetOpts */
     public function testGetRefusesBadOptsBeforeAnyConnection(array $opts): void
     {
@@ -768,6 +781,10 @@ class CurlTransportTest extends TestCase
             'timeout 0'   => [['timeout' => 0]],
             'string'      => [['timeout' => '5']],
             'unknown key' => [['maxBytes' => 5]],
+            'limit alone' => [['timeout' => 5, 'lowSpeedLimit' => 1024]],
+            'time alone'  => [['timeout' => 5, 'lowSpeedTime' => 15]],
+            'limit 0'     => [['lowSpeedLimit' => 0, 'lowSpeedTime' => 15]],
+            'time string' => [['lowSpeedLimit' => 1024, 'lowSpeedTime' => '15']],
         ];
     }
 

@@ -462,7 +462,9 @@ final class PlexClient
     /**
      * Streams one segment of $session (S2, not `.m3u8`) into $sink (C2f, C3b: 60 s, 64 MiB). A 2xx whose type is on its
      * extension's list opens $sink with 200, that type and the upstream length when it is 1 to 18 digits; a 401 is
-     * `plex.token_rejected`, another non-2xx `plex.http_error`, another type `plex.bad_type`, with $sink unopened.
+     * `plex.token_rejected`, another non-2xx `plex.http_error`, another type `plex.bad_type`, with $sink unopened. A
+     * forwarded length is also the exact cut (as part()'s): a body that runs past it writes that prefix, then is
+     * `plex.too_large`.
      */
     public function hlsSegment(string $u, string $session, PlexStreamSink $sink): void
     {
@@ -486,7 +488,10 @@ final class PlexClient
             if ($length !== null && $length > self::MAX_SEGMENT_BYTES) {
                 throw PlexException::tooLarge();
             }
-            return [200, ['content-type' => $type] + ($length === null ? [] : ['content-length' => (string) $length])];
+            // I1: a forwarded length is the exact cut, as for a part; without one only maxBytes cuts.
+            return $length === null
+                ? [200, ['content-type' => $type]]
+                : [200, ['content-type' => $type, 'content-length' => (string) $length], $length];
         };
 
         $this->stream($u, [], [
@@ -537,10 +542,13 @@ final class PlexClient
         return substr($path, strrpos($path, '.') + 1);
     }
 
-    /** A buffered HLS playlist GET (60 s, 2 MiB): a 2xx with a playlist type, returned raw. */
+    /**
+     * A buffered HLS playlist GET (60 s, 2 MiB, and the streams' low-speed floor of 1024 B/s over 15 s, so a hang
+     * frees its worker early): a 2xx with a playlist type, returned raw.
+     */
     private function hlsBuffered(string $path, array $query, string $session): string
     {
-        $r = $this->request($path, $query, ['timeout' => 60], $this->transcodeHeaders($session));
+        $r = $this->request($path, $query, ['timeout' => 60, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15], $this->transcodeHeaders($session));
         if (! in_array(self::mediaType($r->headers), self::HLS_PLAYLIST_TYPES, true)) {
             throw PlexException::badType();
         }
