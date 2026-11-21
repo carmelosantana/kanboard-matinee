@@ -66,6 +66,8 @@ class Plugin extends Base
         // request dies mid-stream (C3f). Tests swap in a fixed clock and a recorder.
         $container['matineeClock'] = $container->protect(time(...));
         $container['matineeShutdown'] = $container->protect(register_shutdown_function(...));
+        // The lazy sweep's dice (C4d): true on one request in ten. Tests stub it.
+        $container['matineeSweepDice'] = $container->protect(static fn (): bool => random_int(1, 10) === 1);
         // The sink a stream endpoint writes the browser's response through (C3e); tests wire one to recorders.
         $container['matineeResponseSink'] = $container->factory(static fn (): ResponseSink => new ResponseSink());
 

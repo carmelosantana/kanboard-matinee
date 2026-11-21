@@ -704,4 +704,210 @@ class PlaybackModelTest extends Base
             $this->assertSame('Matinee (bob)', $req['headers']['X-Plex-Device-Name']);
         }
     }
+
+    // ── HLS: stop, ping and sweep (Task 13; C2g, C4d, C5d) ───────────────────
+
+    /** Claims a row at the current clock, then sets its last_seen_at directly; returns the row. */
+    private function claimRow(int $userId, string $kind = 'hls', ?int $lastSeen = null): array
+    {
+        ['id' => $id] = $this->container['matineeTranscodeModel']->claim($userId, $this->serverId, $kind, $this->now);
+        if ($lastSeen !== null) {
+            $this->container['db']->table(TranscodeModel::TABLE)->eq('id', $id)->update(['last_seen_at' => $lastSeen]);
+        }
+        return $this->row($id);
+    }
+
+    private function row(int $id): array
+    {
+        return $this->container['db']->table(TranscodeModel::TABLE)->eq('id', $id)->findOne();
+    }
+
+    private function stopUrl(string $session): string
+    {
+        return self::BASE.'/video/:/transcode/universal/stop?session='.$session;
+    }
+
+    public function testStopCallsPlexOnceThenIsANoOp(): void
+    {
+        $row = $this->claimRow($this->alice);
+        $this->t->respond(200, '');
+        $this->model()->stop($this->alice, $row['session']);
+
+        $this->assertSame(1, (int) $this->row((int) $row['id'])['stopped']);
+        $this->assertSame([$this->stopUrl($row['session'])], array_column($this->t->requests, 'url'));
+        $this->assertSame(['timeout' => 3], $this->t->requests[0]['opts']);
+        $this->assertSame('Matinee (alice)', $this->t->requests[0]['headers']['X-Plex-Device-Name']);
+
+        $this->model()->stop($this->alice, $row['session']);
+        $this->assertCount(1, $this->t->requests, 'a second stop asked Plex again');
+    }
+
+    public function testStopRefusesAnotherUsersOrAnUnknownSession(): void
+    {
+        $row = $this->claimRow($this->alice);
+        $this->expectForbidden(fn () => $this->model()->stop($this->bob, $row['session']));
+        $this->expectForbidden(fn () => $this->model()->stop($this->alice, '00000000-0000-4000-8000-000000000009'));
+        $this->expectForbidden(fn () => $this->model()->stop($this->alice, 'junk'));
+        $this->assertSame(0, (int) $this->row((int) $row['id'])['stopped']);
+    }
+
+    public function testStoppingAnMp3RowNeverAsksPlex(): void
+    {
+        $row = $this->claimRow($this->alice, 'mp3');
+        $this->model()->stop($this->alice, $row['session']);
+        $this->assertSame(1, (int) $this->row((int) $row['id'])['stopped']);
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testAPlexStopFailureIsSwallowedAndLoggedOnce(): void
+    {
+        $row = $this->claimRow($this->alice);
+        $this->t->respond(500, 'UPSTREAM-BODY '.self::TOKEN);
+        $this->model()->stop($this->alice, $row['session']);
+
+        $this->assertSame(1, (int) $this->row((int) $row['id'])['stopped']);
+        $this->assertSame(['warning Matinee: transcode stop failed (server '.$this->serverId.', plex.http_error)'], $this->log->lines);
+        $this->assertCleanLog();
+        $this->assertSame('Matinee: transcode stop failed (server %d, %s)', PlaybackModel::STOP_FAILED_LOG);
+    }
+
+    public function testStopNeedsNoBrowseRightAndSkipsPlexOnADisabledServer(): void
+    {
+        $this->share();
+        $row = $this->claimRow($this->bob);
+        $this->share(false);
+        $this->t->respond(200, '');
+        $this->model()->stop($this->bob, $row['session']);
+        $this->assertSame(1, (int) $this->row((int) $row['id'])['stopped']);
+        $this->assertCount(1, $this->t->requests);
+
+        $this->reset();
+        $other = $this->claimRow($this->alice);
+        $this->container['matineeServerModel']->setEnabled($this->serverId, false, 1);
+        $this->model()->stop($this->alice, $other['session']);
+        $this->assertSame(1, (int) $this->row((int) $other['id'])['stopped']);
+        $this->assertSame([], $this->t->requests);
+        $this->assertSame([], $this->log->lines);
+    }
+
+    public function testPingMovesLastSeenToNow(): void
+    {
+        $row = $this->claimRow($this->alice, 'hls', self::T0 - 100);
+        $this->model()->ping($this->alice, $row['session']);
+        $this->assertSame(self::T0, (int) $this->row((int) $row['id'])['last_seen_at']);
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testPingRefusesAStoppedAnotherUsersAnMp3OrAStaleRow(): void
+    {
+        $stopped = $this->claimRow($this->alice);
+        $this->container['matineeTranscodeModel']->stop((int) $stopped['id']);
+        // A stopped row is refused on sight: no write reaches the table (the heartbeat would refuse it too).
+        $db = $this->container['db'];
+        $db->getStatementHandler()->withLogging();
+        $before = count($db->getLogMessages());
+        $this->expectForbidden(fn () => $this->model()->ping($this->alice, $stopped['session']));
+        $sql = array_slice($db->getLogMessages(), $before);
+        $this->assertNotSame([], $sql, 'queries were logged');
+        $this->assertSame([], array_values(preg_grep('/\bUPDATE\b/i', $sql)), 'a stopped row was written');
+        $this->assertSame(self::T0, (int) $this->row((int) $stopped['id'])['last_seen_at']);
+
+        $mine = $this->claimRow($this->alice, 'hls', self::T0 - 50);
+        $this->expectForbidden(fn () => $this->model()->ping($this->bob, $mine['session']));
+        $this->assertSame(self::T0 - 50, (int) $this->row((int) $mine['id'])['last_seen_at']);
+
+        $mp3 = $this->claimRow($this->alice, 'mp3', self::T0 - 50);
+        $this->expectForbidden(fn () => $this->model()->ping($this->alice, $mp3['session']));
+        $this->assertSame(self::T0 - 50, (int) $this->row((int) $mp3['id'])['last_seen_at']);
+
+        // Addendum: a heartbeat that returns false (the row went stale) is Forbidden; the row is never revived.
+        $this->container['db']->table(TranscodeModel::TABLE)->eq('id', (int) $mine['id'])->update(['last_seen_at' => self::T0 - 121]);
+        $this->expectForbidden(fn () => $this->model()->ping($this->alice, $mine['session']));
+        $this->assertSame(self::T0 - 121, (int) $this->row((int) $mine['id'])['last_seen_at']);
+    }
+
+    public function testPingAfterTheServerIsUnsharedStopsTheRowAndIsForbidden(): void
+    {
+        $this->share();
+        $row = $this->claimRow($this->bob, 'hls', self::T0 - 50);
+        $this->share(false);
+        $this->t->respond(200, '');
+        $this->expectForbidden(fn () => $this->model()->ping($this->bob, $row['session']), true);
+        $after = $this->row((int) $row['id']);
+        $this->assertSame(1, (int) $after['stopped']);
+        $this->assertSame(self::T0 - 50, (int) $after['last_seen_at']);
+        $this->assertSame([$this->stopUrl($row['session'])], array_column($this->t->requests, 'url'));
+    }
+
+    public function testSweepStopsTheTwoOldestStaleRows(): void
+    {
+        $old = $this->claimRow($this->alice, 'hls', self::T0 - 500);
+        $older = $this->claimRow($this->alice, 'mp3', self::T0 - 600);
+        $newest = $this->claimRow($this->alice, 'hls', self::T0 - 300);
+        $active = $this->claimRow($this->alice, 'hls');
+        $this->t->respond(200, '');
+
+        $this->assertSame(2, $this->model()->sweep());
+        $this->assertSame([1, 1, 0, 0], array_map(fn (array $r): int => (int) $this->row((int) $r['id'])['stopped'], [$old, $older, $newest, $active]));
+        // The hls row got a Plex stop; the mp3 row did not.
+        $this->assertSame([$this->stopUrl($old['session'])], array_column($this->t->requests, 'url'));
+
+        $this->t->respond(200, '');
+        $this->assertSame(1, $this->model()->sweep());
+        $this->assertSame(1, (int) $this->row((int) $newest['id'])['stopped']);
+        $this->assertSame(0, (int) $this->row((int) $active['id'])['stopped']);
+        $this->assertSame(0, $this->model()->sweep());
+    }
+
+    public function testSweepMarksARowOnADisabledServerStoppedWithNoPlexCall(): void
+    {
+        $row = $this->claimRow($this->alice, 'hls', self::T0 - 500);
+        $this->container['matineeServerModel']->setEnabled($this->serverId, false, 1);
+        $this->assertSame(1, $this->model()->sweep());
+        $this->assertSame(1, (int) $this->row((int) $row['id'])['stopped']);
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testAStopTimeoutDoesNotEndTheSweep(): void
+    {
+        $first = $this->claimRow($this->alice, 'hls', self::T0 - 600);
+        $second = $this->claimRow($this->alice, 'hls', self::T0 - 500);
+        $this->t->fail(new \RuntimeException('timed out'))->respond(200, '');
+
+        $this->assertSame(2, $this->model()->sweep());
+        $this->assertSame(1, (int) $this->row((int) $first['id'])['stopped']);
+        $this->assertSame(1, (int) $this->row((int) $second['id'])['stopped']);
+        $this->assertSame([$this->stopUrl($first['session']), $this->stopUrl($second['session'])], array_column($this->t->requests, 'url'));
+        $this->assertSame(['warning Matinee: transcode stop failed (server '.$this->serverId.', plex.unreachable)'], $this->log->lines);
+    }
+
+    public function testMaybeSweepRollsTheDice(): void
+    {
+        $row = $this->claimRow($this->alice, 'mp3', self::T0 - 500);
+        $rolls = 0;
+        $this->container->offsetUnset('matineeSweepDice');
+        $this->container['matineeSweepDice'] = $this->container->protect(function () use (&$rolls): bool {
+            $rolls++;
+            return false;
+        });
+        $this->model()->maybeSweep();
+        $this->assertSame(1, $rolls);
+        $this->assertSame(0, (int) $this->row((int) $row['id'])['stopped']);
+
+        $this->container->offsetUnset('matineeSweepDice');
+        $this->container['matineeSweepDice'] = $this->container->protect(fn (): bool => true);
+        $this->model()->maybeSweep();
+        $this->assertSame(1, (int) $this->row((int) $row['id'])['stopped']);
+    }
+
+    public function testTheProductionDiceIsOneInTen(): void
+    {
+        $dice = $this->container['matineeSweepDice'];
+        $hits = 0;
+        for ($i = 0; $i < 2000; $i++) {
+            $hits += $dice() === true ? 1 : 0;
+        }
+        $this->assertGreaterThan(100, $hits);
+        $this->assertLessThan(320, $hits);
+    }
 }

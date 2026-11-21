@@ -37,6 +37,9 @@ final class PlaybackModel extends Base
     public const FAILED_LOG = 'Matinee: playback failed at %s (server %d, %s)';
     public const STREAM_ENDED_LOG = 'Matinee: stream ended early (server %d, %s)';
     public const HEARTBEAT_FAILED_LOG = 'Matinee: heartbeat failed (server %d)';
+    public const STOP_FAILED_LOG = 'Matinee: transcode stop failed (server %d, %s)';
+    /** C4d: the most stale rows one sweep handles. */
+    public const SWEEP_LIMIT = 2;
 
     /** The part extensions each container family may carry (C1a: the part's extension matches its container). */
     private const PART_EXTENSIONS = ['mp3' => ['mp3'], 'flac' => ['flac'], 'mp4' => ['mp4', 'm4a'], 'm4a' => ['mp4', 'm4a']];
@@ -131,7 +134,80 @@ final class PlaybackModel extends Base
         }
     }
 
+    /**
+     * Stops this user's long stream (C5d). An unknown session, or someone else's, is Forbidden; an already stopped one
+     * of their own is a no-op. Stopping only frees resources, so no browse right is needed.
+     */
+    public function stop(int $userId, string $session): void
+    {
+        $row = $this->transcodes()->find($session, $userId) ?? throw new MatineeForbiddenException();
+        $this->halt($row);
+    }
+
+    /**
+     * Keeps this user's HLS session alive (C2g). The row must be theirs, hls and not stopped; on a server they may no
+     * longer browse it is stopped and Forbidden, and a heartbeat that finds it stale is Forbidden too (never revived).
+     */
+    public function ping(int $userId, string $session): void
+    {
+        $row = $this->transcodes()->find($session, $userId);
+        if ($row === null || $row['kind'] !== 'hls' || (int) $row['stopped'] !== 0) {
+            throw new MatineeForbiddenException();
+        }
+        $server = $this->servers()->get((int) $row['server_id']);
+        if ($server === null || ! $this->policy()->canBrowse($userId, $server)) {
+            $this->halt($row);
+            throw new MatineeForbiddenException();
+        }
+        if (! $this->transcodes()->heartbeat((int) $row['id'], $this->now())) {
+            throw new MatineeForbiddenException();
+        }
+    }
+
+    /** C4d: stops at most SWEEP_LIMIT stale rows, oldest first, and returns how many this call stopped. */
+    public function sweep(): int
+    {
+        $stopped = 0;
+        foreach ($this->transcodes()->stale($this->now(), self::SWEEP_LIMIT) as $row) {
+            $stopped += $this->halt($row) ? 1 : 0;
+        }
+        return $stopped;
+    }
+
+    /** The lazy sweep's dice (C4d): one request in ten, by default. */
+    public function maybeSweep(): void
+    {
+        if (($this->container['matineeSweepDice'])()) {
+            $this->sweep();
+        }
+    }
+
     // ── internals ────────────────────────────────────────────────────────────
+
+    /**
+     * Marks the row stopped first (only one caller wins), then, for an hls row only, asks Plex to stop the transcode
+     * (3 s) through a client named for the row's viewer. A disabled server or an inactive owner or viewer gets no Plex
+     * call; any other failure is logged with a fixed reason and swallowed. True when this call stopped the row.
+     */
+    private function halt(array $row): bool
+    {
+        if (! $this->transcodes()->stop((int) $row['id'])) {
+            return false;
+        }
+        if ($row['kind'] !== 'hls') {
+            return true;
+        }
+        $serverId = (int) $row['server_id'];
+        try {
+            $server = $this->servers()->get($serverId) ?? throw new MatineeForbiddenException();
+            $this->servers()->clientFor($server, (int) $row['user_id'])->hlsStop($row['session']);
+        } catch (MatineeForbiddenException) {
+            // Disabled, gone, or nobody active to name: the row is stopped and Plex times the transcode out itself.
+        } catch (\Throwable $e) {
+            $this->logger->warning(sprintf(self::STOP_FAILED_LOG, $serverId, self::reason($e)));
+        }
+        return true;
+    }
 
     /** The part path when a track plays directly (C1a: no video codec at all, so null), else null. */
     private static function directPart(array $item): ?string
@@ -237,7 +313,8 @@ final class PlaybackModel extends Base
             $e instanceof PlexException, $e instanceof UnsafeUrlException => $e->reason,
             $e instanceof KeyStoreException => 'key store',
             $e instanceof \InvalidArgumentException => 'invalid',
-            default => 'token unopenable',
+            $e instanceof CryptoException => 'token unopenable',
+            default => 'error',
         };
     }
 
