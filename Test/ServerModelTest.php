@@ -1028,6 +1028,28 @@ class ServerModelTest extends Base
         $this->assertSame([], $this->factoryCalls);
     }
 
+    public function testAnInactiveViewerIsRefusedBeforeTheTokenIsOpened(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $bob = $this->user('bob');
+        $this->db()->table('users')->eq('id', $bob)->update(['is_active' => 0]);
+        $this->db()->table('matinee_servers')->eq('id', $id)->update(['token_ct' => 'garbage']);
+        $before = $this->db()->table('matinee_servers')->eq('id', $id)->findOne();
+        $this->expectForbidden(fn () => $this->model()->clientFor($this->model()->get($id), $bob));
+        $this->assertSame($before, $this->db()->table('matinee_servers')->eq('id', $id)->findOne());
+    }
+
+    public function testTheViewersNameIsFiltered(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $bob = $this->user('bob');
+        $this->db()->table('users')->eq('id', $bob)->update(['username' => "b\r\nX-Evil: (o)b<>"]);
+        $this->t = new FakeTransport();
+        $this->t->respond(200, $this->fixture('sections'));
+        $this->model()->clientFor($this->model()->get($id), $bob)->sections();
+        $this->assertSame(['Matinee (bX-Evil ob)'], $this->deviceNames());
+    }
+
     // The owner's own probe stays owner-named, even when an admin runs it.
     public function testVerifyStillSendsTheOwnersName(): void
     {
