@@ -2,10 +2,13 @@
  * Matinee player (plan P3 Task 19; C2g, C6b, C6c). Loaded only on matinee/play, after hls.js. No inline script: the
  * page hands everything over in data-matinee-* attributes. Messages are set with textContent.
  *
- * - Every player page POSTs matinee/keepalive every 5 minutes, so the Kanboard session outlives a long film or album.
+ * - Every player page POSTs matinee/keepalive every 5 minutes, so the Kanboard session outlives a long film or album,
+ *   and clears it on pagehide.
  * - Audio: the <audio> plays its src; an error shows data-matinee-error.
  * - Video: hls.js when it is supported, else native HLS, else data-matinee-unsupported. It pings the claimed session
- *   every 30 s (a 403 reloads the page, which claims a fresh one) and sends one stop beacon on pagehide.
+ *   every 30 s (a 403 reloads the page, which claims a fresh one). halt() stops the ping and sends one stop beacon; it
+ *   runs on pagehide, on a fatal hls.js error, on a media error and when nothing can play, so a broken player never
+ *   holds its slot. A second ping-driven reload within 120 s halts and shows data-matinee-error instead of looping.
  * - A page restored from the back/forward cache reloads: its session was stopped when it was hidden.
  */
 (function () {
@@ -51,35 +54,68 @@
         }
     });
 
-    media.addEventListener('error', function () {
-        show(attr('error'));
-    });
-
-    if (attr('kind') !== 'hls') {
-        return;
-    }
-
+    var hlsPage = attr('kind') === 'hls';
     var session = attr('session');
-    var src = attr('src');
+    var ping = null;
+    // An audio page claims no session, so there is nothing to halt.
+    var stopped = !hlsPage;
 
-    var ping = setInterval(function () {
-        post(attr('ping'), form(session)).then(function (response) {
-            if (response.status === 403) {
-                location.reload();
-            }
-        }).catch(function () {});
-    }, 30000);
-
-    var stopped = false;
-    window.addEventListener('pagehide', function () {
+    function halt() {
         if (stopped) {
             return;
         }
         stopped = true;
         clearInterval(ping);
-        clearInterval(keepalive);
         navigator.sendBeacon(attr('stop'), form(session));
+    }
+
+    window.addEventListener('pagehide', function () {
+        clearInterval(keepalive);
+        halt();
     });
+
+    media.addEventListener('error', function () {
+        show(attr('error'));
+        halt();
+    });
+
+    if (!hlsPage) {
+        return;
+    }
+
+    var RELOADED = 'matinee-ping-reload';
+
+    /** A 403 ping reloads to claim a fresh session, unless the last such reload was under 120 s ago. */
+    function reloadOrGiveUp() {
+        var now = Date.now();
+        var last = 0;
+        try {
+            last = Number(sessionStorage.getItem(RELOADED)) || 0;
+        } catch (e) {
+            last = 0;
+        }
+        if (last > 0 && now - last < 120000) {
+            halt();
+            show(attr('error'));
+            return;
+        }
+        try {
+            sessionStorage.setItem(RELOADED, String(now));
+        } catch (e) {
+            // No storage: reload anyway.
+        }
+        location.reload();
+    }
+
+    var src = attr('src');
+
+    ping = setInterval(function () {
+        post(attr('ping'), form(session)).then(function (response) {
+            if (response.status === 403) {
+                reloadOrGiveUp();
+            }
+        }).catch(function () {});
+    }, 30000);
 
     if (window.Hls && Hls.isSupported()) {
         var hls = new Hls();
@@ -87,6 +123,7 @@
             if (data && data.fatal) {
                 show(attr('error'));
                 hls.destroy();
+                halt();
             }
         });
         hls.loadSource(src);
@@ -95,5 +132,6 @@
         media.src = src;
     } else {
         show(attr('unsupported'));
+        halt();
     }
 }());
