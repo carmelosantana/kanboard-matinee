@@ -13,6 +13,7 @@
 
     <?= $this->form->label(t('Server address'), 'url') ?>
     <?= $this->form->text('url', $values, [], ['required', 'autocomplete="off"', 'placeholder="https://plex.example.com:32400"']) ?>
+    <p class="form-help"><?= t('Use https://<Plex IP>:32400 or your plex.direct address; Matinee finds the secure name for you. Plex listens on port 32400.') ?></p>
 
     <?= $this->form->label(t('Plex token'), 'token') ?>
     <?php /* Write-only: the stored token is never sent back, not even masked. */ ?>

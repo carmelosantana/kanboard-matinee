@@ -8,6 +8,7 @@ use Kanboard\Plugin\Matinee\Crypto\RefSigner;
 use Kanboard\Plugin\Matinee\Crypto\Subkeys;
 use Kanboard\Plugin\Matinee\Http\CurlTransport;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
+use Kanboard\Plugin\Matinee\Http\PlexTransport;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 use Kanboard\Plugin\Matinee\Model\BrowseModel;
 use Kanboard\Plugin\Matinee\Model\MatineePolicy;
@@ -30,15 +31,20 @@ class Plugin extends Base
         $container['matineeKeyStore'] = static fn (): KeyStore => new KeyStore(DATA_DIR.'/matinee', getenv('MATINEE_KEY') ?: null);
         // Signs browse and art refs with the refs subkey of the active root key, read when first used (spec §6).
         $container['matineeRefSigner'] = static fn ($c): RefSigner => new RefSigner(Subkeys::refs($c['matineeKeyStore']->rootKey()));
-        // Builds a Plex client over the guarded, pinned CurlTransport. Tests swap in FakeTransport. It only reads the
-        // client id (ServerModel ensures it first), so building a client never writes.
+        // The guarded, pinned CurlTransport, built afresh on each use so the guard reads the current settings. It also
+        // discovers a typed IP's plex.direct name (ServerModel). Tests swap in FakeTransport.
+        $container['matineeTransport'] = $container->factory(
+            static fn ($c): PlexTransport => new CurlTransport(UrlGuard::fromConfig($c['configModel']))
+        );
+        // Builds a Plex client over that transport. It only reads the client id (ServerModel ensures it first), so
+        // building a client never writes.
         $container['matineePlexClientFactory'] = $container->protect(
             static function (string $baseUrl, #[\SensitiveParameter] string $token, ?string $machineId, string $deviceName) use ($container): PlexClient {
                 return new PlexClient(
                     $baseUrl,
                     $token,
                     (new Settings($container))->clientId(),
-                    new CurlTransport(UrlGuard::fromConfig($container['configModel'])),
+                    $container['matineeTransport'],
                     $machineId,
                     $deviceName
                 );

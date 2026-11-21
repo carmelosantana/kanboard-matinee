@@ -9,8 +9,11 @@ use Kanboard\Plugin\Matinee\Crypto\KeyStore;
 use Kanboard\Plugin\Matinee\Crypto\KeyStoreException;
 use Kanboard\Plugin\Matinee\Crypto\Subkeys;
 use Kanboard\Plugin\Matinee\Crypto\TokenBox;
+use Kanboard\Plugin\Matinee\Http\CurlTransport;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
+use Kanboard\Plugin\Matinee\Http\PlexDirect;
 use Kanboard\Plugin\Matinee\Http\PlexException;
+use Kanboard\Plugin\Matinee\Http\PlexTransport;
 use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 
@@ -29,6 +32,8 @@ use Kanboard\Plugin\Matinee\Http\UrlGuard;
  * - The install's client id is ensured before any client is built (makeClient), so the client factory only reads it.
  * - The limits (attempts, servers per owner, duplicates) are checked then written without a lock: concurrent requests
  *   can pass them by a little (accepted at P1).
+ * - A new address typed as `https://<IPv4>[:port]` is replaced by its plex.direct name (secureName) before the
+ *   duplicate check and the probe, and that name is what is stored. The token only ever goes to the plex.direct URL.
  */
 final class ServerModel extends Base
 {
@@ -67,6 +72,8 @@ final class ServerModel extends Base
         if ($name === null || ! self::validToken($token)) {
             $this->fail('connect', 'input', $host);
         }
+        $url = $this->secureName('connect', $url);
+        $host = self::host($url);
         if ($this->isDuplicate($userId, $url)) {
             $this->fail('connect', 'duplicate', $host);
         }
@@ -134,6 +141,10 @@ final class ServerModel extends Base
         }
         if (! $this->tryAttempt($actorId)) {
             $this->fail('update', 'rate_limit', $host);
+        }
+        if ($urlChanged) {
+            $url = $this->secureName('update', $url);
+            $host = self::host($url);
         }
         if ($urlChanged && $this->isDuplicate($actorId, $url, $serverId)) {
             $this->fail('update', 'duplicate', $host);
@@ -349,6 +360,41 @@ final class ServerModel extends Base
         $this->settings()->ensureClientId();
         $factory = $this->container['matineePlexClientFactory'];
         return $factory($baseUrl, $token, $machineId, PlexClient::deviceName((string) $user['username'], (int) $user['id']));
+    }
+
+    private function transport(): PlexTransport
+    {
+        return $this->container['matineeTransport'];
+    }
+
+    /**
+     * For an `https://<IPv4>[:port]` address, the server's plex.direct name; any other address as it is. The typed
+     * address is guarded first (a refusal means no discovery), discovery is a token-less handshake, the answer must
+     * be exactly that IP's and port's plex.direct name, and that name is guarded too and must pin to the typed IP.
+     * Any failure is the generic one, logged at stage `discover`.
+     */
+    private function secureName(string $op, string $url): string
+    {
+        if (PlexDirect::ipv4Endpoint($url) === null) {
+            return $url;
+        }
+        $ip = self::host($url);
+        try {
+            $guard = UrlGuard::fromConfig($this->configModel);
+            $guard->check($url);
+            $secure = $this->transport()->discoverPlexDirect($url);
+            if ($secure === null || ! PlexDirect::isSecureNameFor($url, $secure)) {
+                $this->fail($op, 'discover', $ip, 'no plex.direct name');
+            }
+            if (! CurlTransport::sameAddress($guard->check($secure)['ip'], $ip)) {
+                $this->fail($op, 'discover', $ip, 'pinned elsewhere');
+            }
+        } catch (MatineeConnectException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            $this->fail($op, 'discover', $ip, self::reason($e));
+        }
+        return UrlGuard::normaliseBaseUrl($secure);
     }
 
     /**

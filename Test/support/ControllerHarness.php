@@ -50,7 +50,7 @@ trait MatineeControllerHarness
     private const BASE = 'https://plex.example.test:32400';
     private const CLIENT_ID = 'c0ffee00-1111-4222-8333-444455556666';
     private const OTHER_MACHINE = 'fedcba9876543210fedcba9876543210fedcba98';
-    private const CONNECT_FAILED = 'Could not connect to that server with that token.';
+    private const CONNECT_FAILED = 'Could not connect to that server with that token. Check the address includes :32400 and the token is current.';
     private const TOKEN_REQUIRED = 'Enter the token again to change the server address.';
 
     private FakeTransport $t;
@@ -74,6 +74,8 @@ trait MatineeControllerHarness
             fn (string $baseUrl, #[\SensitiveParameter] string $token, ?string $machineId, string $deviceName): PlexClient
                 => new PlexClient($baseUrl, $token, self::CLIENT_ID, $this->t, $machineId, $deviceName)
         );
+        // Secure-name discovery goes through the current fake ($this->t may be replaced between requests).
+        $this->container['matineeTransport'] = $this->container->factory(fn (): FakeTransport => $this->t);
         $this->log = new MatineeLineLogger();
         unset($this->container['logger']);
         $this->container['logger'] = $this->log;

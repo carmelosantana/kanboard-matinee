@@ -49,19 +49,32 @@ SQLite, MySQL, Postgres and SQL Server.
 
 Open your profile, then **Plex servers → Add a Plex server**.
 
-- **Server address.** Prefer the `https://<ip-dashed>.<hash>.plex.direct:32400` form. Find it in Plex Web under
-  Settings → Network, or in your plex.tv resources list. A plain `http://192.168.1.10:32400` works too when an
-  admin has added that address as a private target. The address is scheme, host and port only: no path, query
-  or `user:pass@`.
+- **Server address.** Type `https://<Plex IP>:32400` (for example `https://192.168.1.86:32400`) or your
+  plex.direct address. Plex listens on port 32400. The address is scheme, host and port only: no path, query or
+  `user:pass@`.
+
+  Plex's certificate is a `*.<hash>.plex.direct` wildcard, which never covers a bare IP, so the IP form can't
+  pass TLS checks by itself. For an `https://` address with an IPv4 host, Matinee finds the secure name for you.
+  It makes a TLS handshake with no token and sends no request. The certificate chain must be trusted, but the
+  host name isn't checked on this one handshake. If the certificate is Plex's wildcard, Matinee uses
+  `https://<ip-dashed>.<hash>.plex.direct:<port>`: the hash comes from the certificate, and the IP and port are
+  the ones you typed. That name is checked against the private targets again, must resolve to the same IP, and
+  is then verified in full before the token is sent. The plex.direct address is what gets stored, and it's what
+  you see on the server page. IPv6 addresses and servers without a Plex certificate are used as typed.
+
+  A plain `http://192.168.1.10:32400` works too when an admin has added that address as a private target, but
+  it fails when Plex's **Secure connections** setting is **Required**.
 - **Plex token.** Follow Plex's support article "Finding an authentication token" (open any item in Plex Web,
   choose **View XML**, and copy the `X-Plex-Token` value from the address bar).
 
 The token field is write-only. When you edit a server, leave it blank to keep the stored token. Changing the
 address needs the token again, and so does a server that now reports a different machine id.
 
-When connecting fails, the message is always the same: "Could not connect to that server with that token."
-That covers a refused address, an unreachable server and a rejected token alike, so the form can't be used to
-probe your network. The reason goes to the Kanboard log (stage and host only).
+When connecting fails, the message is always the same: "Could not connect to that server with that token.
+Check the address includes :32400 and the token is current." That covers a refused address, an unreachable
+server, a certificate that isn't Plex's and a rejected token alike, so the form can't be used to probe your
+network. The reason goes to the Kanboard log (stage and host only; a failed secure-name lookup logs stage
+`discover`).
 
 A plex.direct name resolves to the IP in its first label, whatever the hash. If that IP is private, the server
 counts as private and needs a private target like any other LAN address.

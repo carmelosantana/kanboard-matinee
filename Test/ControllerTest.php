@@ -296,6 +296,34 @@ class ControllerTest extends Base
         }
     }
 
+    public function testTheAddressFieldExplainsTheIpAndPlexDirectForms(): void
+    {
+        $help = 'Use https://&lt;Plex IP&gt;:32400 or your plex.direct address; Matinee finds the secure name for you. Plex listens on port 32400.';
+        $server = $this->server($this->owner);
+        foreach (['create' => $this->get(self::SRV, 'create')->body(), 'edit' => $this->get(self::SRV, 'edit', ['server_id' => $server])->body()] as $page => $html) {
+            $this->assertStringContainsString('<p class="form-help">'.$help.'</p>', $html, $page);
+        }
+    }
+
+    public function testAnHttpsIpIsSavedAndShownAsItsPlexDirectName(): void
+    {
+        $secure = 'https://192-168-1-86.0123456789abcdef0123456789abcdef.plex.direct:32400';
+        $this->setConfig('matinee_private_targets', '192.168.1.86:32400');
+        defined('MATINEE_TESTING') || define('MATINEE_TESTING', true);
+        \Kanboard\Plugin\Matinee\Http\UrlGuard::setResolverForTesting(fn (string $host): array => str_ends_with($host, '.plex.direct') ? ['192.168.1.86'] : []);
+        try {
+            $this->t->discovers($secure);
+            $this->queueOk();
+            $this->call(self::SRV, 'save', [], ['name' => 'Den', 'url' => 'https://192.168.1.86:32400', 'token' => self::TOKEN]);
+            $this->assertSame('Server connected.', $this->flash('success'));
+            $server = $this->container['matineeServerModel']->listForOwner($this->owner)[0];
+            $this->assertSame($secure, $server['base_url']);
+            $this->assertStringContainsString('192-168-1-86.0123456789abcdef0123456789abcdef.plex.direct', $this->get(self::SRV, 'show', ['server_id' => $server['id']])->body());
+        } finally {
+            \Kanboard\Plugin\Matinee\Http\UrlGuard::setResolverForTesting(null);
+        }
+    }
+
     public function testConnectAddsTheServerAndOpensIt(): void
     {
         $this->queueOk();

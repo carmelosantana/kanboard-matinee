@@ -59,7 +59,7 @@ abstract class MatineeBaseController extends BaseController
     {
         return $e->getMessage() === MatineeConnectException::TOKEN_REQUIRED
             ? t('Enter the token again to change the server address.')
-            : t('Could not connect to that server with that token.');
+            : t('Could not connect to that server with that token. Check the address includes :32400 and the token is current.');
     }
 
     protected function statusLabel(array $server): string

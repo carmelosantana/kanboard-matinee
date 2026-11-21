@@ -146,6 +146,30 @@ class NoTokenLeakTest extends Base
         $this->assertNoTokenAnywhere();
     }
 
+    /** Secure-name discovery: an https IP address rewritten, refused, unreachable, or failing with the token in the message. */
+    public function testEverySecureNameDiscoveryPath(): void
+    {
+        $secure = 'https://192-168-1-86.0123456789abcdef0123456789abcdef.plex.direct:32400';
+        $this->setConfig('matinee_private_targets', '192.168.1.86:32400');
+        defined('MATINEE_TESTING') || define('MATINEE_TESTING', true);
+        \Kanboard\Plugin\Matinee\Http\UrlGuard::setResolverForTesting(fn (string $host): array => str_ends_with($host, '.plex.direct') ? ['192.168.1.86'] : []);
+        $connect = fn (string $url = 'https://192.168.1.86:32400') => fn () => $this->call(self::SRV, 'save', [], ['name' => 'Den', 'url' => $url, 'token' => self::TOKEN]);
+        try {
+            $this->capture($connect(), fn () => $this->t->discovers(null));
+            $this->capture($connect(), fn () => $this->t->discovers('https://plex.example.com:32400'));
+            $this->capture($connect(), fn () => $this->t->discovers(new \RuntimeException('handshake with '.self::TOKEN)));
+            $this->capture($connect(), fn () => $this->t->discovers($secure) && $this->t->respond(401, self::TOKEN));
+            $this->capture($connect('https://192.168.1.86:8443'));
+            $this->capture($connect(), fn () => $this->t->discovers($secure) && $this->queueOk());
+            $this->assertSame('Server connected.', $this->flash('success'));
+            $this->capture(fn () => $this->get(self::SRV, 'index'));
+            $this->assertStringContainsString('plex.direct', implode("\n", $this->seen));
+        } finally {
+            \Kanboard\Plugin\Matinee\Http\UrlGuard::setResolverForTesting(null);
+        }
+        $this->assertNoTokenAnywhere();
+    }
+
     /**
      * P2 Task 4: every browse page and the art endpoint, as the owner, a shared user and an outsider, on success and on
      * every failure (an upstream body, a status or an exception message holding the token), headers and bodies.

@@ -18,6 +18,10 @@ namespace Kanboard\Plugin\Matinee\Http;
  *   body has started (chunked trailers) are ignored. Callers cannot set hop-by-hop or routing headers.
  * - curl errors become `plex.unreachable` with nothing else: no curl message, URL or query (S9). Nothing here
  *   turns on CURLOPT_VERBOSE or CURLINFO_HEADER_OUT, or logs curl_getinfo().
+ * - discoverPlexDirect() is the one place host-name verification is off: a guarded, pinned TLS handshake to an
+ *   `https://<IPv4>` base (CURLOPT_CONNECT_ONLY, so no request and no header is sent) that reads the leaf
+ *   certificate's names. The chain is still verified. It never carries a token; get() always verifies both.
+ * - $caFile replaces the CA bundle (tests trust a throwaway CA with it); production leaves it null.
  *
  * @package Kanboard\Plugin\Matinee\Http
  */
@@ -34,7 +38,8 @@ final class CurlTransport implements PlexTransport
         private readonly UrlGuard $guard,
         private readonly int $connectTimeout = 5,
         private readonly int $timeout = 15,
-        private readonly int $maxBytes = 2097152
+        private readonly int $maxBytes = 2097152,
+        private readonly ?string $caFile = null
     ) {
         if ($connectTimeout < 1 || $timeout < 1 || $maxBytes < 1) {
             throw new \InvalidArgumentException('connectTimeout, timeout and maxBytes must be at least 1.');
@@ -57,7 +62,7 @@ final class CurlTransport implements PlexTransport
             $protocols = defined('CURLOPT_PROTOCOLS_STR')
                 ? [CURLOPT_PROTOCOLS_STR => 'http,https', CURLOPT_REDIR_PROTOCOLS_STR => 'http,https']
                 : [CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS, CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS];
-            $set = curl_setopt_array($ch, $protocols + [
+            $set = curl_setopt_array($ch, $protocols + $this->trustOptions() + [
                 CURLOPT_URL            => $requestUrl,
                 CURLOPT_HTTPGET        => true,
                 CURLOPT_RESOLVE        => self::resolveList($pin['host'], $pin['port'], $pin['ip']),
@@ -115,6 +120,55 @@ final class CurlTransport implements PlexTransport
             // curl_close() is a no-op since PHP 8.0 (deprecated in 8.5); dropping the last reference frees it.
             unset($ch);
         }
+    }
+
+    public function discoverPlexDirect(string $base): ?string
+    {
+        if (PlexDirect::ipv4Endpoint($base) === null) {
+            return null;
+        }
+        $pin = $this->guard->check($base); // UnsafeUrlException propagates: nothing is sent
+        $ch = null;
+        try {
+            $ch = curl_init();
+            $protocols = defined('CURLOPT_PROTOCOLS_STR')
+                ? [CURLOPT_PROTOCOLS_STR => 'https', CURLOPT_REDIR_PROTOCOLS_STR => 'https']
+                : [CURLOPT_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTPS];
+            $set = curl_setopt_array($ch, $protocols + $this->trustOptions() + [
+                CURLOPT_URL            => 'https://' . $pin['ip'] . ':' . $pin['port'] . '/',
+                CURLOPT_CONNECT_ONLY   => true, // the handshake and nothing else: no request line, no header
+                CURLOPT_CERTINFO       => true,
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_PROXY          => '',
+                CURLOPT_NOPROXY        => '*',
+                CURLOPT_SSL_VERIFYPEER => true, // the chain must be trusted
+                CURLOPT_SSL_VERIFYHOST => 0,    // only here: the certificate cannot name an IP, and no token is sent
+                CURLOPT_CONNECTTIMEOUT => $this->connectTimeout,
+                CURLOPT_TIMEOUT        => $this->timeout,
+            ]);
+            if ($set !== true) {
+                throw PlexException::unreachable();
+            }
+            if (curl_exec($ch) === false || curl_errno($ch) !== 0
+                || ! self::sameAddress((string) curl_getinfo($ch, CURLINFO_PRIMARY_IP), $pin['ip'])) {
+                throw PlexException::unreachable();
+            }
+            $certificates = curl_getinfo($ch, CURLINFO_CERTINFO);
+            $leaf = is_array($certificates) && is_array($certificates[0] ?? null) ? $certificates[0] : [];
+            return PlexDirect::fromCertificate($base, PlexDirect::certificateNames($leaf));
+        } catch (PlexException $e) {
+            throw $e;
+        } catch (\Throwable) {
+            throw PlexException::unreachable();
+        } finally {
+            unset($ch);
+        }
+    }
+
+    /** @return array<int, string> CURLOPT_CAINFO when a CA file was given, else nothing (the system bundle) */
+    private function trustOptions(): array
+    {
+        return $this->caFile !== null ? [CURLOPT_CAINFO => $this->caFile] : [];
     }
 
     /**

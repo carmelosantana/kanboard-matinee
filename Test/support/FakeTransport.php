@@ -16,6 +16,32 @@ class FakeTransport implements PlexTransport
     /** @var list<PlexResponse|\Throwable> */
     private array $queue = [];
 
+    /** @var list<string> every base discoverPlexDirect() was asked about */
+    public array $discoveries = [];
+
+    /** @var list<string|\Throwable|null> */
+    private array $discoverQueue = [];
+
+    /** Scripts the next discoverPlexDirect() answer: a URL, null (no plex.direct name) or an exception. */
+    public function discovers(string|\Throwable|null $answer): self
+    {
+        $this->discoverQueue[] = $answer;
+        return $this;
+    }
+
+    public function discoverPlexDirect(string $base): ?string
+    {
+        $this->discoveries[] = $base;
+        if ($this->discoverQueue === []) {
+            throw new \LogicException('FakeTransport: no queued discovery');
+        }
+        $next = array_shift($this->discoverQueue);
+        if ($next instanceof \Throwable) {
+            throw $next;
+        }
+        return $next;
+    }
+
     public function respond(int $status, string $body, array $headers = []): self
     {
         $this->queue[] = new PlexResponse($status, $body, $headers);

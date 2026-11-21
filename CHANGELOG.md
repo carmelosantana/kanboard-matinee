@@ -13,6 +13,18 @@ audiences and project-role abilities were removed; schema v1 was edited in place
 **P2 browse (2026-11-20).** Anyone who may browse a server can page through its libraries and see posters.
 Nothing plays yet.
 
+**Connecting by IP (2026-11-20).** `https://<Plex IP>:32400` now connects. It used to fail every time, because
+Plex's `*.plex.direct` certificate never covers a bare IP.
+
+- **Secure-name discovery:** for an `https://` address with an IPv4 host, Matinee makes a guarded TLS handshake
+  with no token and no request (`CurlTransport::discoverPlexDirect`). The chain is verified, but the host name
+  isn't checked on that handshake. If the leaf certificate is Plex's `*.<32 hex>.plex.direct` wildcard, the
+  address becomes `https://<ip-dashed>.<hash>.plex.direct:<port>`. That name is guarded again and must pin to the
+  typed IP. The rewritten address is stored, on connect and on an address change. A specific (non-wildcard)
+  plex.direct name, a non-Plex certificate, an IPv6 address and an `http://` address are not rewritten.
+- **Address help text** under the server address field, and one fixed hint added to the generic failure:
+  "Check the address includes :32400 and the token is current."
+
 ### Added
 
 - **Browse (Media):** a **Media** link in the dashboard sidebar lists the servers you may browse, then a
