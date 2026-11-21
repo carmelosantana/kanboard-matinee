@@ -1,0 +1,13 @@
+{
+  "MediaContainer": {
+    "size": 1,
+    "librarySectionID": 3,
+    "librarySectionTitle": "Music",
+    "machineIdentifier": "0123456789abcdef0123456789abcdef01234567",
+    "Metadata": [
+      { "ratingKey": "3001", "key": "/library/metadata/3001", "parentRatingKey": "3000", "type": "track", "title": "Fake Song", "parentTitle": "Fake Album", "grandparentTitle": "Fake Artist", "index": 1, "duration": 215000, "summary": "UPSTREAM-SUMMARY",
+        "Media": [{ "id": 4001, "duration": 215000, "bitrate": 320, "audioChannels": 2, "audioCodec": "mp3", "container": "mp3",
+          "Part": [{ "id": 5001, "key": "/library/parts/5001/1700000000/file.mp3", "duration": 215000, "file": "/data/music/song.mp3", "size": 8600000, "container": "mp3" }] }] }
+    ]
+  }
+}

@@ -1,12 +1,15 @@
 <?php
 
 require_once __DIR__ . '/support/FakeTransport.php';
+require_once __DIR__ . '/support/RecordingSink.php';
 
+use Kanboard\Plugin\Matinee\Http\ByteRange;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
 use Kanboard\Plugin\Matinee\Http\PlexException;
 use Kanboard\Plugin\Matinee\Http\PlexResponse;
 use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
 use Kanboard\Plugin\Matinee\Test\FakeTransport;
+use Kanboard\Plugin\Matinee\Test\RecordingSink;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -1033,6 +1036,553 @@ class PlexClientTest extends TestCase
         $body = str_repeat('{[', 1024 * 1024);
         $this->t->respond(200, $body, ['Content-Type' => 'image/png']);
         $this->assertSame($body, $this->client()->art('/library/metadata/1/thumb/2', 512)['body']);
+    }
+
+    // ── item() (P3 Task 8; spec §7, S13; C1a) ────────────────────────────────
+
+    /** @dataProvider itemFixtures */
+    public function testItemParsesTheWhitelistedFields(string $fixture, string $path, array $expected): void
+    {
+        $this->t->respond(200, $this->fixture($fixture));
+        $this->assertSame($expected, $this->client(self::MACHINE)->item($path));
+        $this->assertSame(self::BASE . $path, $this->t->requests[0]['url']);
+    }
+
+    public function itemFixtures(): array
+    {
+        return [
+            'mp3 track' => ['item-track-mp3', '/library/metadata/3001', [
+                'section' => '3', 'ratingKey' => '3001', 'type' => 'track', 'title' => 'Fake Song',
+                'parentTitle' => 'Fake Album', 'grandparentTitle' => 'Fake Artist', 'duration' => 215000,
+                'container' => 'mp3', 'audioCodec' => 'mp3', 'videoCodec' => '',
+                'part' => '/library/parts/5001/1700000000/file.mp3',
+            ]],
+            'flac track' => ['item-track-flac', '/library/metadata/3002', [
+                'section' => '3', 'ratingKey' => '3002', 'type' => 'track', 'title' => 'Fake Lossless',
+                'parentTitle' => 'Fake Album', 'grandparentTitle' => 'Fake Artist', 'duration' => 301000,
+                'container' => 'flac', 'audioCodec' => 'flac', 'videoCodec' => '',
+                'part' => '/library/parts/5002/1700000001/file.flac',
+            ]],
+            'h263 track' => ['item-track-h263', '/library/metadata/3003', [
+                'section' => '3', 'ratingKey' => '3003', 'type' => 'track', 'title' => 'Fake Video Track',
+                'parentTitle' => 'Fake Album', 'grandparentTitle' => 'Fake Artist', 'duration' => 99000,
+                'container' => 'mp4', 'audioCodec' => 'aac', 'videoCodec' => 'h263',
+                'part' => '/library/parts/5003/1700000002/file.mp4',
+            ]],
+            'avi movie' => ['item-movie-avi', '/library/metadata/2229', [
+                'section' => '1', 'ratingKey' => '2229', 'type' => 'movie', 'title' => 'Fake Old Movie',
+                'parentTitle' => '', 'grandparentTitle' => '', 'duration' => 5700000,
+                'container' => 'avi', 'audioCodec' => 'mp3', 'videoCodec' => 'mpeg4',
+                'part' => '/library/parts/2229/1250471640/file.avi',
+            ]],
+            'no section' => ['item-no-section', '/library/metadata/3001', [
+                'section' => null, 'ratingKey' => '3001', 'type' => 'track', 'title' => 'Fake Song',
+                'parentTitle' => '', 'grandparentTitle' => '', 'duration' => null,
+                'container' => 'mp3', 'audioCodec' => 'mp3', 'videoCodec' => '',
+                'part' => '/library/parts/5001/1700000000/file.mp3',
+            ]],
+        ];
+    }
+
+    private static function itemJson(array $meta, array $mc = ['librarySectionID' => 3]): string
+    {
+        return (string) json_encode(['MediaContainer' => $mc + ['Metadata' => [$meta]]]);
+    }
+
+    public function testItemWithAMismatchedRatingKeyIsBadJson(): void
+    {
+        $this->t->respond(200, $this->fixture('item-track-mp3'));
+        $this->expectPlexError(fn () => $this->client()->item('/library/metadata/3999'), PlexException::BAD_JSON);
+    }
+
+    /** @dataProvider badCodecs */
+    public function testItemCodecsOutsideTheShapeAreEmpty(mixed $codec): void
+    {
+        $this->t->respond(200, self::itemJson(['ratingKey' => '7', 'type' => 'track', 'Media' => [[
+            'container' => $codec, 'audioCodec' => $codec, 'videoCodec' => $codec,
+            'Part' => [['key' => '/library/parts/1/2/file.mp3']],
+        ]]]));
+        $item = $this->client()->item('/library/metadata/7');
+        $this->assertSame(['', '', ''], [$item['container'], $item['audioCodec'], $item['videoCodec']]);
+    }
+
+    public function badCodecs(): array
+    {
+        return [
+            'trailing space' => ['MP3 '],
+            'slash'          => ['x/y'],
+            'too long'       => [str_repeat('a', 17)],
+            'empty'          => [''],
+            'number'         => [3],
+            'array'          => [['mp3']],
+            'underscore'     => ['amr_nb'],
+        ];
+    }
+
+    /** @dataProvider badParts */
+    public function testItemPartIsNullUnlessItIsAPartPath(mixed $media): void
+    {
+        $meta = ['ratingKey' => '7', 'type' => 'track'] + ($media === 'absent' ? [] : ['Media' => $media]);
+        $this->t->respond(200, self::itemJson($meta));
+        $item = $this->client()->item('/library/metadata/7');
+        $this->assertNull($item['part']);
+    }
+
+    public function badParts(): array
+    {
+        return [
+            'no media'      => ['absent'],
+            'media not list' => ['x'],
+            'no part'       => [[['container' => 'mp3']]],
+            'absolute'      => [[['Part' => [['key' => 'https://evil.example.test/library/parts/1/2/file.mp3']]]]],
+            'with query'    => [[['Part' => [['key' => '/library/parts/1/2/file.mp3?X-Plex-Token=x']]]]],
+            'dot dot'       => [[['Part' => [['key' => '/library/parts/1/2/../file.mp3']]]]],
+            'int key'       => [[['Part' => [['key' => 5]]]]],
+        ];
+    }
+
+    /** @dataProvider malformedItems */
+    public function testMalformedItemsAreBadJson(string $body): void
+    {
+        $this->t->respond(200, $body);
+        $this->expectPlexError(fn () => $this->client()->item('/library/metadata/7'), PlexException::BAD_JSON);
+    }
+
+    public function malformedItems(): array
+    {
+        return [
+            'no metadata'    => [(string) json_encode(['MediaContainer' => ['librarySectionID' => 3]])],
+            'empty metadata' => [(string) json_encode(['MediaContainer' => ['Metadata' => []]])],
+            'metadata map'   => [(string) json_encode(['MediaContainer' => ['Metadata' => ['a' => ['ratingKey' => '7', 'type' => 'track']]]])],
+            'entry scalar'   => [(string) json_encode(['MediaContainer' => ['Metadata' => ['x']]])],
+            'no ratingKey'   => [self::itemJson(['type' => 'track'])],
+            'word ratingKey' => [self::itemJson(['ratingKey' => 'seven', 'type' => 'track'])],
+            'padded ratingKey' => [self::itemJson(['ratingKey' => '07', 'type' => 'track'])],
+            'bad type'       => [self::itemJson(['ratingKey' => '7', 'type' => 'clip'])],
+            'no type'        => [self::itemJson(['ratingKey' => '7'])],
+            'not json'       => ['<html>UPSTREAM-BODY</html>'],
+        ];
+    }
+
+    /** @dataProvider badItemPaths */
+    public function testItemRefusesANonItemPathWithNoRequest(string $path): void
+    {
+        try {
+            $this->client()->item($path);
+            $this->fail('expected refusal');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertMessageIsClean($e);
+        }
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function badItemPaths(): array
+    {
+        return [
+            'children' => ['/library/metadata/7/children'],
+            'part'     => ['/library/parts/1/2/file.mp3'],
+            'query'    => ['/library/metadata/7?X-Plex-Token=evil'],
+            'absolute' => ['https://evil.example.test/library/metadata/7'],
+            'empty'    => [''],
+        ];
+    }
+
+    public function testItemFromAnotherServerIsServerChanged(): void
+    {
+        $this->t->respond(200, self::itemJson(['ratingKey' => '7', 'type' => 'track'], ['machineIdentifier' => 'someone-else']));
+        $this->expectPlexError(fn () => $this->client(self::MACHINE)->item('/library/metadata/7'), PlexException::SERVER_CHANGED);
+    }
+
+    public function testItem401IsTokenRejected(): void
+    {
+        $this->t->respond(401, 'UPSTREAM-BODY');
+        $this->expectPlexError(fn () => $this->client()->item('/library/metadata/7'), PlexException::TOKEN_REJECTED);
+    }
+
+    // ── part() (P3 Task 8; C1b, C1d, C3a, C3b) ───────────────────────────────
+
+    private const MP3_PART = '/library/parts/5001/1700000000/file.mp3';
+
+    private function sink(bool $refuse = false, ?int $stopAfter = null): RecordingSink
+    {
+        return new RecordingSink($refuse, $stopAfter);
+    }
+
+    private function assertOnlyHeaderCarriesTheToken(array $req): void
+    {
+        $this->assertStringNotContainsString(self::TOKEN, $req['url']);
+        $this->assertStringNotContainsStringIgnoringCase('token', $req['url']);
+        $hits = array_keys(array_filter($req['headers'], fn ($v) => str_contains((string) $v, self::TOKEN)));
+        $this->assertSame(['X-Plex-Token'], $hits);
+    }
+
+    public function testPartRequestsTheRangeWithTheTokenOnlyInTheHeaderAndTheS3Opts(): void
+    {
+        $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-999/5000'], [str_repeat('a', 1000)]);
+        $this->client()->part(self::MP3_PART, 0, 999, $this->sink());
+
+        $this->assertCount(1, $this->t->requests);
+        [$req] = $this->t->requests;
+        $this->assertSame(self::BASE . self::MP3_PART, $req['url']);
+        $this->assertSame('bytes=0-999', $req['headers']['Range']);
+        $this->assertOnlyHeaderCarriesTheToken($req);
+        $this->assertSame(['timeout' => 60, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15, 'maxBytes' => 1000], $req['opts']);
+    }
+
+    public function testA206IsRebuiltFromTheValidatedRange(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(206, [
+            'Content-Type' => 'audio/mpeg; charset=binary', 'Content-Range' => 'bytes 0-999/5000',
+            'Content-Length' => '99999', 'Accept-Ranges' => 'none',
+        ], ['abc', 'def']);
+        $result = $this->client()->part(self::MP3_PART, 0, 999, $sink);
+
+        $this->assertSame(['status' => 206, 'total' => 5000], $result);
+        $this->assertSame(206, $sink->status);
+        $this->assertSame([
+            'content-type'   => 'audio/mpeg',
+            'content-range'  => 'bytes 0-999/5000',
+            'content-length' => '1000',
+            'accept-ranges'  => 'bytes',
+        ], $sink->headers);
+        $this->assertSame('abcdef', $sink->body);
+    }
+
+    public function testAShorterUpstreamRangeSetsTheLength(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 100-149/150'], ['x']);
+        $this->client()->part(self::MP3_PART, 100, 999, $sink);
+        $this->assertSame('bytes 100-149/150', $sink->headers['content-range']);
+        $this->assertSame('50', $sink->headers['content-length']);
+    }
+
+    /** @dataProvider partTypes */
+    public function testPartTypesAreCanonical(string $path, string $upstream, string $sent): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(206, ['Content-Type' => $upstream, 'Content-Range' => 'bytes 0-9/10'], ['0123456789']);
+        $this->client()->part($path, 0, 9, $sink);
+        $this->assertSame($sent, $sink->headers['content-type']);
+    }
+
+    public function partTypes(): array
+    {
+        return [
+            'mp3'          => [self::MP3_PART, 'audio/mpeg', 'audio/mpeg'],
+            'flac'         => ['/library/parts/1/2/file.flac', 'audio/flac', 'audio/flac'],
+            'x-flac'       => ['/library/parts/1/2/file.flac', 'audio/x-flac', 'audio/flac'],
+            'm4a mp4'      => ['/library/parts/1/2/file.m4a', 'audio/mp4', 'audio/mp4'],
+            'm4a x-m4a'    => ['/library/parts/1/2/file.m4a', 'audio/x-m4a', 'audio/mp4'],
+            'mp4 x-m4a'    => ['/library/parts/1/2/file.mp4', 'AUDIO/X-M4A', 'audio/mp4'],
+        ];
+    }
+
+    /** @dataProvider badPartTypes */
+    public function testAPartTypeOutsideItsContainerListIsBadType(string $path, ?string $upstream): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(206, ($upstream === null ? [] : ['Content-Type' => $upstream]) + ['Content-Range' => 'bytes 0-9/10'], ['<html>UPSTREAM-BODY']);
+        $this->expectPlexError(fn () => $this->client()->part($path, 0, 9, $sink), PlexException::BAD_TYPE);
+        $this->assertSame(0, $sink->opens);
+        $this->assertSame('', $sink->body);
+    }
+
+    public function badPartTypes(): array
+    {
+        return [
+            'html'        => [self::MP3_PART, 'text/html'],
+            'missing'     => [self::MP3_PART, null],
+            'octet'       => [self::MP3_PART, 'application/octet-stream'],
+            'flac as mp3' => [self::MP3_PART, 'audio/flac'],
+            'mp3 as flac' => ['/library/parts/1/2/file.flac', 'audio/mpeg'],
+            'ogg'         => ['/library/parts/1/2/file.m4a', 'audio/ogg'],
+        ];
+    }
+
+    public function testAPartWithAnotherExtensionIsBadTypeWithNoRequest(): void
+    {
+        $this->expectPlexError(fn () => $this->client()->part('/library/parts/1/2/file.ogg', 0, 9, $this->sink()), PlexException::BAD_TYPE);
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testASmallWholeFile200BecomesA206(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(200, ['Content-Type' => 'audio/mpeg', 'Content-Length' => '700'], [str_repeat('z', 700)]);
+        $this->assertSame(['status' => 206, 'total' => 700], $this->client()->part(self::MP3_PART, 0, 999, $sink));
+        $this->assertSame(206, $sink->status);
+        $this->assertSame([
+            'content-type'   => 'audio/mpeg',
+            'content-range'  => 'bytes 0-699/700',
+            'content-length' => '700',
+            'accept-ranges'  => 'bytes',
+        ], $sink->headers);
+        $this->assertSame(700, strlen($sink->body));
+    }
+
+    public function testA200TheSizeOfTheWindowIsAccepted(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(200, ['Content-Type' => 'audio/mpeg', 'Content-Length' => '1000'], ['x']);
+        $this->client()->part(self::MP3_PART, 0, 999, $sink);
+        $this->assertSame('bytes 0-999/1000', $sink->headers['content-range']);
+    }
+
+    /** @dataProvider bad200s */
+    public function testOther200sAreHttpErrorsAndTheSinkNeverOpens(int $start, ?string $length): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(200, ['Content-Type' => 'audio/mpeg'] + ($length === null ? [] : ['Content-Length' => $length]), ['UPSTREAM-BODY']);
+        $e = $this->expectPlexError(fn () => $this->client()->part(self::MP3_PART, $start, 999, $sink), PlexException::HTTP_ERROR);
+        $this->assertSame(200, $e->status);
+        $this->assertSame(0, $sink->opens);
+        $this->assertSame('', $sink->body);
+    }
+
+    public function bad200s(): array
+    {
+        return [
+            'not from 0'      => [100, '700'],
+            'longer than window' => [0, '1001'],
+            'no length'       => [0, null],
+            'zero length'     => [0, '0'],
+            'not a number'    => [0, '7e2'],
+            'signed'          => [0, '+700'],
+            '19 digits'       => [0, '1000000000000000000'],
+        ];
+    }
+
+    /** @dataProvider badUpstreamRanges */
+    public function testA206WhoseRangeDoesNotFitIsBadRange(?string $range): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(206, ['Content-Type' => 'audio/mpeg'] + ($range === null ? [] : ['Content-Range' => $range]), ['UPSTREAM-BODY']);
+        $this->expectPlexError(fn () => $this->client()->part(self::MP3_PART, 100, 999, $sink), PlexException::BAD_RANGE);
+        $this->assertSame(0, $sink->opens);
+    }
+
+    public function badUpstreamRanges(): array
+    {
+        return [
+            'start moved'  => ['bytes 0-999/5000'],
+            'past the end' => ['bytes 100-1000/5000'],
+            'no total'     => ['bytes 100-999/*'],
+            'missing'      => [null],
+        ];
+    }
+
+    public function testAnUpstream416GivesItsTotalAndLeavesTheSinkUnopened(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(416, ['Content-Range' => 'bytes */5000', 'Content-Type' => 'text/html'], ['UPSTREAM-BODY']);
+        $this->assertSame(['status' => 416, 'total' => 5000], $this->client()->part(self::MP3_PART, 9000, 9999, $sink));
+        $this->assertSame(0, $sink->opens);
+        $this->assertSame('', $sink->body);
+    }
+
+    public function testAnUpstream416WithNoTotalIsBadRange(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(416, ['Content-Range' => 'bytes 0-1/2'], []);
+        $this->expectPlexError(fn () => $this->client()->part(self::MP3_PART, 9000, 9999, $sink), PlexException::BAD_RANGE);
+        $this->assertSame(0, $sink->opens);
+    }
+
+    /** @dataProvider statuses */
+    public function testPartStatusMapping(int $status, string $reason): void
+    {
+        $sink = $this->sink();
+        $this->t->streams($status, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-9/10'], ['UPSTREAM-BODY ' . self::TOKEN]);
+        $e = $this->expectPlexError(fn () => $this->client()->part(self::MP3_PART, 0, 9, $sink), $reason);
+        $this->assertSame($status, $e->status);
+        $this->assertSame(0, $sink->opens);
+    }
+
+    /** The exact maxBytes cut (C3a): 1000 bytes reach the sink, then too_large, with the sink already open. */
+    public function testAnOverlongUpstreamWritesExactlyTheWindowThenIsTooLarge(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-999/5000'], [str_repeat('a', 600), str_repeat('b', 900)]);
+        $this->expectPlexError(fn () => $this->client()->part(self::MP3_PART, 0, 999, $sink), PlexException::TOO_LARGE);
+        $this->assertSame(1, $sink->opens);
+        $this->assertSame(1000, strlen($sink->body));
+    }
+
+    public function testASinkThatStopsEndsThePartNormally(): void
+    {
+        $sink = $this->sink(false, 1);
+        $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-9/10'], ['01234', '56789']);
+        $this->assertSame(['status' => 206, 'total' => 10], $this->client()->part(self::MP3_PART, 0, 9, $sink));
+        $this->assertSame('01234', $sink->body);
+    }
+
+    /** @dataProvider badWindows */
+    public function testPartRefusesABadWindowWithNoRequest(string $path, int $start, int $end): void
+    {
+        try {
+            $this->client()->part($path, $start, $end, $this->sink());
+            $this->fail('expected refusal');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertMessageIsClean($e);
+        }
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function badWindows(): array
+    {
+        return [
+            'item path'     => ['/library/metadata/7', 0, 9],
+            'query'         => [self::MP3_PART . '?X-Plex-Token=evil', 0, 9],
+            'absolute'      => ['https://evil.example.test' . self::MP3_PART, 0, 9],
+            'negative'      => [self::MP3_PART, -1, 9],
+            'end < start'   => [self::MP3_PART, 10, 9],
+            'window + 1'    => [self::MP3_PART, 0, ByteRange::WINDOW],
+            'late window + 1' => [self::MP3_PART, 5, 5 + ByteRange::WINDOW],
+        ];
+    }
+
+    public function testAFullWindowIsAccepted(): void
+    {
+        $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-9/10'], ['0123456789']);
+        $this->client()->part(self::MP3_PART, 0, ByteRange::WINDOW - 1, $this->sink());
+        $this->assertSame(ByteRange::WINDOW, $this->t->requests[0]['opts']['maxBytes']);
+        $this->assertSame('bytes=0-' . (ByteRange::WINDOW - 1), $this->t->requests[0]['headers']['Range']);
+    }
+
+    public function testPartTransportFailuresAreFixed(): void
+    {
+        $this->t->fail(new \RuntimeException('connect ' . self::BASE . self::MP3_PART . '?X-Plex-Token=' . self::TOKEN))
+            ->fail(PlexException::unreachable());
+        $c = $this->client();
+        $this->expectPlexError(fn () => $c->part(self::MP3_PART, 0, 9, $this->sink()), PlexException::UNREACHABLE);
+        $this->expectPlexError(fn () => $c->part(self::MP3_PART, 0, 9, $this->sink()), PlexException::UNREACHABLE);
+    }
+
+    // ── musicTranscode() (P3 Task 8; C1c, C2f, C3b) ──────────────────────────
+
+    private const SESSION = '0f1e2d3c-4b5a-4987-8a6b-5c4d3e2f1a0b';
+
+    public function testMusicTranscodeRequestsTheMp3StartUrlWithTheS3Opts(): void
+    {
+        $this->t->streams(200, ['Content-Type' => 'audio/mpeg'], ['ID3']);
+        $this->client()->musicTranscode('/library/metadata/3003', self::SESSION, $this->sink());
+
+        [$req] = $this->t->requests;
+        $this->assertSame(
+            self::BASE . '/music/:/transcode/universal/start.mp3?path=%2Flibrary%2Fmetadata%2F3003&mediaIndex=0'
+                . '&partIndex=0&musicBitrate=320&protocol=http&X-Plex-Platform=Chrome&session=' . self::SESSION,
+            $req['url'],
+        );
+        $this->assertSame(['timeout' => 900, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15, 'maxBytes' => 67108864], $req['opts']);
+        $this->assertOnlyHeaderCarriesTheToken($req);
+        $this->assertArrayNotHasKey('Range', $req['headers']);
+    }
+
+    public function testMusicTranscodeOpensTheSinkWithExactlyTheTypeAndNoRanges(): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(200, [
+            'Content-Type' => 'Audio/MPEG; x=1', 'Content-Length' => '12345', 'Accept-Ranges' => 'bytes', 'Content-Range' => 'bytes 0-1/2',
+        ], ['ID3', 'more']);
+        $this->client()->musicTranscode('/library/metadata/3003', self::SESSION, $sink);
+        $this->assertSame(200, $sink->status);
+        $this->assertSame(['content-type' => 'audio/mpeg', 'accept-ranges' => 'none'], $sink->headers);
+        $this->assertSame('ID3more', $sink->body);
+    }
+
+    /** @dataProvider badTranscodeTypes */
+    public function testMusicTranscodeOfAnotherTypeIsBadType(?string $type): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(200, $type === null ? [] : ['Content-Type' => $type], ['UPSTREAM-BODY']);
+        $this->expectPlexError(fn () => $this->client()->musicTranscode('/library/metadata/3003', self::SESSION, $sink), PlexException::BAD_TYPE);
+        $this->assertSame(0, $sink->opens);
+    }
+
+    public function badTranscodeTypes(): array
+    {
+        return ['ogg' => ['audio/ogg'], 'html' => ['text/html'], 'missing' => [null], 'flac' => ['audio/flac']];
+    }
+
+    /** @dataProvider statuses */
+    public function testMusicTranscodeStatusMapping(int $status, string $reason): void
+    {
+        $sink = $this->sink();
+        $this->t->streams($status, ['Content-Type' => 'audio/mpeg'], ['UPSTREAM-BODY ' . self::TOKEN]);
+        $e = $this->expectPlexError(fn () => $this->client()->musicTranscode('/library/metadata/3003', self::SESSION, $sink), $reason);
+        $this->assertSame($status, $e->status);
+        $this->assertSame(0, $sink->opens);
+    }
+
+    /** Counts bytes instead of keeping them, so the suite stays inside a 128 MiB memory_limit. */
+    public function testMusicTranscodeOver64MiBIsTooLargeAfterTheCut(): void
+    {
+        $sink = new class () implements \Kanboard\Plugin\Matinee\Http\PlexStreamSink {
+            public int $bytes = 0;
+
+            public function open(int $status, array $headers): bool
+            {
+                return true;
+            }
+
+            public function write(string $chunk): bool
+            {
+                $this->bytes += strlen($chunk);
+                return true;
+            }
+        };
+        $chunk = str_repeat('m', 16 * 1024 * 1024);
+        $this->t->streams(200, ['Content-Type' => 'audio/mpeg'], [$chunk, $chunk, $chunk, $chunk, 'x']);
+        $this->expectPlexError(fn () => $this->client()->musicTranscode('/library/metadata/3003', self::SESSION, $sink), PlexException::TOO_LARGE);
+        $this->assertSame(67108864, $sink->bytes);
+    }
+
+    /** @dataProvider badTranscodeArgs */
+    public function testMusicTranscodeRefusesBadArgumentsWithNoRequest(string $path, string $session): void
+    {
+        try {
+            $this->client()->musicTranscode($path, $session, $this->sink());
+            $this->fail('expected refusal');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertMessageIsClean($e);
+        }
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function badTranscodeArgs(): array
+    {
+        return [
+            'part path'     => [self::MP3_PART, self::SESSION],
+            'children'      => ['/library/metadata/1/children', self::SESSION],
+            'query'         => ['/library/metadata/1?X-Plex-Token=evil', self::SESSION],
+            'upper session' => ['/library/metadata/1', strtoupper(self::SESSION)],
+            'v1 session'    => ['/library/metadata/1', '0f1e2d3c-4b5a-1987-8a6b-5c4d3e2f1a0b'],
+            'empty session' => ['/library/metadata/1', ''],
+            'session &'     => ['/library/metadata/1', self::SESSION . '&X-Plex-Token=x'],
+        ];
+    }
+
+    /** Across every streamed call: the token never reaches a URL, an exception message or a sink header. */
+    public function testTheTokenNeverLeavesTheHeaderOnStreamedCalls(): void
+    {
+        $sinks = [$this->sink(), $this->sink(), $this->sink()];
+        $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-9/10'], ['0123456789'])
+            ->streams(200, ['Content-Type' => 'audio/mpeg'], ['ID3'])
+            ->streams(401, ['Content-Type' => 'text/plain'], [self::TOKEN]);
+        $c = $this->client();
+        $c->part(self::MP3_PART, 0, 9, $sinks[0]);
+        $c->musicTranscode('/library/metadata/3003', self::SESSION, $sinks[1]);
+        $this->expectPlexError(fn () => $c->musicTranscode('/library/metadata/3003', self::SESSION, $sinks[2]), PlexException::TOKEN_REJECTED);
+
+        foreach ($this->t->requests as $req) {
+            $this->assertOnlyHeaderCarriesTheToken($req);
+        }
+        foreach ($sinks as $s) {
+            $this->assertStringNotContainsString(self::TOKEN, (string) json_encode($s->headers));
+            $this->assertStringNotContainsString(self::TOKEN, $s->body);
+        }
     }
 
     // ── PlexResponse ─────────────────────────────────────────────────────────

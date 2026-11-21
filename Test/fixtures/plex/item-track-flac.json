@@ -1,0 +1,12 @@
+{
+  "MediaContainer": {
+    "size": 1,
+    "librarySectionID": "3",
+    "machineIdentifier": "0123456789abcdef0123456789abcdef01234567",
+    "Metadata": [
+      { "ratingKey": 3002, "key": "/library/metadata/3002", "type": "track", "title": "Fake Lossless", "parentTitle": "Fake Album", "grandparentTitle": "Fake Artist", "duration": "301000",
+        "Media": [{ "id": 4002, "audioCodec": "FLAC", "container": "flac",
+          "Part": [{ "id": 5002, "key": "/library/parts/5002/1700000001/file.flac", "file": "/data/music/song.flac", "container": "flac" }] }] }
+    ]
+  }
+}

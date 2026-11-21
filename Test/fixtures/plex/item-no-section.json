@@ -1,0 +1,11 @@
+{
+  "MediaContainer": {
+    "size": 1,
+    "machineIdentifier": "0123456789abcdef0123456789abcdef01234567",
+    "Metadata": [
+      { "ratingKey": "3001", "key": "/library/metadata/3001", "type": "track", "title": "Fake Song",
+        "Media": [{ "audioCodec": "mp3", "container": "mp3",
+          "Part": [{ "key": "/library/parts/5001/1700000000/file.mp3" }] }] }
+    ]
+  }
+}

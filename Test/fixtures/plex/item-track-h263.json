@@ -1,0 +1,12 @@
+{
+  "MediaContainer": {
+    "size": 1,
+    "librarySectionID": 3,
+    "machineIdentifier": "0123456789abcdef0123456789abcdef01234567",
+    "Metadata": [
+      { "ratingKey": "3003", "key": "/library/metadata/3003", "type": "track", "title": "Fake Video Track", "parentTitle": "Fake Album", "grandparentTitle": "Fake Artist", "duration": 99000,
+        "Media": [{ "id": 4003, "audioCodec": "aac", "videoCodec": "h263", "container": "mp4",
+          "Part": [{ "id": 5003, "key": "/library/parts/5003/1700000002/file.mp4", "file": "/data/music/clip.mp4", "container": "mp4" }] }] }
+    ]
+  }
+}

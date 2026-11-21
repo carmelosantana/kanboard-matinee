@@ -40,12 +40,26 @@ final class PlexClient
     /** Ruling B1: 1080 waits for the P3 detail view. */
     public const ART_SIZES = [144, 512];
     public const ART_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+    /**
+     * C1d: a direct part's accepted upstream types, by the part path's extension, each mapped to the one type sent.
+     * Any other extension is refused before a request.
+     */
+    public const PART_TYPES = [
+        'mp3'  => ['audio/mpeg' => 'audio/mpeg'],
+        'flac' => ['audio/flac' => 'audio/flac', 'audio/x-flac' => 'audio/flac'],
+        'mp4'  => ['audio/mp4' => 'audio/mp4', 'audio/x-m4a' => 'audio/mp4'],
+        'm4a'  => ['audio/mp4' => 'audio/mp4', 'audio/x-m4a' => 'audio/mp4'],
+    ];
+    /** C2f: an mp3 transcode is cut at 64 MiB (15 minutes at 320 kbps is about 36 MB). */
+    public const MAX_TRANSCODE_BYTES = 67108864;
 
     private const MACHINE_ID = '/\A[A-Za-z0-9-]{1,64}\z/';
     private const VERSION = '/\A[A-Za-z0-9._+-]{1,64}\z/';
     private const DEVICE_NAME = '/\AMatinee( \([A-Za-z0-9._ #-]{1,40}\))?\z/';
     /** A non-negative integer that fits an int on 64-bit PHP. */
     private const UINT = '/\A\d{1,18}\z/';
+    /** A container or codec name as Plex reports it, after lowercasing. */
+    private const CODEC = '/\A[a-z0-9]{1,16}\z/';
 
     private readonly string $baseUrl;
 
@@ -199,7 +213,7 @@ final class PlexClient
 
         $items = [];
         foreach ($raw as $m) {
-            if (is_array($m) && ($item = self::item($m)) !== null) {
+            if (is_array($m) && ($item = self::listItem($m)) !== null) {
                 $items[] = $item;
             }
         }
@@ -237,8 +251,167 @@ final class PlexClient
         return ['type' => $type, 'body' => $r->body];
     }
 
+    /**
+     * One item's metadata for the player (spec §7, S13; C1a, C5b), whitelisted. `section` is
+     * `MediaContainer.librarySectionID` (null when absent); the rest comes from `Metadata[0]`, whose ratingKey must be the
+     * path's. Codecs and the container come from `Media[0]`, lowercased, and are '' unless they match CODEC; `part` is
+     * `Media[0].Part[0].key` when it is a part path, else null. Anything malformed is `plex.bad_json`.
+     *
+     * @return array{section: ?string, ratingKey: string, type: string, title: string, parentTitle: string,
+     *   grandparentTitle: string, duration: ?int, container: string, audioCodec: string, videoCodec: string, part: ?string}
+     */
+    public function item(string $path): array
+    {
+        if (! PlexPaths::isItem($path)) {
+            throw new \InvalidArgumentException('A Plex item path must be an item path.');
+        }
+        $mc = $this->fetch($path);
+
+        $section = $mc['librarySectionID'] ?? null;
+        $section = is_int($section) ? (string) $section : $section;
+        $section = is_string($section) && PlexPaths::isSectionKey($section) ? $section : null;
+
+        $raw = $mc['Metadata'] ?? null;
+        $m = is_array($raw) && array_is_list($raw) ? ($raw[0] ?? null) : null;
+        if (! is_array($m)) {
+            throw PlexException::badJson();
+        }
+        $rk = $m['ratingKey'] ?? null;
+        $rk = is_int($rk) ? (string) $rk : $rk;
+        $type = $m['type'] ?? null;
+        if (! is_string($rk) || ! PlexPaths::isSectionKey($rk) || PlexPaths::item($rk) !== $path
+            || ! is_string($type) || ! in_array($type, self::ITEM_TYPES, true)) {
+            throw PlexException::badJson();
+        }
+
+        $media = self::first($m['Media'] ?? null);
+        $part = self::first($media['Part'] ?? null)['key'] ?? null;
+
+        return [
+            'section'          => $section,
+            'ratingKey'        => $rk,
+            'type'             => $type,
+            'title'            => self::text($m['title'] ?? ''),
+            'parentTitle'      => self::text($m['parentTitle'] ?? ''),
+            'grandparentTitle' => self::text($m['grandparentTitle'] ?? ''),
+            'duration'         => self::uint($m['duration'] ?? null),
+            'container'        => self::codec($media['container'] ?? null),
+            'audioCodec'       => self::codec($media['audioCodec'] ?? null),
+            'videoCodec'       => self::codec($media['videoCodec'] ?? null),
+            'part'             => is_string($part) && PlexPaths::isPart($part) ? $part : null,
+        ];
+    }
+
+    /**
+     * Streams one window of a direct part into $sink (C1b, C1d; S11). The request carries `Range: bytes=start-end` and
+     * the S3 opts; `maxBytes` is the window length, so at most that many bytes reach $sink.
+     *
+     * Before $sink opens: a 401 is `plex.token_rejected`; a 416 returns its total with $sink unopened (`plex.bad_range`
+     * with no total); a 206 must carry a Content-Range inside the window; a 200 is a whole small file only from byte 0
+     * with a length of 1 to the window, and is rebuilt as a 206; anything else is `plex.http_error`. The type must be on
+     * the part's container list (by its extension). $sink then opens with 206 and the rebuilt headers.
+     *
+     * @return array{status: int, total: ?int}
+     */
+    public function part(string $partPath, int $start, int $end, PlexStreamSink $sink): array
+    {
+        if (! PlexPaths::isPart($partPath)) {
+            throw new \InvalidArgumentException('A Plex part path must be a part path.');
+        }
+        if ($start < 0 || $end < $start || $end - $start + 1 > ByteRange::WINDOW) {
+            throw new \InvalidArgumentException('A Plex part window is out of range.');
+        }
+        $types = self::PART_TYPES[substr($partPath, strrpos($partPath, '.') + 1)] ?? null;
+        if ($types === null) {
+            throw PlexException::badType();
+        }
+        $length = $end - $start + 1;
+
+        $result = null;
+        $guard = function (int $status, array $headers) use ($start, $end, $length, $types, &$result): ?array {
+            if ($status === 401) {
+                throw PlexException::tokenRejected();
+            }
+            if ($status === 416) {
+                $total = ByteRange::unsatisfiedTotal($headers['content-range'] ?? null);
+                if ($total === null) {
+                    throw PlexException::badRange();
+                }
+                $result = ['status' => 416, 'total' => $total];
+                return null;
+            }
+            if ($status === 206) {
+                $range = ByteRange::upstream($headers['content-range'] ?? null, $start, $end);
+                if ($range === null) {
+                    throw PlexException::badRange();
+                }
+            } elseif ($status === 200 && $start === 0 && ($len = self::uint($headers['content-length'] ?? null)) !== null
+                && $len >= 1 && $len <= $length) {
+                $range = [0, $len - 1, $len];
+            } else {
+                throw PlexException::httpError($status);
+            }
+            $type = $types[self::mediaType($headers)] ?? null;
+            if ($type === null) {
+                throw PlexException::badType();
+            }
+            [$s, $e, $total] = $range;
+            $result = ['status' => 206, 'total' => $total];
+            return [206, [
+                'content-type'   => $type,
+                'content-range'  => 'bytes ' . $s . '-' . $e . '/' . $total,
+                'content-length' => (string) ($e - $s + 1),
+                'accept-ranges'  => 'bytes',
+            ]];
+        };
+
+        $this->stream($partPath, ['Range' => 'bytes=' . $start . '-' . $end], [
+            'timeout' => 60, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15, 'maxBytes' => $length,
+        ], $guard, $sink);
+        if ($result === null) {
+            throw PlexException::unreachable();
+        }
+        return $result;
+    }
+
+    /**
+     * Streams Plex's mp3 transcode of an item into $sink (C1c, C2f; S3: 900 s, 64 MiB). A 2xx with `audio/mpeg` opens
+     * $sink with 200, `content-type: audio/mpeg` and `accept-ranges: none`, and no length; a 401 is
+     * `plex.token_rejected`, any other non-2xx `plex.http_error`, any other type `plex.bad_type`.
+     */
+    public function musicTranscode(string $itemPath, string $session, PlexStreamSink $sink): void
+    {
+        if (! PlexPaths::isItem($itemPath)) {
+            throw new \InvalidArgumentException('A Plex transcode path must be an item path.');
+        }
+        if (! PlexPaths::isSessionId($session)) {
+            throw new \InvalidArgumentException('A Plex transcode session must be a v4 uuid.');
+        }
+        $path = '/music/:/transcode/universal/start.mp3?' . http_build_query([
+            'path' => $itemPath, 'mediaIndex' => 0, 'partIndex' => 0, 'musicBitrate' => 320, 'protocol' => 'http',
+            'X-Plex-Platform' => 'Chrome', 'session' => $session,
+        ], '', '&', PHP_QUERY_RFC3986);
+
+        $guard = static function (int $status, array $headers): array {
+            if ($status === 401) {
+                throw PlexException::tokenRejected();
+            }
+            if ($status < 200 || $status > 299) {
+                throw PlexException::httpError($status);
+            }
+            if (self::mediaType($headers) !== 'audio/mpeg') {
+                throw PlexException::badType();
+            }
+            return [200, ['content-type' => 'audio/mpeg', 'accept-ranges' => 'none']];
+        };
+
+        $this->stream($path, [], [
+            'timeout' => 900, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15, 'maxBytes' => self::MAX_TRANSCODE_BYTES,
+        ], $guard, $sink);
+    }
+
     /** One whitelisted listing item, or null to drop it. */
-    private static function item(array $m): ?array
+    private static function listItem(array $m): ?array
     {
         $rk = $m['ratingKey'] ?? null;
         $rk = is_int($rk) ? (string) $rk : $rk;
@@ -280,6 +453,63 @@ final class PlexClient
             return $v >= 0 ? $v : null;
         }
         return is_string($v) && preg_match(self::UINT, $v) === 1 ? (int) $v : null;
+    }
+
+    /** A codec or container name, lowercased, or '' when it is not CODEC-shaped. */
+    private static function codec(mixed $v): string
+    {
+        $v = is_string($v) ? strtolower($v) : '';
+        return preg_match(self::CODEC, $v) === 1 ? $v : '';
+    }
+
+    /** The first entry of a JSON list when it is an object; [] otherwise. */
+    private static function first(mixed $list): array
+    {
+        $first = is_array($list) && array_is_list($list) ? ($list[0] ?? null) : null;
+        return is_array($first) ? $first : [];
+    }
+
+    /** A response's media type: lowercased, parameters stripped ('' when absent). */
+    private static function mediaType(array $headers): string
+    {
+        return strtolower(trim(explode(';', (string) ($headers['content-type'] ?? ''), 2)[0]));
+    }
+
+    /**
+     * Streams GET base + $path into $sink through $guard (spec §3; C3a). $guard sees the upstream status and forwardable
+     * headers before $sink: it throws to refuse, returns null to stop with $sink unopened, or returns the
+     * [status, headers] $sink opens with. The body is never read before that. Transport failures other than a
+     * PlexException or UnsafeUrlException are `plex.unreachable`, with nothing chained.
+     *
+     * @param array<string, string> $extraHeaders
+     * @param \Closure(int, array<string, string>): ?array{0: int, 1: array<string, string>} $guard
+     */
+    private function stream(string $path, array $extraHeaders, array $opts, \Closure $guard, PlexStreamSink $sink): void
+    {
+        $guarded = new class ($guard, $sink) implements PlexStreamSink {
+            public function __construct(private readonly \Closure $guard, private readonly PlexStreamSink $inner)
+            {
+            }
+
+            public function open(int $status, array $headers): bool
+            {
+                $open = ($this->guard)($status, $headers);
+                return $open !== null && $this->inner->open($open[0], $open[1]);
+            }
+
+            public function write(string $chunk): bool
+            {
+                return $this->inner->write($chunk);
+            }
+        };
+
+        try {
+            $this->transport->stream($this->baseUrl . $path, $this->headers() + $extraHeaders, $opts, $guarded);
+        } catch (PlexException | UnsafeUrlException $e) {
+            throw $e;
+        } catch (\Throwable) {
+            throw PlexException::unreachable();
+        }
     }
 
     /** GET a path, check status, size and JSON, and return `MediaContainer` (after the pinned-server check). */

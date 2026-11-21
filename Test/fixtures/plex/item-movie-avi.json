@@ -1,0 +1,12 @@
+{
+  "MediaContainer": {
+    "size": 1,
+    "librarySectionID": 1,
+    "machineIdentifier": "0123456789abcdef0123456789abcdef01234567",
+    "Metadata": [
+      { "ratingKey": "2229", "key": "/library/metadata/2229", "type": "movie", "title": "Fake Old Movie", "year": 1987, "duration": 5700000, "thumb": "/library/metadata/2229/thumb/1700000000",
+        "Media": [{ "id": 2230, "videoResolution": "480", "audioCodec": "mp3", "videoCodec": "mpeg4", "container": "avi",
+          "Part": [{ "id": 2229, "key": "/library/parts/2229/1250471640/file.avi", "file": "/data/movies/old.avi", "container": "avi" }] }] }
+    ]
+  }
+}
