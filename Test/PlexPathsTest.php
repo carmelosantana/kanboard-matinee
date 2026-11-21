@@ -114,4 +114,170 @@ class PlexPathsTest extends TestCase
             $this->assertSame('plex paths: bad section key', $e->getMessage());
         }
     }
+
+    // ── playback shapes (spec §6, S2; C5) ────────────────────────────────────
+
+    private const UUID = '0f8e2b7c-3d4a-4b5c-9d6e-7f8091a2b3c4';
+
+    /** @return array<string, array{string, bool, bool}> [path, isPart, isItem] */
+    public static function playPaths(): array
+    {
+        $twenty = str_repeat('9', 20);
+        $twentyOne = str_repeat('9', 21);
+        return [
+            'part, avi' => ['/library/parts/2229/1250471640/file.avi', true, false],
+            'part, flac' => ['/library/parts/1/2/file.flac', true, false],
+            'part, 20-digit ids' => ["/library/parts/$twenty/$twenty/file.mp3", true, false],
+            'part, 8-char extension' => ['/library/parts/1/2/file.abcdefgh', true, false],
+            'part, digit extension' => ['/library/parts/1/2/file.mp4', true, false],
+            'item' => ['/library/metadata/42', false, true],
+            'item, 20 digits' => ["/library/metadata/$twenty", false, true],
+
+            'part, query' => ['/library/parts/1/2/file.mp3?x', false, false],
+            'part, dot-dot' => ['/library/parts/1/2/../file.mp3', false, false],
+            'part, upper case name' => ['/library/parts/1/2/FILE.mp3', false, false],
+            'part, upper case extension' => ['/library/parts/1/2/file.MP3', false, false],
+            'part, empty extension' => ['/library/parts/1/2/file.', false, false],
+            'part, 9-char extension' => ['/library/parts/1/2/file.abcdefghi', false, false],
+            'part, 21-digit id' => ["/library/parts/$twentyOne/2/file.mp3", false, false],
+            'part, 21-digit second id' => ["/library/parts/1/$twentyOne/file.mp3", false, false],
+            'part, other name' => ['/library/parts/1/2/other.mp3', false, false],
+            'part, one id' => ['/library/parts/1/file.mp3', false, false],
+            'part, trailing newline' => ["/library/parts/1/2/file.mp3\n", false, false],
+            'part, trailing slash' => ['/library/parts/1/2/file.mp3/', false, false],
+            'part, encoded dot' => ['/library/parts/1/2/file%2emp3', false, false],
+            'part, double slash' => ['/library/parts/1//2/file.mp3', false, false],
+            'part, absolute url' => ['http://evil.test/library/parts/1/2/file.mp3', false, false],
+            'item, children' => ['/library/metadata/42/children', false, false],
+            'item, negative' => ['/library/metadata/-1', false, false],
+            'item, trailing slash' => ['/library/metadata/42/', false, false],
+            'item, trailing newline' => ["/library/metadata/42\n", false, false],
+            'item, 21 digits' => ["/library/metadata/$twentyOne", false, false],
+            'item, empty' => ['/library/metadata/', false, false],
+            'item, query' => ['/library/metadata/42?x', false, false],
+            'item, art' => ['/library/metadata/42/thumb/1', false, false],
+            'browse path' => ['/library/sections/2/all', false, false],
+            'empty' => ['', false, false],
+        ];
+    }
+
+    /** @dataProvider playPaths */
+    public function testPlayPathPredicates(string $path, bool $part, bool $item): void
+    {
+        $this->assertSame($part, PlexPaths::isPart($path), 'isPart');
+        $this->assertSame($item, PlexPaths::isItem($path), 'isItem');
+        $this->assertFalse(PlexPaths::isBrowse($path) && ($part || $item), 'no overlap with browse');
+    }
+
+    public function testItemBuildsAnItemPath(): void
+    {
+        $this->assertSame('/library/metadata/42', PlexPaths::item('42'));
+        $this->assertTrue(PlexPaths::isItem(PlexPaths::item('42')));
+    }
+
+    /** @return array<string, array{string}> */
+    public static function badRatingKeys(): array
+    {
+        return [
+            'empty' => [''],
+            'negative' => ['-1'],
+            'slash' => ['42/children'],
+            'dot-dot' => ['..'],
+            '21 digits' => [str_repeat('1', 21)],
+            'trailing newline' => ["42\n"],
+            'letters' => ['abc'],
+        ];
+    }
+
+    /** @dataProvider badRatingKeys */
+    public function testItemRefusesABadKey(string $key): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('plex paths: bad rating key');
+        PlexPaths::item($key);
+    }
+
+    /** @return array<string, array{string, bool}> */
+    public static function hlsChildren(): array
+    {
+        $base = '/video/:/transcode/universal/session/'.self::UUID.'/base';
+        return [
+            'index' => ["$base/index.m3u8", true],
+            'segment' => ["$base/00001.ts", true],
+            'segment with query' => ["$base/00001.ts?x=1&y=a.b", true],
+            'm4s' => ["$base/00001.m4s", true],
+            'vtt' => ["$base/sub.vtt", true],
+            'aac' => ["$base/00001.aac", true],
+            'empty query' => ["$base/00001.ts?", true],
+            '512-char query' => ["$base/00001.ts?".str_repeat('a', 512), true],
+
+            'dot-dot in path' => ["$base/../index.m3u8", false],
+            'dot-dot in query' => ["$base/00001.ts?x=..", false],
+            'dot-dot in name' => ["$base/a..b.ts", false],
+            'encoded dot' => ["$base/%2e%2e/index.m3u8", false],
+            'percent in query' => ["$base/00001.ts?x=%41", false],
+            'at sign' => ["$base/a@b.ts", false],
+            'backslash' => ["$base\\index.m3u8", false],
+            'double slash' => ["$base//index.m3u8", false],
+            'double slash after session' => ['/video/:/transcode/universal/session/'.self::UUID.'//index.m3u8', false],
+            'token query' => ["$base/00001.ts?X-Plex-Token=abc", false],
+            'token query after another pair' => ["$base/00001.ts?x=1&X-Plex-Token=abc", false],
+            'token-like key' => ["$base/00001.ts?x_plex_token=abc", false],
+            'mp4' => ["$base/00001.mp4", false],
+            'no extension' => ["$base/00001", false],
+            'no session segment' => ['/video/:/transcode/universal/base/index.m3u8', false],
+            'no session id' => ['/video/:/transcode/universal/session/index.m3u8', false],
+            '35-char session' => ['/video/:/transcode/universal/session/'.substr(self::UUID, 0, 35).'/base/index.m3u8', false],
+            '37-char session' => ['/video/:/transcode/universal/session/'.self::UUID.'a/base/index.m3u8', false],
+            'upper case session' => ['/video/:/transcode/universal/session/'.strtoupper(self::UUID).'/base/index.m3u8', false],
+            'nothing after the session' => ['/video/:/transcode/universal/session/'.self::UUID.'/', false],
+            '513-char query' => ["$base/00001.ts?".str_repeat('a', 513), false],
+            'absolute url' => ["http://evil/video/:/transcode/universal/session/".self::UUID.'/base/index.m3u8', false],
+            'protocol-relative' => ['//evil/video/:/transcode/universal/session/'.self::UUID.'/base/index.m3u8', false],
+            'trailing newline' => ["$base/index.m3u8\n", false],
+            'fragment' => ["$base/index.m3u8#x", false],
+            'space' => ["$base/index .m3u8", false],
+            'start path' => ['/video/:/transcode/universal/start.m3u8', false],
+            'other prefix' => ['/library/parts/1/2/file.ts', false],
+            'empty' => ['', false],
+        ];
+    }
+
+    /** @dataProvider hlsChildren */
+    public function testIsHlsChild(string $u, bool $ok): void
+    {
+        $this->assertSame($ok, PlexPaths::isHlsChild($u));
+        $this->assertSame($ok ? self::UUID : null, PlexPaths::hlsSession($u));
+    }
+
+    public function testTheHlsPrefix(): void
+    {
+        $this->assertSame('/video/:/transcode/universal/', PlexPaths::HLS_PREFIX);
+    }
+
+    /** @return array<string, array{string, bool}> */
+    public static function sessionIds(): array
+    {
+        return [
+            'v4' => [self::UUID, true],
+            'v4, variant a' => ['0f8e2b7c-3d4a-4b5c-ad6e-7f8091a2b3c4', true],
+            'v4, variant b' => ['0f8e2b7c-3d4a-4b5c-bd6e-7f8091a2b3c4', true],
+            'v4, variant 8' => ['0f8e2b7c-3d4a-4b5c-8d6e-7f8091a2b3c4', true],
+            'v1' => ['0f8e2b7c-3d4a-1b5c-9d6e-7f8091a2b3c4', false],
+            'variant c' => ['0f8e2b7c-3d4a-4b5c-cd6e-7f8091a2b3c4', false],
+            'variant 7' => ['0f8e2b7c-3d4a-4b5c-7d6e-7f8091a2b3c4', false],
+            'upper case' => [strtoupper(self::UUID), false],
+            'no dashes' => [str_replace('-', '', self::UUID), false],
+            '35 chars' => [substr(self::UUID, 0, 35), false],
+            'trailing newline' => [self::UUID."\n", false],
+            'braces' => ['{'.self::UUID.'}', false],
+            'empty' => ['', false],
+        ];
+    }
+
+    /** @dataProvider sessionIds */
+    public function testIsSessionId(string $id, bool $ok): void
+    {
+        $this->assertSame($ok, PlexPaths::isSessionId($id));
+    }
 }

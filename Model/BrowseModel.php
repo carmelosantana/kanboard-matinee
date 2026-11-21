@@ -30,7 +30,7 @@ final class BrowseModel extends Base
     /** Ruling B4. */
     public const PAGE_SIZE = 60;
     public const MAX_START = 1000000;
-    public const REF_TTL = RefSigner::MAX_TTL;
+    public const REF_TTL = RefSigner::TTLS['browse'];
 
     private const SUBTITLE_GLUE = ' · ';
 

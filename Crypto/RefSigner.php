@@ -11,14 +11,16 @@ use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
  * - body = b64url(json({v:1, u, sv, s, k, r, exp})); sig = b64url(HMAC-SHA256(refKey, body)).
  * - verify checks the length and shape, then the signature (hash_equals), and only then decodes the body.
  *   The payload must have exactly the seven fields with their types, v = 1, u = the given user,
- *   now < exp ≤ now + MAX_TTL, a section key for s, and r matching kind k's PlexPaths regex.
+ *   now < exp ≤ now + TTLS[k] (the kind is checked first), a section key for s, and r matching kind k's PlexPaths
+ *   regex: browse and art as in P2, media a part (direct) or an item (transcode), hls an item (C5, S13).
  * - Every refusal is the same MatineeForbiddenException. sign() refuses bad input, so it never mints a ref
  *   that verify would refuse.
  */
 final class RefSigner
 {
-    public const MAX_TTL = 3600;
-    public const KINDS = ['browse', 'art'];
+    public const KINDS = ['browse', 'art', 'media', 'hls'];
+    /** S13: the longest life of each kind of ref, in seconds. */
+    public const TTLS = ['browse' => 3600, 'art' => 3600, 'media' => 28800, 'hls' => 28800];
     private const MAX_REF = 2048;
     private const FIELDS = ['exp', 'k', 'r', 's', 'sv', 'u', 'v'];
     private const SHAPE = '/\A([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})\z/';
@@ -57,7 +59,7 @@ final class RefSigner
         if (! self::resourceFits($kind, $resource)) {
             throw new \InvalidArgumentException('ref: bad resource');
         }
-        if ($ttl < 1 || $ttl > self::MAX_TTL) {
+        if ($ttl < 1 || $ttl > self::TTLS[$kind]) {
             throw new \InvalidArgumentException('ref: bad ttl');
         }
         $payload = ['v' => 1, 'u' => $userId, 'sv' => $serverId, 's' => $section, 'k' => $kind, 'r' => $resource, 'exp' => $this->now() + $ttl];
@@ -94,12 +96,13 @@ final class RefSigner
         }
 
         $now = $this->now();
+        // The kind is checked before its TTL is looked up.
         $ok = $p['v'] === 1
             && is_int($p['u']) && $p['u'] === $userId
             && is_int($p['sv']) && $p['sv'] > 0
-            && is_int($p['exp']) && $p['exp'] > $now && $p['exp'] <= $now + self::MAX_TTL
-            && is_string($p['s']) && PlexPaths::isSectionKey($p['s'])
             && is_string($p['k']) && in_array($p['k'], self::KINDS, true)
+            && is_int($p['exp']) && $p['exp'] > $now && $p['exp'] <= $now + self::TTLS[$p['k']]
+            && is_string($p['s']) && PlexPaths::isSectionKey($p['s'])
             && is_string($p['r']) && self::resourceFits($p['k'], $p['r']);
         if (! $ok) {
             throw new MatineeForbiddenException();
@@ -112,6 +115,8 @@ final class RefSigner
         return match ($kind) {
             'browse' => PlexPaths::isBrowse($resource),
             'art' => PlexPaths::isArt($resource),
+            'media' => PlexPaths::isPart($resource) || PlexPaths::isItem($resource),
+            'hls' => PlexPaths::isItem($resource),
             default => false,
         };
     }

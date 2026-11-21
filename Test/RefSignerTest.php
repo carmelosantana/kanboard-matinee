@@ -12,6 +12,8 @@ class RefSignerTest extends TestCase
     private const SERVER = 3;
     private const BROWSE = '/library/sections/2/all';
     private const ART = '/library/metadata/123/thumb/1700000000';
+    private const PART = '/library/parts/2229/1250471640/file.flac';
+    private const ITEM = '/library/metadata/42';
 
     private static function key(): string
     {
@@ -105,6 +107,77 @@ class RefSignerTest extends TestCase
         $this->assertSame('2', self::signer()->verify(self::forge(self::payload(['exp' => self::NOW + 3600])), self::USER)['s']);
     }
 
+    // ── kinds and TTLs (C5, S13) ─────────────────────────────────────────────
+
+    public function testTheKindsAndTheirTtls(): void
+    {
+        $this->assertSame(['browse', 'art', 'media', 'hls'], RefSigner::KINDS);
+        $this->assertSame(['browse' => 3600, 'art' => 3600, 'media' => 28800, 'hls' => 28800], RefSigner::TTLS);
+        $this->assertFalse(defined(RefSigner::class.'::MAX_TTL'));
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function playRefs(): array
+    {
+        return [
+            'media, part' => ['media', self::PART],
+            'media, item' => ['media', self::ITEM],
+            'hls, item' => ['hls', self::ITEM],
+        ];
+    }
+
+    /** @dataProvider playRefs */
+    public function testPlayRefsRoundTripWithAnEightHourTtl(string $kind, string $resource): void
+    {
+        $ref = self::signer()->sign(self::USER, self::SERVER, '4', $kind, $resource, 28800);
+        $this->assertSame(['sv' => self::SERVER, 's' => '4', 'k' => $kind, 'r' => $resource], self::signer()->verify($ref, self::USER));
+        $this->assertSame('4', self::signer(self::NOW + 28799)->verify($ref, self::USER)['s']);
+        try {
+            self::signer(self::NOW + 28800)->verify($ref, self::USER);
+            $this->fail('expected MatineeForbiddenException');
+        } catch (MatineeForbiddenException) {
+            $this->addToAssertionCount(1);
+        }
+    }
+
+    /** @dataProvider playRefs */
+    public function testPlayRefUpperBoundIsExactlyEightHours(string $kind, string $resource): void
+    {
+        $ok = self::forge(self::payload(['k' => $kind, 'r' => $resource, 'exp' => self::NOW + 28800]));
+        $this->assertSame($kind, self::signer()->verify($ok, self::USER)['k']);
+        $this->expectException(MatineeForbiddenException::class);
+        self::signer()->verify(self::forge(self::payload(['k' => $kind, 'r' => $resource, 'exp' => self::NOW + 28801])), self::USER);
+    }
+
+    // A browse ref is still bounded by an hour at sign time (kills one global 28800 limit).
+    public function testABrowseRefSignedForMoreThanAnHourIsRefused(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('ref: bad ttl');
+        self::signer()->sign(self::USER, self::SERVER, '2', 'browse', self::BROWSE, 3601);
+    }
+
+    // ... and at verify time (kills one global 28800 limit).
+    public function testAHandBuiltBrowseRefPastAnHourIsRefused(): void
+    {
+        $this->expectException(MatineeForbiddenException::class);
+        self::signer()->verify(self::forge(self::payload(['exp' => self::NOW + 3601])), self::USER);
+    }
+
+    public function testAHandBuiltArtRefPastAnHourIsRefused(): void
+    {
+        $this->expectException(MatineeForbiddenException::class);
+        self::signer()->verify(self::forge(self::payload(['k' => 'art', 'r' => self::ART, 'exp' => self::NOW + 3601])), self::USER);
+    }
+
+    public function testSignAcceptsThePlayTtlBounds(): void
+    {
+        foreach ([1, 28800] as $ttl) {
+            $ref = self::signer()->sign(self::USER, self::SERVER, '2', 'hls', self::ITEM, $ttl);
+            $this->assertSame('hls', self::signer()->verify($ref, self::USER)['k']);
+        }
+    }
+
     // ── refusals ─────────────────────────────────────────────────────────────
 
     /** @return array<string, array{\Closure(): string}> */
@@ -136,7 +209,14 @@ class RefSignerTest extends TestCase
             'null resource' => fn () => self::forge(self::payload(['r' => null])),
             'bad section' => fn () => self::forge(self::payload(['s' => 'abc'])),
             'empty section' => fn () => self::forge(self::payload(['s' => ''])),
-            'unknown kind' => fn () => self::forge(self::payload(['k' => 'media'])),
+            'unknown kind' => fn () => self::forge(self::payload(['k' => 'video'])),
+            'browse path as media' => fn () => self::forge(self::payload(['k' => 'media'])),
+            'browse path as hls' => fn () => self::forge(self::payload(['k' => 'hls'])),
+            'part path as hls' => fn () => self::forge(self::payload(['k' => 'hls', 'r' => self::PART, 'exp' => self::NOW + 60])),
+            'art path as media' => fn () => self::forge(self::payload(['k' => 'media', 'r' => self::ART])),
+            'item path as browse' => fn () => self::forge(self::payload(['r' => self::ITEM])),
+            'item path as art' => fn () => self::forge(self::payload(['k' => 'art', 'r' => self::ITEM])),
+            'part path as browse' => fn () => self::forge(self::payload(['r' => self::PART])),
             'art path as browse' => fn () => self::forge(self::payload(['r' => self::ART])),
             'browse path as art' => fn () => self::forge(self::payload(['k' => 'art'])),
             'dot-dot resource' => fn () => self::forge(self::payload(['r' => '/library/sections/2/../../all'])),
@@ -210,7 +290,12 @@ class RefSignerTest extends TestCase
             'zero server' => [$with(1, 0), 'ref: bad server'],
             'bad section' => [$with(2, '2/../1'), 'ref: bad section'],
             'empty section' => [$with(2, ''), 'ref: bad section'],
-            'unknown kind' => [$with(3, 'media'), 'ref: bad kind'],
+            'unknown kind' => [$with(3, 'video'), 'ref: bad kind'],
+            'browse path as media' => [$with(3, 'media'), 'ref: bad resource'],
+            'part path as hls' => [[self::USER, self::SERVER, '2', 'hls', self::PART, 60], 'ref: bad resource'],
+            'too-long media ttl' => [[self::USER, self::SERVER, '2', 'media', self::PART, 28801], 'ref: bad ttl'],
+            'too-long hls ttl' => [[self::USER, self::SERVER, '2', 'hls', self::ITEM, 28801], 'ref: bad ttl'],
+            'too-long art ttl' => [[self::USER, self::SERVER, '2', 'art', self::ART, 3601], 'ref: bad ttl'],
             'art path as browse' => [$with(4, self::ART), 'ref: bad resource'],
             'browse path as art' => [array_replace($ok, [3 => 'art']), 'ref: bad resource'],
             'dot-dot resource' => [$with(4, '/library/sections/2/../all'), 'ref: bad resource'],
