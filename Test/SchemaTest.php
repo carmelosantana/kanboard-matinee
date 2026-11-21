@@ -16,6 +16,7 @@ class SchemaTest extends Base
         $pdo = $this->container['db']->getConnection();
         \Kanboard\Plugin\Matinee\Schema\version_1($pdo);
         \Kanboard\Plugin\Matinee\Schema\version_2($pdo);
+        \Kanboard\Plugin\Matinee\Schema\version_3($pdo);
     }
 
     private function db(): \PicoDb\Database
@@ -85,9 +86,9 @@ class SchemaTest extends Base
         $this->assertSame([$kept], array_map('intval', $this->db()->table('matinee_servers')->findAllByColumn('id')));
     }
 
-    public function testSchemaVersionIsTwo(): void
+    public function testSchemaVersionIsThree(): void
     {
-        $this->assertSame(2, \Kanboard\Plugin\Matinee\Schema\VERSION);
+        $this->assertSame(3, \Kanboard\Plugin\Matinee\Schema\VERSION);
     }
 
     // v2: matinee_attempts backs the connect/verify rate limit (spec §11 S1).
@@ -122,5 +123,92 @@ class SchemaTest extends Base
         $this->assertTrue((new UserModel($this->container))->remove($alice));
 
         $this->assertSame([$bob], array_map('intval', $this->db()->table('matinee_attempts')->findAllByColumn('user_id')));
+    }
+
+    // v3 (P3, C4): one matinee_transcodes row per long stream, and the caps lock row.
+    private function transcode(int $serverId, int $userId, string $session, array $extra = []): bool
+    {
+        try {
+            return (bool) @$this->db()->table('matinee_transcodes')->insert($extra + [
+                'server_id' => $serverId,
+                'user_id' => $userId,
+                'session' => $session,
+                'kind' => 'hls',
+                'created_at' => 100,
+                'last_seen_at' => 100,
+            ]);
+        } catch (\PicoDb\SQLException) {
+            return false;
+        }
+    }
+
+    private const S1 = '11111111-1111-4111-8111-111111111111';
+    private const S2 = '22222222-2222-4222-8222-222222222222';
+
+    public function testLockRowIsSeeded(): void
+    {
+        $this->assertSame(
+            [['name' => 'streams', 'n' => 0]],
+            array_map(fn ($r) => ['name' => $r['name'], 'n' => (int) $r['n']], $this->db()->table('matinee_locks')->findAll())
+        );
+    }
+
+    public function testTranscodesStoreARowAndStoppedDefaultsToZero(): void
+    {
+        $alice = $this->user('alice');
+        $serverId = $this->server($alice);
+        $this->assertTrue($this->transcode($serverId, $alice, self::S1, ['kind' => 'mp3', 'created_at' => 7, 'last_seen_at' => 9]));
+
+        $row = $this->db()->table('matinee_transcodes')->eq('session', self::S1)->findOne();
+        $this->assertGreaterThan(0, (int) $row['id']);
+        $this->assertSame(
+            ['server_id' => $serverId, 'user_id' => $alice, 'session' => self::S1, 'kind' => 'mp3', 'created_at' => 7, 'last_seen_at' => 9, 'stopped' => 0],
+            ['server_id' => (int) $row['server_id'], 'user_id' => (int) $row['user_id'], 'session' => $row['session'], 'kind' => $row['kind'],
+                'created_at' => (int) $row['created_at'], 'last_seen_at' => (int) $row['last_seen_at'], 'stopped' => (int) $row['stopped']]
+        );
+    }
+
+    public function testDuplicateSessionIsRefused(): void
+    {
+        $alice = $this->user('alice');
+        $serverId = $this->server($alice);
+        $this->assertTrue($this->transcode($serverId, $alice, self::S1));
+        $this->assertFalse($this->transcode($serverId, $alice, self::S1));
+        $this->assertSame(1, $this->db()->table('matinee_transcodes')->count());
+    }
+
+    public function testTranscodeNeedsARealServerAndUser(): void
+    {
+        $alice = $this->user('alice');
+        $serverId = $this->server($alice);
+        $this->assertFalse($this->transcode(9999, $alice, self::S1), 'unknown server');
+        $this->assertFalse($this->transcode($serverId, 9999, self::S2), 'unknown user');
+        $this->assertSame(0, $this->db()->table('matinee_transcodes')->count());
+    }
+
+    public function testServerDeleteCascadesTranscodes(): void
+    {
+        $alice = $this->user('alice');
+        $gone = $this->server($alice);
+        $kept = $this->server($alice);
+        $this->assertTrue($this->transcode($gone, $alice, self::S1));
+        $this->assertTrue($this->transcode($kept, $alice, self::S2));
+
+        $this->assertTrue($this->db()->table('matinee_servers')->eq('id', $gone)->remove());
+
+        $this->assertSame([self::S2], $this->db()->table('matinee_transcodes')->findAllByColumn('session'));
+    }
+
+    public function testUserDeleteCascadesTranscodes(): void
+    {
+        $alice = $this->user('alice');
+        $bob = $this->user('bob');
+        $serverId = $this->server($alice);
+        $this->assertTrue($this->transcode($serverId, $bob, self::S1));
+        $this->assertTrue($this->transcode($serverId, $alice, self::S2));
+
+        $this->assertTrue((new UserModel($this->container))->remove($bob));
+
+        $this->assertSame([self::S2], $this->db()->table('matinee_transcodes')->findAllByColumn('session'));
     }
 }

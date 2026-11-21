@@ -66,6 +66,7 @@ class ServerModelTest extends Base
         $pdo = $this->container['db']->getConnection();
         \Kanboard\Plugin\Matinee\Schema\version_1($pdo);
         \Kanboard\Plugin\Matinee\Schema\version_2($pdo);
+        \Kanboard\Plugin\Matinee\Schema\version_3($pdo);
 
         (new Plugin($this->container))->initialize();
 
@@ -310,7 +311,7 @@ class ServerModelTest extends Base
         $this->expectFailure(fn () => $this->model()->connect($alice, 'X', 'https://other.example.test', self::TOKEN));
 
         $tables = $this->matineeTables();
-        $this->assertSame(['matinee_attempts', 'matinee_servers'], $tables);
+        $this->assertSame(['matinee_attempts', 'matinee_locks', 'matinee_servers', 'matinee_transcodes'], $tables);
         $scanned = 0;
         foreach (array_merge($tables, ['settings']) as $table) {
             foreach ($this->db()->table($table)->findAll() as $row) {

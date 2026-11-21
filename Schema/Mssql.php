@@ -3,7 +3,7 @@ namespace Kanboard\Plugin\Matinee\Schema;
 
 use PDO;
 
-const VERSION = 2;
+const VERSION = 3;
 
 /**
  * Spec §1 P1 tables, light scope. Syntax follows core app/Schema/Mssql.php.
@@ -44,4 +44,37 @@ function version_2(PDO $pdo)
         );
     ');
     $pdo->exec('CREATE INDEX matinee_attempts_user_time_idx ON dbo.matinee_attempts(user_id, created_at)');
+}
+
+/**
+ * P3 (C4): one matinee_transcodes row per long stream (an HLS session, or an mp3 transcode while it runs), and the
+ * one-row lock that serializes every cap claim. Deleting a server takes its rows with it.
+ * Unlike the other drivers, user_id has no foreign key here: SQL Server refuses a second cascade path from users
+ * (users -> matinee_servers -> matinee_transcodes and users -> matinee_transcodes), error 1785. A deleted user's rows on
+ * someone else's server stop counting after 120 s, the sweep marks them stopped, and claim() prunes them a day later.
+ */
+function version_3(PDO $pdo)
+{
+    $pdo->exec('
+        CREATE TABLE dbo.matinee_transcodes (
+            id int identity PRIMARY KEY
+          , server_id int NOT NULL REFERENCES dbo.matinee_servers(id) ON DELETE CASCADE
+          , user_id int NOT NULL
+          , session nvarchar(36) NOT NULL UNIQUE
+          , kind nvarchar(8) NOT NULL
+          , created_at bigint NOT NULL
+          , last_seen_at bigint NOT NULL
+          , stopped smallint NOT NULL DEFAULT 0
+        );
+    ');
+    $pdo->exec('CREATE INDEX matinee_transcodes_stale_idx ON dbo.matinee_transcodes(stopped, last_seen_at)');
+    $pdo->exec('CREATE INDEX matinee_transcodes_server_idx ON dbo.matinee_transcodes(server_id)');
+    $pdo->exec('CREATE INDEX matinee_transcodes_user_idx ON dbo.matinee_transcodes(user_id)');
+    $pdo->exec('
+        CREATE TABLE dbo.matinee_locks (
+            name nvarchar(32) NOT NULL PRIMARY KEY
+          , n int NOT NULL DEFAULT 0
+        );
+    ');
+    $pdo->exec("INSERT INTO dbo.matinee_locks (name, n) VALUES ('streams', 0)");
 }

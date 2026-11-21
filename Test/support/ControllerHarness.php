@@ -64,6 +64,7 @@ trait MatineeControllerHarness
         $pdo = $this->container['db']->getConnection();
         \Kanboard\Plugin\Matinee\Schema\version_1($pdo);
         \Kanboard\Plugin\Matinee\Schema\version_2($pdo);
+        \Kanboard\Plugin\Matinee\Schema\version_3($pdo);
 
         (new Plugin($this->container))->initialize();
 
