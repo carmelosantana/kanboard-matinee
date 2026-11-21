@@ -1585,6 +1585,356 @@ class PlexClientTest extends TestCase
         }
     }
 
+    // ── HLS: hlsStart(), hlsPlaylist(), hlsSegment(), hlsStop() (P3 Task 12; C2a, C2b, C2f, C3b) ─────────
+
+    private const HLS_BASE = '/video/:/transcode/universal/session/' . self::SESSION . '/base';
+    private const OTHER_SESSION = '11111111-2222-4333-8444-555566667777';
+
+    /** C2b: Veranda's transcode headers, Matinee's product and the viewer's device name; the token in the header only. */
+    private function hlsHeaders(): array
+    {
+        return [
+            'X-Plex-Token'              => self::TOKEN,
+            'X-Plex-Client-Identifier'  => self::CLIENT_ID,
+            'X-Plex-Product'            => 'Matinee',
+            'X-Plex-Version'            => '0.1',
+            'X-Plex-Platform'           => 'Chrome',
+            'X-Plex-Platform-Version'   => '120',
+            'X-Plex-Device'             => 'Linux',
+            'X-Plex-Device-Name'        => 'Matinee (alice)',
+            'X-Plex-Model'              => 'hosted',
+            'X-Plex-Session-Identifier' => self::SESSION,
+            'Accept'                    => 'application/vnd.apple.mpegurl,*/*',
+        ];
+    }
+
+    public function testHlsStartRequestsTheC2aStartUrlWithTheC2bHeadersAndTimeout60(): void
+    {
+        $this->t->respond(200, "#EXTM3U\nraw", ['Content-Type' => 'application/vnd.apple.mpegurl']);
+        $this->assertSame("#EXTM3U\nraw", $this->client()->hlsStart('/library/metadata/2002', self::SESSION));
+
+        $this->assertCount(1, $this->t->requests);
+        [$req] = $this->t->requests;
+        $this->assertSame(
+            self::BASE . '/video/:/transcode/universal/start.m3u8?hasMDE=1&path=%2Flibrary%2Fmetadata%2F2002&mediaIndex=0'
+                . '&partIndex=0&protocol=hls&fastSeek=1&directPlay=0&directStream=1&subtitleSize=100&audioBoost=100'
+                . '&location=lan&addDebugOverlay=0&autoAdjustQuality=0&directStreamAudio=1&mediaBufferSize=102400'
+                . '&session=' . self::SESSION . '&subtitles=burn&Accept-Language=en&videoQuality=100'
+                . '&videoResolution=1920x1080&maxVideoBitrate=8000&X-Plex-Client-Identifier=' . self::CLIENT_ID
+                . '&X-Plex-Session-Identifier=' . self::SESSION,
+            $req['url'],
+        );
+        $this->assertSame($this->hlsHeaders(), $req['headers']);
+        $this->assertOnlyHeaderCarriesTheToken($req);
+        $this->assertSame(['timeout' => 60], $req['opts']);
+    }
+
+    /** @dataProvider playlistTypes */
+    public function testHlsPlaylistTypesAreAccepted(string $type): void
+    {
+        $this->t->respond(200, '#EXTM3U', ['Content-Type' => $type])->respond(200, '#EXTM3U', ['Content-Type' => $type]);
+        $this->assertSame('#EXTM3U', $this->client()->hlsStart('/library/metadata/2002', self::SESSION));
+        $this->assertSame('#EXTM3U', $this->client()->hlsPlaylist(self::HLS_BASE . '/index.m3u8', self::SESSION));
+    }
+
+    public function playlistTypes(): array
+    {
+        return [
+            'apple'           => ['application/vnd.apple.mpegurl'],
+            'x-mpegurl'       => ['application/x-mpegurl'],
+            'case and params' => ['Application/X-MpegURL; charset=UTF-8'],
+        ];
+    }
+
+    /** @dataProvider badPlaylistTypes */
+    public function testAPlaylistOfAnotherTypeIsBadType(?string $type): void
+    {
+        $this->t->respond(200, 'UPSTREAM-BODY', $type === null ? [] : ['Content-Type' => $type])
+            ->respond(200, 'UPSTREAM-BODY', $type === null ? [] : ['Content-Type' => $type]);
+        $this->expectPlexError(fn () => $this->client()->hlsStart('/library/metadata/2002', self::SESSION), PlexException::BAD_TYPE);
+        $this->expectPlexError(fn () => $this->client()->hlsPlaylist(self::HLS_BASE . '/index.m3u8', self::SESSION), PlexException::BAD_TYPE);
+    }
+
+    public function badPlaylistTypes(): array
+    {
+        return ['html' => ['text/html'], 'json' => ['application/json'], 'missing' => [null], 'mp2t' => ['video/mp2t']];
+    }
+
+    public function testAPlexErrorOnStartIsHttpErrorAndTheBodyIsNeverReturned(): void
+    {
+        $this->t->respond(400, 'UPSTREAM-BODY ' . self::TOKEN, ['Content-Type' => 'application/vnd.apple.mpegurl']);
+        $e = $this->expectPlexError(fn () => $this->client()->hlsStart('/library/metadata/2002', self::SESSION), PlexException::HTTP_ERROR);
+        $this->assertSame(400, $e->status);
+    }
+
+    /** @dataProvider statuses */
+    public function testHlsBufferedStatusMapping(int $status, string $reason): void
+    {
+        $this->t->respond($status, 'UPSTREAM-BODY', ['Content-Type' => 'application/vnd.apple.mpegurl'])
+            ->respond($status, 'UPSTREAM-BODY', ['Content-Type' => 'application/vnd.apple.mpegurl']);
+        $this->expectPlexError(fn () => $this->client()->hlsStart('/library/metadata/2002', self::SESSION), $reason);
+        $this->expectPlexError(fn () => $this->client()->hlsPlaylist(self::HLS_BASE . '/index.m3u8', self::SESSION), $reason);
+    }
+
+    public function testAPlaylistOver2MiBIsTooLarge(): void
+    {
+        $this->t->respond(200, str_repeat('#', PlexClient::MAX_BODY_BYTES + 1), ['Content-Type' => 'application/vnd.apple.mpegurl']);
+        $this->expectPlexError(fn () => $this->client()->hlsPlaylist(self::HLS_BASE . '/index.m3u8', self::SESSION), PlexException::TOO_LARGE);
+    }
+
+    public function testHlsTransportFailuresAreFixed(): void
+    {
+        $this->t->fail(new \RuntimeException('curl: ' . self::BASE . '/?X-Plex-Token=' . self::TOKEN));
+        $this->expectPlexError(fn () => $this->client()->hlsStart('/library/metadata/2002', self::SESSION), PlexException::UNREACHABLE);
+    }
+
+    /** @dataProvider badStartArgs */
+    public function testHlsStartRefusesBadArgumentsWithNoRequest(string $path, string $session): void
+    {
+        $this->assertRefusedWithNoRequest(fn () => $this->client()->hlsStart($path, $session));
+    }
+
+    public function badStartArgs(): array
+    {
+        return [
+            'part path'     => [self::MP3_PART, self::SESSION],
+            'children'      => ['/library/metadata/1/children', self::SESSION],
+            'query'         => ['/library/metadata/1?X-Plex-Token=evil', self::SESSION],
+            'upper session' => ['/library/metadata/1', strtoupper(self::SESSION)],
+            'v1 session'    => ['/library/metadata/1', '0f1e2d3c-4b5a-1987-8a6b-5c4d3e2f1a0b'],
+            'empty session' => ['/library/metadata/1', ''],
+            'session &'     => ['/library/metadata/1', self::SESSION . '&X-Plex-Token=x'],
+        ];
+    }
+
+    private function assertRefusedWithNoRequest(callable $fn): void
+    {
+        try {
+            $fn();
+            $this->fail('expected refusal');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertMessageIsClean($e);
+        }
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testHlsPlaylistRequestsTheChildWithTheSameHeadersAsStartAndTimeout60(): void
+    {
+        $this->t->respond(200, '#EXTM3U', ['Content-Type' => 'application/vnd.apple.mpegurl'])
+            ->respond(200, '#EXTM3U', ['Content-Type' => 'application/vnd.apple.mpegurl']);
+        $c = $this->client();
+        $c->hlsStart('/library/metadata/2002', self::SESSION);
+        $this->assertSame('#EXTM3U', $c->hlsPlaylist(self::HLS_BASE . '/index.m3u8?x=1', self::SESSION));
+
+        [$start, $req] = $this->t->requests;
+        $this->assertSame(self::BASE . self::HLS_BASE . '/index.m3u8?x=1', $req['url']);
+        $this->assertSame($start['headers'], $req['headers']);
+        $this->assertSame($this->hlsHeaders(), $req['headers']);
+        $this->assertSame(['timeout' => 60], $req['opts']);
+    }
+
+    /** @dataProvider badPlaylistChildren */
+    public function testHlsPlaylistRefusesAChildOutsideItsSessionWithNoRequest(string $u): void
+    {
+        $this->assertRefusedWithNoRequest(fn () => $this->client()->hlsPlaylist($u, self::SESSION));
+    }
+
+    public function badPlaylistChildren(): array
+    {
+        $other = '/video/:/transcode/universal/session/' . self::OTHER_SESSION . '/base';
+        return [
+            'another session' => [$other . '/index.m3u8'],
+            'a segment'       => [self::HLS_BASE . '/00000.ts'],
+            'the start path'  => ['/video/:/transcode/universal/start.m3u8'],
+            'dot-dot'         => [self::HLS_BASE . '/../index.m3u8'],
+            'token query'     => [self::HLS_BASE . '/index.m3u8?X-Plex-Token=x'],
+            'absolute'        => ['http://evil' . self::HLS_BASE . '/index.m3u8'],
+            'item path'       => ['/library/metadata/1'],
+        ];
+    }
+
+    public function testHlsSegmentStreamsWithTheS3OptsAndTheSameHeadersAsStart(): void
+    {
+        $sink = $this->sink();
+        $this->t->respond(200, '#EXTM3U', ['Content-Type' => 'application/vnd.apple.mpegurl'])
+            ->streams(200, ['Content-Type' => 'video/mp2t', 'Content-Length' => '6', 'Content-Range' => 'bytes 0-5/6', 'Accept-Ranges' => 'bytes'], ['G@', 'data']);
+        $c = $this->client();
+        $c->hlsStart('/library/metadata/2002', self::SESSION);
+        $c->hlsSegment(self::HLS_BASE . '/00000.ts', self::SESSION, $sink);
+
+        [$start, $req] = $this->t->requests;
+        $this->assertSame(self::BASE . self::HLS_BASE . '/00000.ts', $req['url']);
+        $this->assertSame($start['headers'], $req['headers']);
+        $this->assertSame($this->hlsHeaders(), $req['headers']);
+        $this->assertSame(['timeout' => 60, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15, 'maxBytes' => 67108864], $req['opts']);
+        $this->assertSame(200, $sink->status);
+        $this->assertSame(['content-type' => 'video/mp2t', 'content-length' => '6'], $sink->headers);
+        $this->assertSame('G@data', $sink->body);
+    }
+
+    /** @dataProvider segmentTypes */
+    public function testSegmentTypesAreCanonicalByExtension(string $name, string $upstream, string $sent): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(206, ['Content-Type' => $upstream], ['x']);
+        $this->client()->hlsSegment(self::HLS_BASE . '/' . $name, self::SESSION, $sink);
+        $this->assertSame(200, $sink->status);
+        $this->assertSame(['content-type' => $sent], $sink->headers);
+    }
+
+    public function segmentTypes(): array
+    {
+        return [
+            'ts'            => ['00000.ts', 'video/mp2t', 'video/mp2t'],
+            'ts with query' => ['00000.ts?x=a.m3u8', 'Video/MP2T; x=1', 'video/mp2t'],
+            'm4s mp4'       => ['00000.m4s', 'video/mp4', 'video/mp4'],
+            'm4s segment'   => ['00000.m4s', 'video/iso.segment', 'video/iso.segment'],
+            'aac'           => ['00000.aac', 'audio/aac', 'audio/aac'],
+            'vtt'           => ['sub.vtt', 'text/vtt; charset=utf-8', 'text/vtt'],
+        ];
+    }
+
+    /** @dataProvider badSegmentTypes */
+    public function testASegmentOfAnotherTypeIsBadTypeAndTheSinkNeverOpens(string $name, ?string $type): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(200, $type === null ? [] : ['Content-Type' => $type], ['UPSTREAM-BODY']);
+        $this->expectPlexError(fn () => $this->client()->hlsSegment(self::HLS_BASE . '/' . $name, self::SESSION, $sink), PlexException::BAD_TYPE);
+        $this->assertSame(0, $sink->opens);
+        $this->assertSame('', $sink->body);
+    }
+
+    public function badSegmentTypes(): array
+    {
+        return [
+            'ts html'      => ['00000.ts', 'text/html'],
+            'ts mp4'       => ['00000.ts', 'video/mp4'],
+            'ts webm'      => ['00000.ts', 'video/webm'],
+            'ts missing'   => ['00000.ts', null],
+            'm4s mp2t'     => ['00000.m4s', 'video/mp2t'],
+            'aac mpeg'     => ['00000.aac', 'audio/mpeg'],
+            'vtt html'     => ['sub.vtt', 'text/html'],
+            'ts playlist'  => ['00000.ts', 'application/vnd.apple.mpegurl'],
+        ];
+    }
+
+    /** @dataProvider segmentLengths */
+    public function testASegmentLengthIsForwardedOnlyWhenItIsDigits(string $length, bool $kept): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(200, ['Content-Type' => 'video/mp2t', 'Content-Length' => $length], ['x']);
+        $this->client()->hlsSegment(self::HLS_BASE . '/00000.ts', self::SESSION, $sink);
+        $this->assertSame($kept ? ['content-type' => 'video/mp2t', 'content-length' => $length] : ['content-type' => 'video/mp2t'], $sink->headers);
+    }
+
+    public function segmentLengths(): array
+    {
+        return [
+            'one digit'  => ['1', true],
+            '18 digits'  => [str_repeat('9', 18), true],
+            '19 digits'  => [str_repeat('9', 19), false],
+            'empty'      => ['', false],
+            'negative'   => ['-1', false],
+            'spaced'     => [' 5', false],
+            'exponent'   => ['1e3', false],
+            'two values' => ['5, 5', false],
+        ];
+    }
+
+    /** @dataProvider statuses */
+    public function testSegmentStatusMapping(int $status, string $reason): void
+    {
+        $sink = $this->sink();
+        $this->t->streams($status, ['Content-Type' => 'video/mp2t'], ['UPSTREAM-BODY ' . self::TOKEN]);
+        $e = $this->expectPlexError(fn () => $this->client()->hlsSegment(self::HLS_BASE . '/00000.ts', self::SESSION, $sink), $reason);
+        $this->assertSame($status, $e->status);
+        $this->assertSame(0, $sink->opens);
+    }
+
+    public function testASegmentOver64MiBIsTooLargeAfterTheCut(): void
+    {
+        $sink = new class () implements \Kanboard\Plugin\Matinee\Http\PlexStreamSink {
+            public int $bytes = 0;
+
+            public function open(int $status, array $headers): bool
+            {
+                return true;
+            }
+
+            public function write(string $chunk): bool
+            {
+                $this->bytes += strlen($chunk);
+                return true;
+            }
+        };
+        $chunk = str_repeat('s', 16 * 1024 * 1024);
+        $this->t->streams(200, ['Content-Type' => 'video/mp2t'], [$chunk, $chunk, $chunk, $chunk, 'x']);
+        $this->expectPlexError(fn () => $this->client()->hlsSegment(self::HLS_BASE . '/00000.ts', self::SESSION, $sink), PlexException::TOO_LARGE);
+        $this->assertSame(67108864, $sink->bytes);
+    }
+
+    public function testSegmentTransportFailuresAreFixed(): void
+    {
+        $this->t->fail(new \RuntimeException('curl: ' . self::BASE . '/?X-Plex-Token=' . self::TOKEN));
+        $this->expectPlexError(fn () => $this->client()->hlsSegment(self::HLS_BASE . '/00000.ts', self::SESSION, $this->sink()), PlexException::UNREACHABLE);
+    }
+
+    /** @dataProvider badSegmentChildren */
+    public function testHlsSegmentRefusesAChildOutsideItsSessionWithNoRequest(string $u, string $session): void
+    {
+        $this->assertRefusedWithNoRequest(fn () => $this->client()->hlsSegment($u, $session, $this->sink()));
+    }
+
+    public function badSegmentChildren(): array
+    {
+        return [
+            'another session' => ['/video/:/transcode/universal/session/' . self::OTHER_SESSION . '/base/00000.ts', self::SESSION],
+            'session mismatch' => [self::HLS_BASE . '/00000.ts', self::OTHER_SESSION],
+            'a playlist'      => [self::HLS_BASE . '/index.m3u8', self::SESSION],
+            'a playlist with a segment-shaped query' => [self::HLS_BASE . '/index.m3u8?x=a.ts', self::SESSION],
+            'mp4'             => [self::HLS_BASE . '/00000.mp4', self::SESSION],
+            'part path'       => [self::MP3_PART, self::SESSION],
+            'encoded'         => [self::HLS_BASE . '/%2e%2e/00000.ts', self::SESSION],
+        ];
+    }
+
+    public function testHlsStopRequestsTheStopUrlWithTheSameHeadersAndTimeout3(): void
+    {
+        $this->t->respond(200, '', []);
+        $this->client()->hlsStop(self::SESSION);
+
+        [$req] = $this->t->requests;
+        $this->assertSame(self::BASE . '/video/:/transcode/universal/stop?session=' . self::SESSION, $req['url']);
+        $this->assertSame($this->hlsHeaders(), $req['headers']);
+        $this->assertSame(['timeout' => 3], $req['opts']);
+    }
+
+    public function testHlsStopNon2xxIsHttpError(): void
+    {
+        $this->t->respond(404, 'UPSTREAM-BODY', []);
+        $e = $this->expectPlexError(fn () => $this->client()->hlsStop(self::SESSION), PlexException::HTTP_ERROR);
+        $this->assertSame(404, $e->status);
+    }
+
+    /** @dataProvider badStopSessions */
+    public function testHlsStopRefusesANonV4SessionWithNoRequest(string $session): void
+    {
+        $this->assertRefusedWithNoRequest(fn () => $this->client()->hlsStop($session));
+    }
+
+    public function badStopSessions(): array
+    {
+        return ['upper' => [strtoupper(self::SESSION)], 'empty' => [''], 'injected' => [self::SESSION . '&X-Plex-Token=x']];
+    }
+
+    /** The viewer's device name rides on every HLS call (C9, S14); another viewer's client names itself. */
+    public function testTheHlsDeviceNameIsTheClients(): void
+    {
+        $this->t->respond(200, '', []);
+        (new PlexClient(self::BASE, self::TOKEN, self::CLIENT_ID, $this->t, null, 'Matinee (bob)'))->hlsStop(self::SESSION);
+        $this->assertSame('Matinee (bob)', $this->t->requests[0]['headers']['X-Plex-Device-Name']);
+    }
+
     // ── PlexResponse ─────────────────────────────────────────────────────────
 
     public function testPlexResponseKeepsOnlyAllowListedHeadersLowercased(): void

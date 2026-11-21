@@ -52,6 +52,17 @@ final class PlexClient
     ];
     /** C2f: an mp3 transcode is cut at 64 MiB (15 minutes at 320 kbps is about 36 MB). */
     public const MAX_TRANSCODE_BYTES = 67108864;
+    /** An HLS playlist's accepted upstream types; it is always sent as the first. */
+    public const HLS_PLAYLIST_TYPES = ['application/vnd.apple.mpegurl', 'application/x-mpegurl'];
+    /** An HLS segment's accepted upstream types, by the child path's extension; each is sent as itself. */
+    public const HLS_SEGMENT_TYPES = [
+        'ts'  => ['video/mp2t'],
+        'm4s' => ['video/mp4', 'video/iso.segment'],
+        'aac' => ['audio/aac'],
+        'vtt' => ['text/vtt'],
+    ];
+    /** C2f: a segment is cut at 64 MiB. */
+    public const MAX_SEGMENT_BYTES = 67108864;
 
     private const MACHINE_ID = '/\A[A-Za-z0-9-]{1,64}\z/';
     private const VERSION = '/\A[A-Za-z0-9._+-]{1,64}\z/';
@@ -410,6 +421,124 @@ final class PlexClient
         ], $guard, $sink);
     }
 
+    /**
+     * Starts Plex's HLS universal transcode of an item (C2a: Veranda's start URL, fixed at 1080p and 8 Mbps) and returns
+     * the raw master playlist. It is buffered (60 s, 2 MiB) and must be a 2xx playlist type; the caller rewrites it with
+     * `upstreamPath = PlexPaths::HLS_PREFIX.'start.m3u8'`.
+     */
+    public function hlsStart(string $itemPath, string $session): string
+    {
+        if (! PlexPaths::isItem($itemPath)) {
+            throw new \InvalidArgumentException('A Plex transcode path must be an item path.');
+        }
+        if (! PlexPaths::isSessionId($session)) {
+            throw new \InvalidArgumentException('A Plex transcode session must be a v4 uuid.');
+        }
+        return $this->hlsBuffered(PlexPaths::HLS_PREFIX . 'start.m3u8', [
+            'hasMDE' => 1, 'path' => $itemPath, 'mediaIndex' => 0, 'partIndex' => 0, 'protocol' => 'hls', 'fastSeek' => 1,
+            'directPlay' => 0, 'directStream' => 1, 'subtitleSize' => 100, 'audioBoost' => 100, 'location' => 'lan',
+            'addDebugOverlay' => 0, 'autoAdjustQuality' => 0, 'directStreamAudio' => 1, 'mediaBufferSize' => 102400,
+            'session' => $session, 'subtitles' => 'burn', 'Accept-Language' => 'en', 'videoQuality' => 100,
+            'videoResolution' => '1920x1080', 'maxVideoBitrate' => 8000,
+            'X-Plex-Client-Identifier' => $this->headers()['X-Plex-Client-Identifier'], 'X-Plex-Session-Identifier' => $session,
+        ], $session);
+    }
+
+    /** One child playlist of $session (S2, `.m3u8` only), buffered and checked as hlsStart's, returned raw. */
+    public function hlsPlaylist(string $u, string $session): string
+    {
+        if (self::hlsExtension($u, $session) !== 'm3u8') {
+            throw new \InvalidArgumentException('A Plex HLS playlist must be an .m3u8 child.');
+        }
+        return $this->hlsBuffered($u, [], $session);
+    }
+
+    /**
+     * Streams one segment of $session (S2, not `.m3u8`) into $sink (C2f, C3b: 60 s, 64 MiB). A 2xx whose type is on its
+     * extension's list opens $sink with 200, that type and the upstream length when it is 1 to 18 digits; a 401 is
+     * `plex.token_rejected`, another non-2xx `plex.http_error`, another type `plex.bad_type`, with $sink unopened.
+     */
+    public function hlsSegment(string $u, string $session, PlexStreamSink $sink): void
+    {
+        $types = self::HLS_SEGMENT_TYPES[self::hlsExtension($u, $session)] ?? null;
+        if ($types === null) {
+            throw new \InvalidArgumentException('A Plex HLS segment must not be a playlist.');
+        }
+
+        $guard = static function (int $status, array $headers) use ($types): array {
+            if ($status === 401) {
+                throw PlexException::tokenRejected();
+            }
+            if ($status < 200 || $status > 299) {
+                throw PlexException::httpError($status);
+            }
+            $type = self::mediaType($headers);
+            if (! in_array($type, $types, true)) {
+                throw PlexException::badType();
+            }
+            $length = $headers['content-length'] ?? null;
+            return [200, ['content-type' => $type]
+                + (self::uint($length) === null ? [] : ['content-length' => (string) self::uint($length)])];
+        };
+
+        $this->stream($u, [], [
+            'timeout' => 60, 'lowSpeedLimit' => 1024, 'lowSpeedTime' => 15, 'maxBytes' => self::MAX_SEGMENT_BYTES,
+        ], $guard, $sink, $this->transcodeHeaders($session));
+    }
+
+    /** Stops $session's transcode (3 s). A non-2xx is `plex.http_error`; the caller swallows failures. */
+    public function hlsStop(string $session): void
+    {
+        if (! PlexPaths::isSessionId($session)) {
+            throw new \InvalidArgumentException('A Plex transcode session must be a v4 uuid.');
+        }
+        $this->request(PlexPaths::HLS_PREFIX . 'stop', ['session' => $session], ['timeout' => 3], $this->transcodeHeaders($session));
+    }
+
+    /**
+     * C2b: the one header set every HLS call sends, and nothing else. Veranda's transcode headers, with the client's
+     * token, identifier and device name (the viewer's, S14) and Matinee as the product.
+     *
+     * @return array<string, string>
+     */
+    private function transcodeHeaders(string $session): array
+    {
+        $base = $this->headers();
+        return [
+            'X-Plex-Token'              => $base['X-Plex-Token'],
+            'X-Plex-Client-Identifier'  => $base['X-Plex-Client-Identifier'],
+            'X-Plex-Product'            => self::PRODUCT,
+            'X-Plex-Version'            => '0.1',
+            'X-Plex-Platform'           => 'Chrome',
+            'X-Plex-Platform-Version'   => '120',
+            'X-Plex-Device'             => 'Linux',
+            'X-Plex-Device-Name'        => $base['X-Plex-Device-Name'],
+            'X-Plex-Model'              => 'hosted',
+            'X-Plex-Session-Identifier' => $session,
+            'Accept'                    => 'application/vnd.apple.mpegurl,*/*',
+        ];
+    }
+
+    /** The extension of an HLS child of $session (its query aside); anything else is refused before a request. */
+    private static function hlsExtension(string $u, string $session): string
+    {
+        if (! PlexPaths::isHlsChild($u) || PlexPaths::hlsSession($u) !== $session) {
+            throw new \InvalidArgumentException('A Plex HLS child must belong to its session.');
+        }
+        $path = explode('?', $u, 2)[0];
+        return substr($path, strrpos($path, '.') + 1);
+    }
+
+    /** A buffered HLS playlist GET (60 s, 2 MiB): a 2xx with a playlist type, returned raw. */
+    private function hlsBuffered(string $path, array $query, string $session): string
+    {
+        $r = $this->request($path, $query, ['timeout' => 60], $this->transcodeHeaders($session));
+        if (! in_array(self::mediaType($r->headers), self::HLS_PLAYLIST_TYPES, true)) {
+            throw PlexException::badType();
+        }
+        return $r->body;
+    }
+
     /** One whitelisted listing item, or null to drop it. */
     private static function listItem(array $m): ?array
     {
@@ -483,9 +612,16 @@ final class PlexClient
      *
      * @param array<string, string> $extraHeaders
      * @param \Closure(int, array<string, string>): ?array{0: int, 1: array<string, string>} $guard
+     * @param array<string, string>|null $headers the set sent in place of the client's base headers (HLS)
      */
-    private function stream(string $path, array $extraHeaders, array $opts, \Closure $guard, PlexStreamSink $sink): void
-    {
+    private function stream(
+        string $path,
+        array $extraHeaders,
+        array $opts,
+        \Closure $guard,
+        PlexStreamSink $sink,
+        #[\SensitiveParameter] ?array $headers = null,
+    ): void {
         $guarded = new class ($guard, $sink) implements PlexStreamSink {
             public function __construct(private readonly \Closure $guard, private readonly PlexStreamSink $inner)
             {
@@ -504,7 +640,7 @@ final class PlexClient
         };
 
         try {
-            $this->transport->stream($this->baseUrl . $path, $this->headers() + $extraHeaders, $opts, $guarded);
+            $this->transport->stream($this->baseUrl . $path, ($headers ?? $this->headers()) + $extraHeaders, $opts, $guarded);
         } catch (PlexException | UnsafeUrlException $e) {
             throw $e;
         } catch (\Throwable) {
@@ -539,13 +675,15 @@ final class PlexClient
 
     /**
      * GET a path (with a query built by http_build_query, never holding the token) and check status and size.
-     * On a non-2xx the body is not read.
+     * On a non-2xx the body is not read. $headers, when given, is sent in place of the client's base headers (HLS).
+     *
+     * @param array<string, string>|null $headers
      */
-    private function request(string $path, array $query = [], array $opts = []): PlexResponse
+    private function request(string $path, array $query = [], array $opts = [], #[\SensitiveParameter] ?array $headers = null): PlexResponse
     {
         $url = $this->baseUrl . $path . ($query === [] ? '' : '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986));
         try {
-            $r = $this->transport->get($url, $this->headers(), $opts);
+            $r = $this->transport->get($url, $headers ?? $this->headers(), $opts);
         } catch (PlexException | UnsafeUrlException $e) {
             throw $e;
         } catch (\Throwable) {
