@@ -259,6 +259,41 @@ class NoTokenLeakTest extends Base
         $this->assertNoTokenAnywhere();
     }
 
+    /** P3 Task 18: both player pages, the busy page and the failure page, for the owner, a friend and an outsider. */
+    public function testEveryPlayerPage(): void
+    {
+        $signer = $this->container['matineeRefSigner'];
+        $this->container['matineeServerModel']->setShared($this->server, $this->owner, true);
+        $friend = $this->user('fern');
+        $live = '{"MediaContainer":{"Directory":[{"key":"1","type":"movie","title":"Movies"},{"key":"3","type":"artist","title":"Music"}]}}';
+        $item = fn (string $name) => fn () => $this->t->respond(200, $live)->respond(200, (string) file_get_contents(__DIR__.'/fixtures/plex/'.$name.'.json'));
+        $play = fn (string $ref) => fn () => $this->get(self::PLAY, 'play', ['ref' => $ref]);
+
+        foreach ([$this->owner, $friend, $this->outsider] as $userId) {
+            $this->loginAs($userId);
+            $movie = $signer->sign($userId, $this->server, '1', 'hls', '/library/metadata/2229', 28800);
+            $track = $signer->sign($userId, $this->server, '3', 'media', '/library/metadata/3001', 28800);
+            $this->capture($play($movie), $item('item-movie-avi'));
+            $this->capture($play($track), $item('item-track-mp3'));
+            $this->capture($play($track), $item('item-track-h263'));
+            // Failures: an error body carrying the token, a transport message, the cap (busy), and a ref that is the token.
+            $this->capture($play($movie), fn () => $this->t->respond(500, '<html>'.self::TOKEN.'</html>'));
+            $this->capture($play($track), fn () => $this->t->fail(new \RuntimeException('curl said '.self::TOKEN)));
+            // The movie above holds this user's one stream.
+            $this->setConfig(Settings::STREAM_CAP_USER_KEY, '1');
+            $this->capture($play($movie), $item('item-movie-avi'));
+            $this->setConfig(Settings::STREAM_CAP_USER_KEY, '2');
+            $this->capture($play(self::TOKEN));
+        }
+
+        $this->assertSame(21, $this->pages);
+        $all = implode("\n", $this->seen);
+        foreach (['<video ', '<audio ', 'This server is busy right now.', 'Could not reach that server.', 'forbidden: '] as $shown) {
+            $this->assertStringContainsString($shown, $all);
+        }
+        $this->assertNoTokenAnywhere();
+    }
+
     /** P3 Task 15: every hls start, proxy, ping and stop response, served or refused: status, headers, body and log. */
     public function testEveryHlsResponse(): void
     {

@@ -66,3 +66,30 @@
     align-items: center;
     gap: 1em;
 }
+
+/* The player page (plan P3 Task 18). */
+
+.matinee-player-page {
+    max-width: 960px;
+}
+
+.matinee-player-title {
+    margin-bottom: 0.2em;
+    overflow-wrap: anywhere;
+}
+
+.matinee-player {
+    display: block;
+    width: 100%;
+    margin: 0.8em 0;
+    background: #000;
+}
+
+audio.matinee-player {
+    max-width: 480px;
+    background: transparent;
+}
+
+.matinee-player-message {
+    font-weight: 600;
+}

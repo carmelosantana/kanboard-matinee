@@ -32,7 +32,7 @@ class MatineeBrowseController extends MatineeBaseController
         foreach ($this->servers()->listBrowsable($this->actorId()) as $server) {
             $rows[] = ['id' => (int) $server['id'], 'name' => (string) $server['name']];
         }
-        $this->render('Matinee:browse/index', ['servers' => $rows]);
+        $this->renderMedia('Matinee:browse/index', ['servers' => $rows]);
     }
 
     /** One server's live libraries, each linking to its listing by a browse ref. */
@@ -43,7 +43,7 @@ class MatineeBrowseController extends MatineeBaseController
         if ($sections === null) {
             return;
         }
-        $this->render('Matinee:browse/server', [
+        $this->renderMedia('Matinee:browse/server', [
             'server' => ['id' => $serverId, 'name' => (string) ($this->servers()->get($serverId)['name'] ?? '')],
             'sections' => $sections,
         ]);
@@ -68,7 +68,7 @@ class MatineeBrowseController extends MatineeBaseController
         // A start past the end (a stale link to a library that shrank) is not refused: the page says there is
         // nothing here and links back to the first page, with no count and no Previous.
         $pastEnd = $page['total'] > 0 && $page['start'] >= $page['total'];
-        $this->render('Matinee:browse/listing', [
+        $this->renderMedia('Matinee:browse/listing', [
             'page' => $page,
             'ref' => $ref,
             'pastEnd' => $pastEnd,
@@ -131,7 +131,7 @@ class MatineeBrowseController extends MatineeBaseController
         } catch (MatineeForbiddenException) {
             throw new AccessForbiddenException();
         } catch (MatineeConnectException) {
-            $this->render('Matinee:browse/failed', [], 502);
+            $this->renderMedia('Matinee:browse/failed', [], 502);
             return null;
         }
     }
@@ -144,13 +144,6 @@ class MatineeBrowseController extends MatineeBaseController
         $this->response->status($status);
     }
 
-    private function render(string $template, array $params, int $status = 200): void
-    {
-        $this->response->html($this->helper->layout->dashboard($template, $params + [
-            'user' => $this->userModel->getById($this->actorId()),
-            'title' => t('Media'),
-        ]), $status);
-    }
 
     /** @return BrowseModel */
     private function browse(): object

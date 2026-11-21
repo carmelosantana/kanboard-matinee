@@ -97,7 +97,7 @@ class Plugin extends Base
     public const ACL = [
         ['MatineeServerController', ['index', 'create', 'edit', 'save', 'show', 'verify', 'remove', 'share'], Role::APP_USER],
         ['MatineeBrowseController', ['index', 'server', 'listing', 'art'], Role::APP_USER],
-        ['MatineePlayController', ['hlsPing', 'hlsProxy', 'hlsStart', 'hlsStop', 'keepalive', 'media'], Role::APP_USER],
+        ['MatineePlayController', ['hlsPing', 'hlsProxy', 'hlsStart', 'hlsStop', 'keepalive', 'media', 'play'], Role::APP_USER],
         ['MatineeAdminController', ['show', 'save', 'toggle'], Role::APP_ADMIN],
     ];
 
@@ -115,6 +115,7 @@ class Plugin extends Base
         ['matinee/browse/list', 'MatineeBrowseController', 'listing'],
         ['matinee/browse/:server_id', 'MatineeBrowseController', 'server'],
         ['matinee/art', 'MatineeBrowseController', 'art'],
+        ['matinee/play', 'MatineePlayController', 'play'],
         ['matinee/media', 'MatineePlayController', 'media'],
         ['matinee/keepalive', 'MatineePlayController', 'keepalive'],
         ['matinee/hls/start', 'MatineePlayController', 'hlsStart'],

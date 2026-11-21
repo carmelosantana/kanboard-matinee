@@ -14,6 +14,10 @@ use Kanboard\Plugin\Matinee\Model\PlaybackModel;
  * Playback (plan P3; spec §7, §11 S9, S11; C1b, C3d, C3e, C3f, C4c). Any signed-in user reaches it (ACL APP_USER);
  * PlaybackModel decides every request from the live rows and a signed ref.
  *
+ * - `play` (C2c, C5b, C6): the player page in the dashboard layout. Audio gets an `<audio>` sourced from `media`; video
+ *   gets a `<video>` whose claimed session, hls/start, ping, stop and keepalive URLs and reusable CSRF token travel in
+ *   `data-` attributes for player.js (no inline script). Forbidden is core's 403; Busy is the busy page with a 503;
+ *   Connect is P2's failure page with a 502.
  * - `media`: GET only. One window of a direct part, or an mp3 transcode, streamed through the ResponseSink, which alone
  *   opens the response (C3e). Once the ref and the server pass, the session is dropped without a write (C3d), and
  *   client aborts end the stream cleanly (C3f). A refusal is an empty body at 403, 405 (any other method, HEAD
@@ -31,6 +35,23 @@ use Kanboard\Plugin\Matinee\Model\PlaybackModel;
  */
 class MatineePlayController extends MatineeBaseController
 {
+    /** GET matinee/play?ref=: the player page for a play ref from the listing. */
+    public function play(): void
+    {
+        try {
+            $page = $this->playback()->page($this->actorId(), $this->param('ref'));
+        } catch (MatineeForbiddenException) {
+            throw new AccessForbiddenException();
+        } catch (MatineeBusyException) {
+            $this->renderMedia('Matinee:play/busy', [], 503);
+            return;
+        } catch (MatineeConnectException) {
+            $this->renderMedia('Matinee:browse/failed', [], 502);
+            return;
+        }
+        $this->renderMedia('Matinee:play/player', ['page' => $page, 'csrf' => $this->token->getReusableCSRFToken()]);
+    }
+
     /** GET matinee/media?ref= with an optional `Range` header. */
     public function media(): void
     {

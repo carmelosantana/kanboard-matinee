@@ -87,6 +87,15 @@ abstract class MatineeBaseController extends BaseController
         return (string) parse_url((string) $server['base_url'], PHP_URL_HOST);
     }
 
+    /** A page in the dashboard layout, titled Media: the browse pages and the player. */
+    protected function renderMedia(string $template, array $params, int $status = 200): void
+    {
+        $this->response->html($this->helper->layout->dashboard($template, $params + [
+            'user' => $this->userModel->getById($this->actorId()),
+            'title' => t('Media'),
+        ]), $status);
+    }
+
     protected function servers(): ServerModel
     {
         return $this->container['matineeServerModel'];

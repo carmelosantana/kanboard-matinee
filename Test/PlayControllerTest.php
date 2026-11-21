@@ -3,6 +3,7 @@ require_once 'tests/units/Base.php';
 require_once __DIR__.'/support/ControllerHarness.php';
 
 use KanboardTests\units\Base;
+use Kanboard\Core\Controller\AccessForbiddenException;
 use Kanboard\Core\Security\Role;
 use Kanboard\Plugin\Matinee\Controller\MatineePlayController;
 use Kanboard\Plugin\Matinee\Crypto\RefSigner;
@@ -153,7 +154,7 @@ class PlayControllerTest extends Base
     {
         $map = $this->container['applicationAccessMap'];
         $auth = $this->container['applicationAuthorization'];
-        $this->assertSame(['hlsPing', 'hlsProxy', 'hlsStart', 'hlsStop', 'keepalive', 'media'], self::actions());
+        $this->assertSame(['hlsPing', 'hlsProxy', 'hlsStart', 'hlsStop', 'keepalive', 'media', 'play'], self::actions());
         $rows = array_values(array_filter(\Kanboard\Plugin\Matinee\Plugin::ACL, fn (array $row): bool => $row[0] === self::PLAY));
         $this->assertCount(1, $rows);
         $this->assertSame([self::actions(), Role::APP_USER], [$rows[0][1], $rows[0][2]]);
@@ -851,5 +852,170 @@ class PlayControllerTest extends Base
         $r = $this->get('MatineeBrowseController', 'index');
         $this->assertSame(200, $r->code());
         $this->assertStringContainsString('Living room', $r->body());
+    }
+
+    // ── the player page (Task 18; C2c, C5b, C6) ──────────────────────────────
+
+    private const AVI_MOVIE = '/library/metadata/2229';
+    /** The live sections: movies in 1 and music in 3, where the item fixtures live. */
+    private const LIVE = '{"MediaContainer":{"Directory":[{"key":"1","type":"movie","title":"Movies"},{"key":"3","type":"artist","title":"Music"}]}}';
+    private const BUSY = 'This server is busy right now. Try again in a minute.';
+    private const CANNOT_PLAY = 'This item could not be played.';
+    private const UNSUPPORTED = 'Your browser cannot play this video.';
+
+    /** P2's regex style: a query-form Matinee URL in an attribute, capturing the ref. */
+    private static function attrUrl(string $attr, string $action, string $extra = ''): string
+    {
+        return '#'.$attr.'="[^"?]*\?controller=MatineePlayController&amp;action='.$action.'&amp;plugin=Matinee'.$extra.'"#';
+    }
+
+    private function play(mixed $ref): MatineeTestResponse
+    {
+        return $this->call(self::PLAY, 'play', ['ref' => $ref], [], false, 'GET', [], MatineePlayControllerSpy::class);
+    }
+
+    /** Queues the live sections, then the item fixture (or the given item JSON). */
+    private function queueItem(string $fixtureOrJson): void
+    {
+        $json = str_starts_with($fixtureOrJson, '{') ? $fixtureOrJson : (string) file_get_contents(__DIR__.'/fixtures/plex/'.$fixtureOrJson.'.json');
+        $this->t->respond(200, self::LIVE)->respond(200, $json);
+    }
+
+    /** An hls ref to the avi movie, in section 1 where its fixture lives. */
+    private function movieRef(int $userId): string
+    {
+        return $this->container['matineeRefSigner']->sign($userId, $this->server, '1', 'hls', self::AVI_MOVIE, 28800);
+    }
+
+    private function moviePage(): MatineeTestResponse
+    {
+        $this->queueItem('item-movie-avi');
+        return $this->play($this->movieRef($this->owner));
+    }
+
+    public function testTheAudioPageSourcesTheDirectPartOrTheTranscode(): void
+    {
+        foreach (['item-track-mp3' => '/library/parts/5001/1700000000/file.mp3', 'item-track-h263' => '/library/metadata/3003'] as $fixture => $r) {
+            $this->queueItem($fixture);
+            $ref = $this->ref($this->owner, 'media', '/library/metadata/'.($fixture === 'item-track-mp3' ? '3001' : '3003'));
+            $resp = $this->play($ref);
+            $body = $resp->body();
+            $this->assertSame(200, $resp->code(), $fixture);
+            $this->assertSame(1, preg_match_all('#<audio [^>]*>#', $body, $tags), $fixture);
+            $tag = $tags[0][0];
+            $this->assertMatchesRegularExpression('#^<audio controls preload="metadata" class="matinee-player" data-matinee-kind="audio"\s#', $tag);
+            $this->assertSame(1, preg_match(self::attrUrl('src', 'media', '&amp;ref=([A-Za-z0-9_.-]+)'), $tag, $m), $fixture);
+            $this->assertSame(['sv' => $this->server, 's' => '3', 'k' => 'media', 'r' => $r], $this->container['matineeRefSigner']->verify($m[1], $this->owner, 'media'));
+            $this->assertMatchesRegularExpression(self::attrUrl('data-matinee-keepalive', 'keepalive'), $tag);
+            $this->assertSame(1, preg_match('#data-matinee-csrf="([^"]+)"#', $tag, $c));
+            $this->assertTrue($this->container['token']->validateReusableCSRFToken($c[1]));
+            $this->assertStringContainsString('data-matinee-error="'.self::CANNOT_PLAY.'"', $tag);
+            $this->assertStringNotContainsString('<video', $body);
+            $this->assertStringContainsString('<p class="matinee-player-message" hidden></p>', $body);
+            $this->assertStringContainsString('Fake Artist · Fake Album', $body);
+            $this->assertStringNotContainsString('/library/', $body);
+        }
+    }
+
+    public function testTheMoviePageCarriesItsClaimedSessionAndTheReusableToken(): void
+    {
+        $r = $this->moviePage();
+        $body = $r->body();
+        $this->assertSame(200, $r->code());
+        $rows = $this->container['db']->table(TranscodeModel::TABLE)->findAll();
+        $this->assertCount(1, $rows);
+        $this->assertSame(1, preg_match_all('#<video [^>]*>#', $body, $tags));
+        $tag = $tags[0][0];
+        $this->assertMatchesRegularExpression('#^<video controls playsinline class="matinee-player" data-matinee-kind="hls"\s#', $tag);
+        $this->assertStringContainsString('data-matinee-session="'.$rows[0]['session'].'"', $tag);
+        $this->assertSame(1, preg_match('#data-matinee-csrf="([^"]+)"#', $tag, $c));
+        $this->assertTrue($this->container['token']->validateReusableCSRFToken($c[1]));
+        $this->assertSame(1, preg_match(self::attrUrl('data-matinee-src', 'hlsStart', '&amp;ref=([A-Za-z0-9_.-]+)&amp;session=([0-9a-f-]{36})'), $tag, $m));
+        $this->assertSame(['sv' => $this->server, 's' => '1', 'k' => 'hls', 'r' => self::AVI_MOVIE], $this->container['matineeRefSigner']->verify($m[1], $this->owner, 'hls'));
+        $this->assertSame($rows[0]['session'], $m[2]);
+        $this->assertMatchesRegularExpression(self::attrUrl('data-matinee-ping', 'hlsPing'), $tag);
+        $this->assertMatchesRegularExpression(self::attrUrl('data-matinee-stop', 'hlsStop'), $tag);
+        $this->assertMatchesRegularExpression(self::attrUrl('data-matinee-keepalive', 'keepalive'), $tag);
+        $this->assertStringContainsString('data-matinee-error="'.self::CANNOT_PLAY.'"', $tag);
+        $this->assertStringContainsString('data-matinee-unsupported="'.self::UNSUPPORTED.'"', $tag);
+        $this->assertStringContainsString('<h2 class="matinee-player-title">Fake Old Movie</h2>', $body);
+        $this->assertMatchesRegularExpression('#<a href="[^"]*action=server[^"]*server_id='.$this->server.'[^"]*"[^>]*>Living room</a>#', $body);
+        $this->assertMatchesRegularExpression('#<title>\s*Media\s*</title>#', $body);
+        foreach (['/library/', 'plex.example.test', 'X-Plex', '/data/movies', self::TOKEN] as $raw) {
+            $this->assertStringNotContainsString($raw, $body);
+        }
+    }
+
+    public function testAHostileTitleAndSubtitleAreEscaped(): void
+    {
+        $item = json_decode((string) file_get_contents(__DIR__.'/fixtures/plex/item-track-mp3.json'), true);
+        $item['MediaContainer']['Metadata'][0]['title'] = '<img src=x onerror=alert(1)>"';
+        $item['MediaContainer']['Metadata'][0]['parentTitle'] = '<b>bold</b>';
+        $this->queueItem((string) json_encode($item));
+        $body = $this->play($this->ref($this->owner, 'media', '/library/metadata/3001'))->body();
+        $this->assertStringContainsString('&lt;img src=x onerror=alert(1)&gt;&quot;', $body);
+        $this->assertStringContainsString('&lt;b&gt;bold&lt;/b&gt;', $body);
+        $this->assertStringNotContainsString('<img src=x', $body);
+        $this->assertStringNotContainsString('<b>bold', $body);
+    }
+
+    public function testThePlayerPagesCarryNoInlineCode(): void
+    {
+        $pages = [$this->moviePage()->body()];
+        $this->queueItem('item-track-mp3');
+        $pages[] = $this->play($this->ref($this->owner, 'media', '/library/metadata/3001'))->body();
+        foreach ($pages as $i => $body) {
+            $this->assertStringContainsString('class="matinee-player"', $body);
+            preg_match_all('#<script\b[^>]*>#i', $body, $scripts);
+            foreach ($scripts[0] as $script) {
+                $this->assertStringContainsString(' src="', $script, "page $i");
+            }
+            // Core's layout draws avatars with style=; Matinee's own markup (the crumbs to the message line) has none.
+            $this->assertSame(1, preg_match('#<h2 class="matinee-crumbs">.*<p class="matinee-player-message" hidden></p>#s', $body, $own), "page $i");
+            $this->assertDoesNotMatchRegularExpression('#\son[a-z]+\s*=#i', $own[0], "page $i");
+            $this->assertDoesNotMatchRegularExpression('#\sstyle\s*=|<script|<style#i', $own[0], "page $i");
+        }
+        foreach (glob(__DIR__.'/../Template/play/*.php') as $file) {
+            $this->assertDoesNotMatchRegularExpression('#<script|<style|\sstyle=|\son[a-z]+=#i', (string) file_get_contents($file), basename($file));
+        }
+    }
+
+    public function testAnOutsiderGetsCore403AndBadRefsToo(): void
+    {
+        $this->loginAs($this->outsider);
+        foreach ([$this->movieRef($this->outsider), $this->movieRef($this->owner), 'nope', ['a']] as $i => $ref) {
+            try {
+                $this->play($ref);
+                $this->fail("expected forbidden #$i");
+            } catch (AccessForbiddenException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+        $this->assertSame([], $this->t->requests);
+        $this->assertSame([], $this->container['db']->table(TranscodeModel::TABLE)->findAll());
+    }
+
+    public function testAMovieAtTheCapIsA503BusyPage(): void
+    {
+        foreach (['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'] as $session) {
+            $this->container['db']->table(TranscodeModel::TABLE)->insert([
+                'server_id' => $this->server, 'user_id' => $this->owner, 'session' => $session, 'kind' => 'hls',
+                'created_at' => $this->now, 'last_seen_at' => $this->now, 'stopped' => 0,
+            ]);
+        }
+        $r = $this->moviePage();
+        $this->assertSame(503, $r->code());
+        $this->assertStringContainsString('<p class="alert alert-error">'.self::BUSY.'</p>', $r->body());
+        $this->assertStringNotContainsString('<video', $r->body());
+        $this->assertCount(2, $this->container['db']->table(TranscodeModel::TABLE)->findAll());
+    }
+
+    public function testAPlexFailureIsTheFixedFailurePageWithA502(): void
+    {
+        $this->t->respond(500, '<html>'.self::TOKEN.'</html>');
+        $r = $this->play($this->movieRef($this->owner));
+        $this->assertSame(502, $r->code());
+        $this->assertStringContainsString('Could not reach that server.', $r->body());
+        $this->assertStringNotContainsString(self::TOKEN, $r->body());
     }
 }
