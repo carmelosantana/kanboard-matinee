@@ -144,13 +144,6 @@ class MatineeBrowseController extends MatineeBaseController
         $this->response->status($status);
     }
 
-    /** A query param as a string; an array or nothing is ''. */
-    private function param(string $name): string
-    {
-        $value = $this->request->getStringParam($name);
-        return is_string($value) ? $value : '';
-    }
-
     private function render(string $template, array $params, int $status = 200): void
     {
         $this->response->html($this->helper->layout->dashboard($template, $params + [

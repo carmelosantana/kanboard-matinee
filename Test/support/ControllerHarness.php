@@ -9,6 +9,7 @@ use Kanboard\Core\Security\Role;
 use Kanboard\Model\UserModel;
 use Kanboard\Plugin\Matinee\Crypto\KeyStore;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
+use Kanboard\Plugin\Matinee\Http\ResponseSink;
 use Kanboard\Plugin\Matinee\Plugin;
 use Kanboard\Plugin\Matinee\Test\FakeTransport;
 
@@ -57,6 +58,16 @@ trait MatineeControllerHarness
     private MatineeLineLogger $log;
     private string $keyDir;
 
+    /** What the real ResponseSink of the last call() did, through recorder closures (C3e): nothing is sent. */
+    private ?int $sinkStatus = null;
+    /** @var list<string> header lines, in order */
+    private array $sinkHeaders = [];
+    /** @var list<string> header names removed, in order */
+    private array $sinkRemoved = [];
+    private string $sinkBody = '';
+    /** @var \Closure(): bool what connection_aborted() reports; a test sets it to simulate a client that went away */
+    private \Closure $sinkAborted;
+
     private function bootMatinee(): void
     {
         $driver = ['sqlite' => 'Sqlite', 'mysql' => 'Mysql', 'postgres' => 'Postgres'][DB_DRIVER];
@@ -80,6 +91,19 @@ trait MatineeControllerHarness
         $this->log = new MatineeLineLogger();
         unset($this->container['logger']);
         $this->container['logger'] = $this->log;
+        // The real ResponseSink, its PHP calls swapped for recorders (and no output buffer is ended under PHPUnit).
+        $this->sinkAborted = static fn (): bool => false;
+        $this->container['matineeResponseSink'] = $this->container->factory(fn (): ResponseSink => new ResponseSink(
+            status: function (int $code): void { $this->sinkStatus = $code; },
+            header: function (string $line): void { $this->sinkHeaders[] = $line; },
+            removeHeader: function (string $name): void { $this->sinkRemoved[] = $name; },
+            output: function (string $chunk): void { $this->sinkBody .= $chunk; },
+            aborted: fn (): bool => ($this->sinkAborted)(),
+            endBuffers: static function (): void {
+            },
+            flush: static function (): void {
+            },
+        ));
     }
 
     private function cleanKeyDir(): void
@@ -135,20 +159,22 @@ trait MatineeControllerHarness
 
     /**
      * Calls Controller::$action as the signed-in user. $get are the route params, $post the form (sent whatever
-     * $method says, so a GET can carry a body); with $csrf a fresh form token is added.
+     * $method says, so a GET can carry a body); with $csrf a fresh form token is added. $server adds server variables
+     * (an `HTTP_RANGE` header, say); $class swaps in a subclass of the controller (a spy).
      */
-    private function call(string $controller, string $action, array $get = [], array $post = [], bool $csrf = true, string $method = 'POST'): MatineeTestResponse
+    private function call(string $controller, string $action, array $get = [], array $post = [], bool $csrf = true, string $method = 'POST', array $server = [], ?string $class = null): MatineeTestResponse
     {
+        [$this->sinkStatus, $this->sinkHeaders, $this->sinkRemoved, $this->sinkBody] = [null, [], [], ''];
         if ($csrf) {
             $post['csrf_token'] = $this->container['token']->getCSRFToken();
         }
         unset($this->container['request']);
-        $this->container['request'] = new Request($this->container, ['REQUEST_METHOD' => $method],
+        $this->container['request'] = new Request($this->container, ['REQUEST_METHOD' => $method] + $server,
             $get + ['controller' => $controller, 'action' => $action, 'plugin' => 'Matinee'], $post, [], []);
         $response = new MatineeTestResponse($this->container);
         unset($this->container['response']);
         $this->container['response'] = $response;
-        $class = 'Kanboard\\Plugin\\Matinee\\Controller\\'.$controller;
+        $class ??= 'Kanboard\\Plugin\\Matinee\\Controller\\'.$controller;
         (new $class($this->container))->$action();
         return $response;
     }

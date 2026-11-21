@@ -21,6 +21,7 @@ class NoTokenLeakTest extends Base
     private const SRV = 'MatineeServerController';
     private const ADM = 'MatineeAdminController';
     private const BRW = 'MatineeBrowseController';
+    private const PLAY = 'MatineePlayController';
     private const ADMIN = 1;
 
     private int $owner;
@@ -209,6 +210,50 @@ class NoTokenLeakTest extends Base
         // The sweep looked at real content: sections, a listing and the art bytes.
         foreach (['TV Shows', 'Fake Show', "\xFF\xD8fake-jpeg"] as $shown) {
             $this->assertStringContainsString($shown, $all);
+        }
+        $this->assertNoTokenAnywhere();
+    }
+
+    /** P3 Task 10: every media response, streamed or refused: status, headers, body and log lines. */
+    public function testEveryMediaResponse(): void
+    {
+        $signer = $this->container['matineeRefSigner'];
+        $this->container->offsetUnset('matineeShutdown');
+        $this->container['matineeShutdown'] = $this->container->protect(static function (callable $fn): void {
+        });
+        $this->container['matineeServerModel']->setShared($this->server, $this->owner, true);
+        $friend = $this->user('fern');
+        $part = '/library/parts/5001/1700000000/file.mp3';
+        $item = '/library/metadata/3003';
+        $media = function (string $ref, ?string $range = null): MatineeTestResponse {
+            $r = $this->call(self::PLAY, 'media', ['ref' => $ref], [], false, 'GET', $range === null ? [] : ['HTTP_RANGE' => $range]);
+            $this->seen[] = 'sink '.$this->sinkStatus.' '.json_encode($this->sinkHeaders).' '.json_encode($this->sinkRemoved).' '.$this->sinkBody;
+            $this->seen[] = 'status '.$r->code();
+            return $r;
+        };
+
+        foreach ([$this->owner, $friend, $this->outsider] as $userId) {
+            $this->loginAs($userId);
+            $direct = $signer->sign($userId, $this->server, '3', 'media', $part, 28800);
+            $transcode = $signer->sign($userId, $this->server, '3', 'media', $item, 28800);
+            $this->capture(fn () => $media($direct, 'bytes=0-'), fn () => $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-9/10'], ['0123456789']));
+            $this->capture(fn () => $media($transcode), fn () => $this->t->streams(200, ['Content-Type' => 'audio/mpeg'], ['ID3-bytes']));
+            // Failures: an upstream 416, an error body carrying the token, a 401, a transport message, a bad type, an
+            // overlong window, and a bad ref.
+            $this->capture(fn () => $media($direct, 'bytes=100-'), fn () => $this->t->streams(416, ['Content-Range' => 'bytes */50'], [self::TOKEN]));
+            $this->capture(fn () => $media($direct), fn () => $this->t->streams(500, ['Content-Type' => 'text/html'], ['<html>'.self::TOKEN.'</html>']));
+            $this->capture(fn () => $media($transcode), fn () => $this->t->streams(401, ['Content-Type' => 'text/plain'], [self::TOKEN]));
+            $this->capture(fn () => $media($direct), fn () => $this->t->fail(new \RuntimeException('curl said '.self::TOKEN)));
+            $this->capture(fn () => $media($direct), fn () => $this->t->streams(206, ['Content-Type' => 'text/html', 'Content-Range' => 'bytes 0-9/10'], [self::TOKEN]));
+            $this->capture(fn () => $media($direct, 'bytes=0-9'), fn () => $this->t->streams(206, ['Content-Type' => 'audio/mpeg', 'Content-Range' => 'bytes 0-9/10'], ['0123456789', self::TOKEN]));
+            $this->capture(fn () => $media(self::TOKEN));
+        }
+
+        $this->assertSame(27, $this->pages);
+        $all = implode("\n", $this->seen);
+        // The sweep looked at real streams and real refusals.
+        foreach (['0123456789', 'ID3-bytes', 'sink 206', 'status 403', 'status 416', 'status 502', 'stream ended early'] as $shown) {
+            $this->assertStringContainsString($shown, $all."\n".implode("\n", $this->log->lines));
         }
         $this->assertNoTokenAnywhere();
     }

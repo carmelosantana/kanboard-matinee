@@ -48,6 +48,13 @@ abstract class MatineeBaseController extends BaseController
         return (int) $this->userSession->getId();
     }
 
+    /** A query param as a string; an array or nothing is ''. */
+    protected function param(string $name): string
+    {
+        $value = $this->request->getStringParam($name);
+        return is_string($value) ? $value : '';
+    }
+
     /** A posted field as a string; anything else (an array, nothing) is ''. */
     protected function field(string $name): string
     {

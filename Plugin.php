@@ -9,6 +9,7 @@ use Kanboard\Plugin\Matinee\Crypto\Subkeys;
 use Kanboard\Plugin\Matinee\Http\CurlTransport;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
 use Kanboard\Plugin\Matinee\Http\PlexTransport;
+use Kanboard\Plugin\Matinee\Http\ResponseSink;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 use Kanboard\Plugin\Matinee\Model\BrowseModel;
 use Kanboard\Plugin\Matinee\Model\MatineePolicy;
@@ -65,6 +66,8 @@ class Plugin extends Base
         // request dies mid-stream (C3f). Tests swap in a fixed clock and a recorder.
         $container['matineeClock'] = $container->protect(time(...));
         $container['matineeShutdown'] = $container->protect(register_shutdown_function(...));
+        // The sink a stream endpoint writes the browser's response through (C3e); tests wire one to recorders.
+        $container['matineeResponseSink'] = $container->factory(static fn (): ResponseSink => new ResponseSink());
 
         // ACL: any signed-in user reaches the server and browse pages (each action then checks the loaded row or the
         // signed ref); the admin pages are admins only (each action checks again). Anonymous users reach neither.
@@ -88,6 +91,7 @@ class Plugin extends Base
     public const ACL = [
         ['MatineeServerController', ['index', 'create', 'edit', 'save', 'show', 'verify', 'remove', 'share'], Role::APP_USER],
         ['MatineeBrowseController', ['index', 'server', 'listing', 'art'], Role::APP_USER],
+        ['MatineePlayController', ['media'], Role::APP_USER],
         ['MatineeAdminController', ['show', 'save', 'toggle'], Role::APP_ADMIN],
     ];
 
@@ -105,6 +109,7 @@ class Plugin extends Base
         ['matinee/browse/list', 'MatineeBrowseController', 'listing'],
         ['matinee/browse/:server_id', 'MatineeBrowseController', 'server'],
         ['matinee/art', 'MatineeBrowseController', 'art'],
+        ['matinee/media', 'MatineePlayController', 'media'],
         ['matinee/admin', 'MatineeAdminController', 'show'],
         ['matinee/admin/save', 'MatineeAdminController', 'save'],
         ['matinee/admin/servers/:server_id/toggle', 'MatineeAdminController', 'toggle'],
