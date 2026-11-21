@@ -84,6 +84,8 @@ class Plugin extends Base
         $this->dispatcher->addListener('app.bootstrap', [$this, 'sendReferrerPolicy']);
         // The lazy sweep (C4d): one signed-in Matinee request in ten stops up to two idle transcodes.
         $this->dispatcher->addListener('app.bootstrap', [$this, 'maybeSweep']);
+        // The player (C6a): only matinee/play widens the CSP and loads hls.js and player.js, before core copies the rules.
+        $this->dispatcher->addListener('app.bootstrap', [$this, 'playerRoute']);
         $this->hook->on('template:user:sidebar:actions', ['template' => 'Matinee:user/sidebar']);
         $this->hook->on('template:config:sidebar', ['template' => 'Matinee:config/sidebar']);
         // Browse is reached from the dashboard (ruling B5); its pages are styled by one stylesheet, no inline CSS.
@@ -129,6 +131,32 @@ class Plugin extends Base
     {
         if ($this->router->getPlugin() === 'Matinee') {
             $this->response->withHeader('Referrer-Policy', 'same-origin');
+        }
+    }
+
+    /** The player's scripts, in load order (C6a): hls.js first, so player.js finds window.Hls. */
+    public const PLAYER_JS = ['plugins/Matinee/Assets/vendor/hls.js/hls.min.js', 'plugins/Matinee/Assets/js/player.js'];
+
+    /** What the player route adds to core's CSP (C6a): media from blob: (MSE), and hls.js's blob: worker. */
+    public const PLAYER_CSP = ['media-src' => "'self' blob:", 'worker-src' => "'self' blob:"];
+
+    /**
+     * On app.bootstrap, only for MatineePlayController::play (C6a; S10): adds PLAYER_CSP to `cspRules`, which
+     * BootstrapMiddleware::sendHeaders() copies into the response right after this event, and hooks PLAYER_JS onto the
+     * layout. Every other key, script-src among them, is left as it is.
+     */
+    public function playerRoute(): void
+    {
+        if ($this->router->getPlugin() !== 'Matinee' || $this->router->getController() !== 'MatineePlayController' || $this->router->getAction() !== 'play') {
+            return;
+        }
+        $rules = $this->container['cspRules'];
+        foreach (self::PLAYER_CSP as $directive => $sources) {
+            $rules[$directive] = $sources;
+        }
+        $this->container['cspRules'] = $rules;
+        foreach (self::PLAYER_JS as $file) {
+            $this->hook->on('template:layout:js', ['template' => $file]);
         }
     }
 
