@@ -331,7 +331,7 @@ class BrowseModelTest extends Base
         $this->assertSame([null, null, 1, 1, null, null, null, null], array_column($items, 'index'));
         $this->assertSame([null, 22, 10, null, null, null, null, null], array_column($items, 'leafCount'));
         foreach ($items as $item) {
-            $this->assertSame(['title', 'subtitle', 'year', 'type', 'index', 'leafCount', 'browseRef', 'artRef'], array_keys($item));
+            $this->assertSame(['title', 'subtitle', 'year', 'type', 'index', 'leafCount', 'browseRef', 'artRef', 'playRef'], array_keys($item));
         }
 
         // Browse refs only for browse keys (the show and the season), art refs only for art thumbs; same s and server.
@@ -364,6 +364,44 @@ class BrowseModelTest extends Base
             array_column($this->t->requests, 'url')
         );
         $this->assertNoToken($page);
+    }
+
+    /** P3 C5b: movies and episodes get an hls play ref, tracks a media one, both naming the item; nothing else plays. */
+    public function testPlayableItemsCarryAPlayRefOfTheirKind(): void
+    {
+        $this->queueListing();
+        $items = $this->model()->listing($this->alice, $this->browseRef($this->alice), 0)['items'];
+
+        // movie, show, season, episode, artist, album, track, photo
+        $this->assertSame([true, false, false, true, false, false, true, false], array_map(fn ($i) => $i['playRef'] !== null, $items));
+        $this->assertSame(
+            ['sv' => $this->serverId, 's' => '1', 'k' => 'hls', 'r' => '/library/metadata/101'],
+            $this->verify($items[0]['playRef'], $this->alice, 'hls')
+        );
+        $this->assertSame('/library/metadata/104', $this->verify($items[3]['playRef'], $this->alice, 'hls')['r']);
+        $this->assertSame(
+            ['sv' => $this->serverId, 's' => '1', 'k' => 'media', 'r' => '/library/metadata/107'],
+            $this->verify($items[6]['playRef'], $this->alice, 'media')
+        );
+        // The wrong kind is refused: a movie's ref never plays as audio, a track's never as video.
+        $this->expectForbidden(fn () => $this->verify($items[0]['playRef'], $this->alice, 'media'), true);
+        $this->expectForbidden(fn () => $this->verify($items[6]['playRef'], $this->alice, 'hls'), true);
+
+        // Play refs last the media and hls TTL (8 h), not the browse hour.
+        $this->now += 28799;
+        $this->assertSame('1', $this->verify($items[6]['playRef'], $this->alice, 'media')['s']);
+        $this->now += 1;
+        $this->expectForbidden(fn () => $this->verify($items[6]['playRef'], $this->alice, 'media'), true);
+    }
+
+    public function testPlayRefsVerifyOnlyForTheSameUser(): void
+    {
+        $this->share();
+        $this->queueListing();
+        $items = $this->model()->listing($this->bob, $this->browseRef($this->bob), 0)['items'];
+        $this->assertSame('/library/metadata/101', $this->verify($items[0]['playRef'], $this->bob, 'hls')['r']);
+        $this->expectForbidden(fn () => $this->verify($items[0]['playRef'], $this->alice, 'hls'), true);
+        $this->expectForbidden(fn () => $this->verify($items[6]['playRef'], $this->alice, 'media'), true);
     }
 
     public function testChildRefsVerifyOnlyForTheSameUser(): void

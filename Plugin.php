@@ -12,6 +12,7 @@ use Kanboard\Plugin\Matinee\Http\PlexTransport;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 use Kanboard\Plugin\Matinee\Model\BrowseModel;
 use Kanboard\Plugin\Matinee\Model\MatineePolicy;
+use Kanboard\Plugin\Matinee\Model\PlaybackModel;
 use Kanboard\Plugin\Matinee\Model\ServerModel;
 use Kanboard\Plugin\Matinee\Model\Settings;
 use Kanboard\Plugin\Matinee\Model\TranscodeModel;
@@ -58,6 +59,12 @@ class Plugin extends Base
         $container['matineeBrowseModel'] = static fn ($c): BrowseModel => new BrowseModel($c);
         // Long-stream rows and the caps (P3 C4): DB only.
         $container['matineeTranscodeModel'] = static fn ($c): TranscodeModel => new TranscodeModel($c);
+        // Turns a verified media ref into a player page or a stream, re-authorizing on every use (spec §7).
+        $container['matineePlaybackModel'] = static fn ($c): PlaybackModel => new PlaybackModel($c);
+        // Seams for PlaybackModel: the clock, and the registrar of the safety net that stops a claimed row if the
+        // request dies mid-stream (C3f). Tests swap in a fixed clock and a recorder.
+        $container['matineeClock'] = $container->protect(time(...));
+        $container['matineeShutdown'] = $container->protect(register_shutdown_function(...));
 
         // ACL: any signed-in user reaches the server and browse pages (each action then checks the loaded row or the
         // signed ref); the admin pages are admins only (each action checks again). Anonymous users reach neither.

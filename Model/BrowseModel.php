@@ -23,7 +23,8 @@ use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
  *   the stage, the server id (when there is one) and a fixed reason code go to the log (never a message, URL or
  *   token). A key-store failure leaves the server's status alone.
  * - A listing re-fetches the live sections (B3); art does not (B2).
- * - Refs are minted for 3600 s and carry the server and section of the ref they came from.
+ * - Browse and art refs are minted for 3600 s; play refs (an hls ref for a movie or episode, a media ref for a track,
+ *   naming the item) for their kind's TTL (8 h). All carry the server and section of the ref they came from.
  */
 final class BrowseModel extends Base
 {
@@ -31,6 +32,9 @@ final class BrowseModel extends Base
     public const PAGE_SIZE = 60;
     public const MAX_START = 1000000;
     public const REF_TTL = RefSigner::TTLS['browse'];
+
+    /** P3 C5b: the play ref kind per item type; every other type has none. */
+    public const PLAY_KINDS = ['movie' => 'hls', 'episode' => 'hls', 'track' => 'media'];
 
     private const SUBTITLE_GLUE = ' · ';
 
@@ -51,7 +55,7 @@ final class BrowseModel extends Base
      *
      * @return array{server: array{id: int, name: string}, section: string, sectionTitle: string, total: int,
      *   start: int, pageSize: int, items: list<array{title: string, subtitle: string, year: ?int, type: string, index: ?int, leafCount: ?int,
-     *   browseRef: ?string, artRef: ?string}>}
+     *   browseRef: ?string, artRef: ?string, playRef: ?string}>}
      */
     public function listing(int $userId, string $ref, int $start): array
     {
@@ -94,6 +98,9 @@ final class BrowseModel extends Base
                 'leafCount' => $i['leafCount'],
                 'browseRef' => $mint('browse', $i['key']),
                 'artRef' => $mint('art', $i['thumb']),
+                'playRef' => isset(self::PLAY_KINDS[$i['type']])
+                    ? $signer->sign($userId, $p['sv'], $p['s'], self::PLAY_KINDS[$i['type']], PlexPaths::item($i['ratingKey']), RefSigner::TTLS[self::PLAY_KINDS[$i['type']]])
+                    : null,
             ];
         }
 
