@@ -981,6 +981,65 @@ class ServerModelTest extends Base
         $this->assertSame([['baseUrl' => self::BASE, 'machineId' => self::MACHINE, 'deviceName' => 'Matinee (alice)']], $this->factoryCalls);
     }
 
+    // ── the client names the viewer (C9, S14) ─────────────────────────────────
+
+    /** The device name on every request the fake recorded since the last reset of $this->t. */
+    private function deviceNames(): array
+    {
+        return array_map(fn (array $r): string => $r['headers']['X-Plex-Device-Name'], $this->t->requests);
+    }
+
+    public function testAViewerOtherThanTheOwnerIsWhomPlexSees(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $bob = $this->user('bob');
+        $this->t = new FakeTransport();
+        $this->factoryCalls = [];
+        $this->t->respond(200, $this->fixture('sections'));
+        $this->model()->clientFor($this->model()->get($id), $bob)->sections();
+        $this->assertSame(['Matinee (bob)'], $this->deviceNames());
+        $this->assertSame([['baseUrl' => self::BASE, 'machineId' => self::MACHINE, 'deviceName' => 'Matinee (bob)']], $this->factoryCalls);
+    }
+
+    public function testWithNoViewerPlexSeesTheOwner(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $this->user('bob');
+        $this->t = new FakeTransport();
+        $this->t->respond(200, $this->fixture('sections'));
+        $this->model()->clientFor($this->model()->get($id))->sections();
+        $this->t->respond(200, $this->fixture('sections'));
+        $this->model()->clientFor($this->model()->get($id), null)->sections();
+        $this->assertSame(['Matinee (alice)', 'Matinee (alice)'], $this->deviceNames());
+    }
+
+    public function testAnInactiveOrMissingViewerIsForbiddenWithNoRequest(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $bob = $this->user('bob');
+        $this->db()->table('users')->eq('id', $bob)->update(['is_active' => 0]);
+        $this->t = new FakeTransport();
+        $this->factoryCalls = [];
+        $server = $this->model()->get($id);
+
+        $this->expectForbidden(fn () => $this->model()->clientFor($server, $bob));
+        $this->expectForbidden(fn () => $this->model()->clientFor($server, $bob + 1000));
+        $this->assertSame([], $this->t->requests);
+        $this->assertSame([], $this->factoryCalls);
+    }
+
+    // The owner's own probe stays owner-named, even when an admin runs it.
+    public function testVerifyStillSendsTheOwnersName(): void
+    {
+        $id = $this->connect($this->user('alice'));
+        $admin = $this->user('root2', Role::APP_ADMIN);
+        $this->t = new FakeTransport();
+        $this->queueOk();
+        $this->assertSame('ok', $this->model()->verify($id, $admin));
+        $this->assertNotEmpty($this->t->requests);
+        $this->assertSame(array_fill(0, count($this->t->requests), 'Matinee (alice)'), $this->deviceNames());
+    }
+
     public function testAConcurrentResealIsNotOverwritten(): void
     {
         $alice = $this->user('alice');

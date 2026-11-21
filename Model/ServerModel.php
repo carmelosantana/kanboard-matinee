@@ -325,16 +325,19 @@ final class ServerModel extends Base
     }
 
     /**
-     * A client for the stored server, pinned to its machine id and named for its owner.
+     * A client for the stored server, pinned to its machine id and named for the viewer (C9, S14): with $viewerId,
+     * Plex sees `Matinee (<viewer>)` and an inactive or missing viewer is Forbidden before any token is opened;
+     * with none, it is named for the owner (the owner's own probe).
      * Does no actor check: callers authorize first. Never call inside a DB transaction (it may create the client id,
      * re-seal the token or record a status).
      */
-    public function clientFor(array $server): PlexClient
+    public function clientFor(array $server, ?int $viewerId = null): PlexClient
     {
         $row = $this->get((int) ($server['id'] ?? 0)) ?? throw new MatineeForbiddenException();
+        $viewer = $viewerId === null ? null : ($this->activeUser($viewerId) ?? throw new MatineeForbiddenException());
         $token = $this->tokenFor($row);
         $owner = $this->activeUser((int) $row['owner_user_id']) ?? throw new MatineeForbiddenException();
-        return $this->makeClient($row['base_url'], $token, $row['machine_id'], $owner);
+        return $this->makeClient($row['base_url'], $token, $row['machine_id'], $viewer ?? $owner);
     }
 
     // ── internals ────────────────────────────────────────────────────────────

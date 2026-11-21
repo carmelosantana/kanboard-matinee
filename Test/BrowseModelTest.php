@@ -421,6 +421,26 @@ class BrowseModelTest extends Base
         $this->assertNoToken($page);
     }
 
+    // C9: on a shared server Plex sees the viewer, never the owner, on every call a listing makes.
+    public function testASharedListingByANonOwnerSendsTheViewersName(): void
+    {
+        $this->share();
+        $this->t->respond(200, $this->fixture('sections'));
+        $this->model()->sections($this->bob, $this->serverId);
+        $this->queueListing();
+        $this->model()->listing($this->bob, $this->browseRef($this->bob), 0);
+        $this->queueJpeg();
+        $this->model()->art($this->bob, $this->artRef($this->bob), 144);
+        $names = array_map(fn (array $r): string => $r['headers']['X-Plex-Device-Name'], $this->t->requests);
+        $this->assertSame(array_fill(0, 4, 'Matinee (bob)'), $names);
+
+        $this->reset();
+        $this->queueListing();
+        $this->model()->listing($this->alice, $this->browseRef($this->alice), 0);
+        $names = array_map(fn (array $r): string => $r['headers']['X-Plex-Device-Name'], $this->t->requests);
+        $this->assertSame(['Matinee (alice)', 'Matinee (alice)'], $names);
+    }
+
     public function testARefMintedWhileSharedFailsOnceUnshared(): void
     {
         $this->share();

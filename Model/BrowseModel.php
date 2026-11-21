@@ -40,7 +40,7 @@ final class BrowseModel extends Base
         $server = $this->authorize($userId, $serverId);
         $signer = $this->signer(); // before any Plex call
         $out = [];
-        foreach ($this->live($server, 'sections') as $s) {
+        foreach ($this->live($server, $userId, 'sections') as $s) {
             $out[] = $s + ['ref' => $signer->sign($userId, $serverId, $s['key'], 'browse', PlexPaths::sectionAll($s['key']), self::REF_TTL)];
         }
         return $out;
@@ -61,7 +61,7 @@ final class BrowseModel extends Base
         $p = $this->verify($ref, $userId, 'browse');
         $server = $this->authorize($userId, $p['sv']);
 
-        $live = $this->live($server, 'sections');
+        $live = $this->live($server, $userId, 'sections');
         if (! $this->policy()->sectionAllowed($live, $p['s'])) {
             throw new MatineeForbiddenException();
         }
@@ -73,7 +73,7 @@ final class BrowseModel extends Base
                 break;
             }
         }
-        $page = $this->plex($server, 'children', fn (PlexClient $c) => $c->children($p['r'], $start, self::PAGE_SIZE));
+        $page = $this->plex($server, $userId, 'children', fn (PlexClient $c) => $c->children($p['r'], $start, self::PAGE_SIZE));
         if ($page['section'] === null || $page['section'] !== $p['s']) {
             throw new MatineeForbiddenException();
         }
@@ -120,7 +120,7 @@ final class BrowseModel extends Base
             throw new MatineeForbiddenException();
         }
         $server = $this->authorize($userId, $p['sv']);
-        return $this->plex($server, 'art', fn (PlexClient $c) => $c->art($p['r'], $size));
+        return $this->plex($server, $userId, 'art', fn (PlexClient $c) => $c->art($p['r'], $size));
     }
 
     // ── internals ────────────────────────────────────────────────────────────
@@ -146,22 +146,22 @@ final class BrowseModel extends Base
     }
 
     /** @return list<array{key: string, title: string, type: string}> */
-    private function live(array $server, string $stage): array
+    private function live(array $server, int $userId, string $stage): array
     {
-        return $this->plex($server, $stage, fn (PlexClient $c) => $c->sections());
+        return $this->plex($server, $userId, $stage, fn (PlexClient $c) => $c->sections());
     }
 
     /**
-     * Builds the client, then runs $call. Plex, URL-guard, token and key-store failures become the one connect
+     * Builds the client named for the viewer $userId (C9), then runs $call. Plex, URL-guard, token and key-store failures become the one connect
      * failure, logged by stage; Forbidden passes through. An InvalidArgumentException while building the client (a
      * stored base URL PlexClient refuses) is a connect failure too; one from $call (a path or size the client
      * refused, which the ref checks should already rule out) reads as Forbidden, never as a 500.
      */
-    private function plex(array $server, string $stage, callable $call): mixed
+    private function plex(array $server, int $userId, string $stage, callable $call): mixed
     {
         $at = 'client';
         try {
-            $client = $this->servers()->clientFor($server);
+            $client = $this->servers()->clientFor($server, $userId);
             $at = $stage;
             return $call($client);
         } catch (MatineeForbiddenException $e) {
