@@ -32,6 +32,9 @@
             <?php if ($item['year'] !== null): ?>
             <span class="matinee-year"><?= $this->text->e((string) $item['year']) ?></span>
             <?php endif ?>
+            <?php if ($item['playRef'] !== null): ?>
+            <a class="matinee-play" href="<?= $this->url->href('MatineePlayController', 'play', ['plugin' => 'Matinee', 'ref' => $item['playRef']]) ?>"><?= t('Play') ?></a>
+            <?php endif ?>
         </li>
         <?php endforeach ?>
     </ul>

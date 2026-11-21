@@ -288,6 +288,33 @@ class BrowseControllerTest extends Base
         $this->assertStringContainsString(self::CSS, $body);
     }
 
+    /** P3 Task 19: movies, episodes and tracks link to matinee/play by their play ref; nothing else does. */
+    public function testPlayableItemsLinkToThePlayerByTheirPlayRef(): void
+    {
+        $this->queueListing();
+        $body = $this->listing($this->browseRef($this->owner))->body();
+        $this->assertSame(3, preg_match_all('#<a class="matinee-play" href="[^"?]*\?controller=MatineePlayController&amp;action=play&amp;plugin=Matinee&amp;ref=([A-Za-z0-9_.-]+)"[^>]*>Play</a>#', $body, $m));
+        $this->assertSame(3, substr_count($body, '>Play</a>'));
+        $signer = $this->container['matineeRefSigner'];
+        $this->assertSame(['sv' => $this->server, 's' => '1', 'k' => 'hls', 'r' => '/library/metadata/101'], $signer->verify($m[1][0], $this->owner, 'hls'));
+        $this->assertSame('/library/metadata/104', $signer->verify($m[1][1], $this->owner, 'hls')['r']);
+        $this->assertSame('/library/metadata/107', $signer->verify($m[1][2], $this->owner, 'media')['r']);
+
+        $cards = [];
+        foreach (explode('<li class="matinee-card">', $body) as $card) {
+            if (preg_match('#<span class="matinee-title">([^<]*)</span>#', $card, $t)) {
+                $cards[$t[1]] = $card;
+            }
+        }
+        foreach (['Fake Movie One', 'Pilot', 'Fake Track'] as $title) {
+            $this->assertStringContainsString('>Play</a>', $cards[$title], $title);
+        }
+        foreach (['Fake Show', 'Season 1', 'Fake Album', 'Fake Photo'] as $title) {
+            $this->assertStringNotContainsString('matinee-play', $cards[$title], $title);
+        }
+        $this->assertStringNotContainsString('/library/', $body);
+    }
+
     public function testListingAccess(): void
     {
         // The shared user browses with their own ref.

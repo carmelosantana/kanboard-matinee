@@ -93,3 +93,8 @@ audio.matinee-player {
 .matinee-player-message {
     font-weight: 600;
 }
+
+.matinee-play {
+    align-self: flex-start;
+    font-weight: 600;
+}
