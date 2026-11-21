@@ -157,6 +157,8 @@ class PlexPathsTest extends TestCase
             'item, query' => ['/library/metadata/42?x', false, false],
             'item, art' => ['/library/metadata/42/thumb/1', false, false],
             'browse path' => ['/library/sections/2/all', false, false],
+            'part, arabic-indic digit' => ["/library/parts/\u{0661}/2/file.mp3", false, false],
+            'item, arabic-indic digit' => ["/library/metadata/\u{0661}", false, false],
             'empty' => ['', false, false],
         ];
     }
@@ -237,8 +239,28 @@ class PlexPathsTest extends TestCase
             'trailing newline' => ["$base/index.m3u8\n", false],
             'fragment' => ["$base/index.m3u8#x", false],
             'space' => ["$base/index .m3u8", false],
+            // Ruling: no query key that reads as an X-Plex header, so a viewer cannot relabel their own requests.
+            'client identifier key' => ["$base/00001.ts?X-Plex-Client-Identifier=evil", false],
+            'device name key' => ["$base/00001.ts?x=1&X-Plex-Device-Name=evil", false],
+            'lower-case underscored key' => ["$base/00001.ts?x_plex_product=a", false],
+            'upper-case run-together key' => ["$base/index.m3u8?XPLEXDEVICE=1", false],
+            'mixed separators key' => ["$base/index.m3u8?x-PLEX_-_platform=1", false],
+            'leading separator key' => ["$base/index.m3u8?_-x-plex=1", false],
+            'bare xplex key' => ["$base/index.m3u8?xplex", false],
+            'xplex key with no value' => ["$base/index.m3u8?a=1&X-Plex-Device-Name", false],
+            'xplex in a value only' => ["$base/00001.ts?x=X-Plex-Device-Name", true],
+            'plex key without x' => ["$base/00001.ts?plex-device=1", true],
+            'key ending in xplex' => ["$base/00001.ts?a-x-plex=1", true],
             'start path' => ['/video/:/transcode/universal/start.m3u8', false],
             'other prefix' => ['/library/parts/1/2/file.ts', false],
+            'token name in a value' => ["$base/00001.ts?x=XPlexToken", false],
+            'token name in the path' => ["$base/X-Plex-Token.ts", false],
+            '200-char path' => ['/video/:/transcode/universal/session/'.self::UUID.'/'.str_repeat('a', 200).'.ts', true],
+            '201-char path' => ['/video/:/transcode/universal/session/'.self::UUID.'/'.str_repeat('a', 201).'.ts', false],
+            'extension with a suffix' => ["$base/00001.tsx", false],
+            'm3u8 with a suffix' => ["$base/index.m3u8x", false],
+            'prefix before video' => ['/x/video/:/transcode/universal/session/'.self::UUID.'/base/index.m3u8', false],
+            'host before video' => ['evil.test/video/:/transcode/universal/session/'.self::UUID.'/base/index.m3u8', false],
             'empty' => ['', false],
         ];
     }
@@ -248,6 +270,24 @@ class PlexPathsTest extends TestCase
     {
         $this->assertSame($ok, PlexPaths::isHlsChild($u));
         $this->assertSame($ok ? self::UUID : null, PlexPaths::hlsSession($u));
+    }
+
+    /** @return array<string, array{string}> */
+    public static function nonV4Sessions(): array
+    {
+        return [
+            'v1' => ['0f8e2b7c-3d4a-1b5c-9d6e-7f8091a2b3c4'],
+            '36 dashes' => [str_repeat('-', 36)],
+        ];
+    }
+
+    // m5: S2's regex admits any 36-char [0-9a-f-] segment; hlsSession names only a v4 id Matinee could have minted.
+    /** @dataProvider nonV4Sessions */
+    public function testHlsSessionIsOnlyAV4Id(string $id): void
+    {
+        $u = '/video/:/transcode/universal/session/'.$id.'/base/index.m3u8';
+        $this->assertTrue(PlexPaths::isHlsChild($u));
+        $this->assertNull(PlexPaths::hlsSession($u));
     }
 
     public function testTheHlsPrefix(): void

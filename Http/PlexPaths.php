@@ -69,8 +69,8 @@ final class PlexPaths
     }
 
     /**
-     * An HLS child path (S2): the regex, none of the forbidden substrings, and nothing PlexScrub would strip. A
-     * token-bearing `u` is refused, never cleaned.
+     * An HLS child path (S2): the regex, none of the forbidden substrings, no X-Plex query key, and nothing PlexScrub
+     * would strip. A token-bearing `u` is refused, never cleaned.
      */
     public static function isHlsChild(string $u): bool
     {
@@ -82,6 +82,9 @@ final class PlexPaths
                 return false;
             }
         }
+        if (self::hasPlexHeaderKey($u)) {
+            return false;
+        }
         try {
             return PlexScrub::stripToken($u) === $u;
         } catch (PlexException) {
@@ -89,13 +92,33 @@ final class PlexPaths
         }
     }
 
-    /** The session uuid segment of an HLS child path, or null when it is not one. */
+    /** The session uuid of an HLS child path, or null when it is not one or the segment is not a v4 id Matinee mints. */
     public static function hlsSession(string $u): ?string
     {
         if (! self::isHlsChild($u)) {
             return null;
         }
-        return substr($u, strlen(self::HLS_PREFIX.'session/'), 36);
+        $s = substr($u, strlen(self::HLS_PREFIX.'session/'), 36);
+        return self::isSessionId($s) ? $s : null;
+    }
+
+    /**
+     * A query key that reads as an X-Plex header (lowercased, "-" and "_" removed, it starts with "xplex"): Plex takes
+     * those from the query too, so a viewer could relabel their own requests (X-Plex-Client-Identifier and the like).
+     */
+    private static function hasPlexHeaderKey(string $u): bool
+    {
+        $q = strpos($u, '?');
+        if ($q === false) {
+            return false;
+        }
+        foreach (explode('&', substr($u, $q + 1)) as $pair) {
+            $key = str_replace(['-', '_'], '', strtolower(explode('=', $pair, 2)[0]));
+            if (str_starts_with($key, 'xplex')) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static function isSessionId(string $id): bool
