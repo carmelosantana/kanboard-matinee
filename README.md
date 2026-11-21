@@ -51,7 +51,7 @@ SQLite, MySQL, Postgres and SQL Server.
 
 Open your profile, then **Plex servers → Add a Plex server**.
 
-- **Server address.** Type `https://<Plex IP>:32400` (for example `https://192.168.1.86:32400`) or your
+- **Server address.** Type `https://<Plex IP>:32400` (for example `https://192.168.1.10:32400`) or your
   plex.direct address. Plex listens on port 32400. The address is scheme, host and port only: no path, query or
   `user:pass@`.
 
