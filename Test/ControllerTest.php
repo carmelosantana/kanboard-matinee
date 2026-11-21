@@ -188,11 +188,16 @@ class ControllerTest extends Base
         foreach ([$this->owner, $this->user('mgr', Role::APP_MANAGER)] as $userId) {
             $this->loginAs($userId);
             $this->forbidden(fn () => $this->get(self::ADM, 'show'), 'show');
-            $this->forbidden(fn () => $this->call(self::ADM, 'save', [], ['matinee_connect_policy' => 'admins', 'matinee_attempt_limit' => '1', 'matinee_max_servers' => '1']), 'save');
+            $this->forbidden(fn () => $this->call(self::ADM, 'save', [], ['matinee_connect_policy' => 'admins', 'matinee_attempt_limit' => '1', 'matinee_max_servers' => '1', 'matinee_stream_cap_server' => '1', 'matinee_stream_cap_user' => '1', 'matinee_stream_cap_global' => '1']), 'save');
             $this->forbidden(fn () => $this->call(self::ADM, 'toggle', ['server_id' => $server], ['enabled' => '0']), 'toggle');
         }
         $this->assertSame(1, (int) $this->container['matineeServerModel']->get($server)['is_enabled']);
         $this->assertSame(Settings::POLICY_EVERYONE, (new Settings($this->container))->connectPolicy());
+        $settings = new Settings($this->container);
+        $this->assertSame([4, 2, 5], [$settings->streamCapServer(), $settings->streamCapUser(), $settings->streamCapGlobal()]);
+        foreach ([Settings::STREAM_CAP_SERVER_KEY, Settings::STREAM_CAP_USER_KEY, Settings::STREAM_CAP_GLOBAL_KEY] as $key) {
+            $this->assertSame('', (string) $this->container['configModel']->getOption($key), $key);
+        }
     }
 
     /** The live users row decides, not the session: a demoted or deactivated admin is refused without signing in again. */
@@ -606,7 +611,72 @@ class ControllerTest extends Base
             'matinee_allowed_hosts' => '',
             'matinee_attempt_limit' => '10',
             'matinee_max_servers' => '3',
+            'matinee_stream_cap_server' => '4',
+            'matinee_stream_cap_user' => '2',
+            'matinee_stream_cap_global' => '5',
         ]);
+    }
+
+    private const STREAM_CAPS_ERROR = 'The stream limits must be whole numbers from 1 to 1000.';
+
+    /** @return array{0: int, 1: int, 2: int} the stored caps, read the way TranscodeModel reads them */
+    private function streamCaps(): array
+    {
+        $this->container['memoryCache']->flush();
+        $s = new Settings($this->container);
+        return [$s->streamCapServer(), $s->streamCapUser(), $s->streamCapGlobal()];
+    }
+
+    public function testTheAdminPageShowsTheStreamCaps(): void
+    {
+        $this->loginAs(self::ADMIN);
+        $this->container['configModel']->save([
+            Settings::STREAM_CAP_SERVER_KEY => '7',
+            Settings::STREAM_CAP_USER_KEY => '3',
+            Settings::STREAM_CAP_GLOBAL_KEY => '9',
+        ]);
+        $this->container['memoryCache']->flush();
+        $page = $this->get(self::ADM, 'show')->body();
+
+        foreach ([
+            'matinee_stream_cap_server' => ['Long streams per server', '7'],
+            'matinee_stream_cap_user' => ['Long streams per user', '3'],
+            'matinee_stream_cap_global' => ['Long streams on this Kanboard', '9'],
+        ] as $name => [$label, $value]) {
+            $this->assertMatchesRegularExpression('#<label for="form-'.$name.'"[^>]*>'.preg_quote($label, '#').'</label>#', $page, $name);
+            $this->assertMatchesRegularExpression('#<input type="number" name="'.$name.'" id="form-'.$name.'" value="'.$value.'"[^>]*min="1"[^>]*max="1000"[^>]*required#', $page, $name);
+        }
+        $this->assertStringContainsString(
+            '<p class="form-help">Video sessions and transcoded music count. Keep the last limit under a quarter of PHP-FPM&#039;s pm.max_children.</p>',
+            $page
+        );
+    }
+
+    public function testAdminSaveStoresTheStreamCaps(): void
+    {
+        $this->loginAs(self::ADMIN);
+        $this->adminSave(['matinee_stream_cap_server' => '2', 'matinee_stream_cap_user' => '1', 'matinee_stream_cap_global' => '3']);
+        $this->assertSame('Settings saved successfully.', $this->flash('success'));
+        $this->assertSame([2, 1, 3], $this->streamCaps());
+        $this->assertSame('2', (string) $this->container['configModel']->getOption(Settings::STREAM_CAP_SERVER_KEY));
+    }
+
+    public function testABadStreamCapInAnyFieldFlashesTheErrorAndSavesNothing(): void
+    {
+        $this->loginAs(self::ADMIN);
+        $this->adminSave(['matinee_stream_cap_server' => '6', 'matinee_stream_cap_user' => '3', 'matinee_stream_cap_global' => '8']);
+        $this->assertSame([6, 3, 8], $this->streamCaps());
+
+        foreach (['matinee_stream_cap_server', 'matinee_stream_cap_user', 'matinee_stream_cap_global'] as $field) {
+            foreach (['0', '1001', '1.5', 'x'] as $bad) {
+                session_set('flash', []);
+                $this->adminSave([$field => $bad, 'matinee_attempt_limit' => '7']);
+                $this->assertSame(self::STREAM_CAPS_ERROR, $this->flash('failure'), "$field=$bad");
+                $this->assertNull($this->flash('success'), "$field=$bad");
+                $this->assertSame([6, 3, 8], $this->streamCaps(), "$field=$bad");
+                $this->assertSame(10, (new Settings($this->container))->attemptLimit(), "$field=$bad saves no other field either");
+            }
+        }
     }
 
     public function testAdminSettingsRejectAnInvalidTargetLineByNumberAndStoreValidOnes(): void

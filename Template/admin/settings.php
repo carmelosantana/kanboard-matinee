@@ -24,6 +24,19 @@
     </fieldset>
 
     <fieldset>
+        <legend><?= t('Streams') ?></legend>
+        <?= $this->form->label(t('Long streams per server'), 'matinee_stream_cap_server') ?>
+        <?= $this->form->number('matinee_stream_cap_server', $values, [], ['min="1"', 'max="1000"', 'required']) ?>
+
+        <?= $this->form->label(t('Long streams per user'), 'matinee_stream_cap_user') ?>
+        <?= $this->form->number('matinee_stream_cap_user', $values, [], ['min="1"', 'max="1000"', 'required']) ?>
+
+        <?= $this->form->label(t('Long streams on this Kanboard'), 'matinee_stream_cap_global') ?>
+        <?= $this->form->number('matinee_stream_cap_global', $values, [], ['min="1"', 'max="1000"', 'required']) ?>
+        <p class="form-help"><?= t('Video sessions and transcoded music count. Keep the last limit under a quarter of PHP-FPM\'s pm.max_children.') ?></p>
+    </fieldset>
+
+    <fieldset>
         <legend><?= t('Network') ?></legend>
         <?= $this->form->label(t('Private targets'), 'matinee_private_targets') ?>
         <?= $this->form->textarea('matinee_private_targets', $values, [], ['rows="4"']) ?>

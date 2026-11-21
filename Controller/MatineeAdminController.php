@@ -47,6 +47,9 @@ class MatineeAdminController extends MatineeBaseController
                 Settings::ALLOWED_HOSTS => (string) $this->configModel->getOption(Settings::ALLOWED_HOSTS),
                 Settings::ATTEMPT_LIMIT_KEY => (string) $settings->attemptLimit(),
                 Settings::MAX_SERVERS_KEY => (string) $settings->maxServers(),
+                Settings::STREAM_CAP_SERVER_KEY => (string) $settings->streamCapServer(),
+                Settings::STREAM_CAP_USER_KEY => (string) $settings->streamCapUser(),
+                Settings::STREAM_CAP_GLOBAL_KEY => (string) $settings->streamCapGlobal(),
             ],
             'policies' => [Settings::POLICY_EVERYONE => t('Every user'), Settings::POLICY_ADMINS => t('Administrators only')],
             'servers' => $rows,
@@ -81,6 +84,11 @@ class MatineeAdminController extends MatineeBaseController
         $hosts = $this->field(Settings::ALLOWED_HOSTS);
         $attempts = $this->field(Settings::ATTEMPT_LIMIT_KEY);
         $maxServers = $this->field(Settings::MAX_SERVERS_KEY);
+        $caps = [
+            Settings::STREAM_CAP_SERVER_KEY => $this->field(Settings::STREAM_CAP_SERVER_KEY),
+            Settings::STREAM_CAP_USER_KEY => $this->field(Settings::STREAM_CAP_USER_KEY),
+            Settings::STREAM_CAP_GLOBAL_KEY => $this->field(Settings::STREAM_CAP_GLOBAL_KEY),
+        ];
 
         $error = match (true) {
             ! in_array($policy, [Settings::POLICY_EVERYONE, Settings::POLICY_ADMINS], true) => t('Choose who may connect servers.'),
@@ -90,6 +98,7 @@ class MatineeAdminController extends MatineeBaseController
                 => t('Allowed hosts: line %d is not a host name, IP address or *.domain.', $line),
             ! self::validLimit($attempts) => t('The attempt limit must be a whole number from 1 to %d.', self::LIMIT_MAX),
             ! self::validLimit($maxServers) => t('The server limit must be a whole number from 1 to %d.', self::LIMIT_MAX),
+            array_filter($caps, [self::class, 'validLimit']) !== $caps => t('The stream limits must be whole numbers from 1 to %d.', self::LIMIT_MAX),
             default => null,
         };
         if ($error !== null) {
@@ -104,7 +113,7 @@ class MatineeAdminController extends MatineeBaseController
             Settings::ALLOWED_HOSTS => implode("\n", UrlGuard::parseHostList($hosts)),
             Settings::ATTEMPT_LIMIT_KEY => (string) (int) $attempts,
             Settings::MAX_SERVERS_KEY => (string) (int) $maxServers,
-        ]);
+        ] + array_map(static fn (string $cap): string => (string) (int) $cap, $caps));
         if ($saved) {
             $this->flash->success(t('Settings saved successfully.'));
         } else {
