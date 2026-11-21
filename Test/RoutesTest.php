@@ -1,5 +1,6 @@
 <?php
 require_once 'tests/units/Base.php';
+require_once __DIR__.'/support/ReleasesContainer.php';
 
 use KanboardTests\units\Base;
 use Kanboard\Plugin\Matinee\Plugin;
@@ -7,6 +8,8 @@ use Kanboard\Plugin\Matinee\Plugin;
 /** Matinee's clean URLs (plan Task 9), booted as in production: core's routes first, then the plugin's. */
 class RoutesTest extends Base
 {
+    use MatineeReleasesContainer;
+
     /** concrete path => [controller, action, route params] */
     private const ROUTES = [
         'matinee/servers' => ['MatineeServerController', 'index', []],
@@ -42,6 +45,12 @@ class RoutesTest extends Base
             $this->container['route']->addRoute($path, $controller, $action);
         }
         (new Plugin($this->container))->initialize();
+    }
+
+    protected function tearDown(): void
+    {
+        parent::tearDown();
+        $this->releaseContainer();
     }
 
     public function testEveryPathReachesItsActionAndEveryActionHasOnePath(): void

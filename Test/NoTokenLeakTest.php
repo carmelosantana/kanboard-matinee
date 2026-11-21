@@ -84,6 +84,21 @@ class NoTokenLeakTest extends Base
         }
     }
 
+    /**
+     * m6: no Plex address either: the host and the port appear in no body, header or log line, in any spelling a
+     * browser decodes. A Plex path (not its address) may travel inside a proxy URL's url-encoded `u`.
+     */
+    private function assertNoPlexAddressAnywhere(): void
+    {
+        $decode = fn (string $s): string => rawurldecode(html_entity_decode($s, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+        foreach (array_merge($this->seen, $this->log->lines) as $i => $text) {
+            foreach ([$text, $decode($text), stripslashes($text)] as $form) {
+                $this->assertStringNotContainsStringIgnoringCase('plex.example.test', $form, 'output #'.$i);
+                $this->assertStringNotContainsString(':32400', $form, 'output #'.$i);
+            }
+        }
+    }
+
     /** @return list<array{0: string, 1: string, 2: array}> every GET page */
     private function pages(): array
     {
@@ -292,6 +307,7 @@ class NoTokenLeakTest extends Base
             $this->assertStringContainsString($shown, $all);
         }
         $this->assertNoTokenAnywhere();
+        $this->assertNoPlexAddressAnywhere();
     }
 
     /** P3 Task 15: every hls start, proxy, ping and stop response, served or refused: status, headers, body and log. */
@@ -352,6 +368,7 @@ class NoTokenLeakTest extends Base
             $this->assertStringContainsString($shown, $all);
         }
         $this->assertNoTokenAnywhere();
+        $this->assertNoPlexAddressAnywhere();
     }
 
     public function testRateLimitAndServerLimit(): void

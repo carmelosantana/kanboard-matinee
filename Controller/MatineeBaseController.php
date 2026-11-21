@@ -12,8 +12,8 @@ use Pimple\Container;
 
 /**
  * What every Matinee page shares: `Referrer-Policy: same-origin` on every response (§11 S9), set before any check so a
- * refusal carries it too (Plugin::sendReferrerPolicy covers the refusals core makes before a controller exists);
- * POST-and-CSRF for every state change; and the fixed, translated text for model failures.
+ * refusal carries it too (Plugin::sendReferrerPolicy covers the refusals core makes before a controller exists); the
+ * lazy sweep's dice (C4d); POST-and-CSRF for every state change; and the fixed, translated text for model failures.
  * Nothing a model throws is shown: its message is a key, mapped here to one fixed sentence.
  */
 abstract class MatineeBaseController extends BaseController
@@ -25,6 +25,31 @@ abstract class MatineeBaseController extends BaseController
         // Without sodium or curl the plugin registers no routes, but ?controller=…&plugin=Matinee still reaches here.
         if (! static::supported()) {
             throw new AccessForbiddenException();
+        }
+        $this->maybeSweep();
+    }
+
+    /** The frequent, latency-sensitive actions the sweep never delays (C4d), lowercased. */
+    public const SWEEP_SKIPS = ['media', 'hlsstart', 'hlsproxy', 'hlsping', 'keepalive'];
+
+    /** Logged when a sweep fails: the exception's short class name only, never its message. */
+    public const SWEEP_FAILED_LOG = 'Matinee: sweep failed (%s)';
+
+    /**
+     * The lazy sweep (C4d): rolls PlaybackModel::maybeSweep()'s dice for a signed-in user, unless the action is one of
+     * SWEEP_SKIPS. Core builds a controller only after every middleware (authentication, 2FA, the ACL) has passed and
+     * the class exists, so nothing else can roll. The router keeps the action as typed and PHP dispatches it in any
+     * case, so it is compared lowercased. A failure is logged and swallowed: a sweep never breaks a page.
+     */
+    private function maybeSweep(): void
+    {
+        if (! $this->userSession->isLogged() || in_array(strtolower($this->router->getAction()), self::SWEEP_SKIPS, true)) {
+            return;
+        }
+        try {
+            $this->container['matineePlaybackModel']->maybeSweep();
+        } catch (\Throwable $e) {
+            $this->logger->warning(sprintf(self::SWEEP_FAILED_LOG, (new \ReflectionClass($e))->getShortName()));
         }
     }
 

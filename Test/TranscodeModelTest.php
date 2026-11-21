@@ -1,5 +1,6 @@
 <?php
 require_once 'tests/units/Base.php';
+require_once __DIR__.'/support/ReleasesContainer.php';
 
 use KanboardTests\units\Base;
 use Kanboard\Model\UserModel;
@@ -11,6 +12,8 @@ use Kanboard\Plugin\Matinee\Plugin;
 /** P3 C4: the stream caps, the lock row, the lookups and the housekeeping of matinee_transcodes; and the cap settings. */
 class TranscodeModelTest extends Base
 {
+    use MatineeReleasesContainer;
+
     private const UUID = '/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/';
     private const NOW = 1_800_000_000;
     private const LOCK_LINE = 'error Matinee: streams lock unavailable';
@@ -41,6 +44,12 @@ class TranscodeModelTest extends Base
             }
         };
         $this->container['logger'] = $this->log;
+    }
+
+    protected function tearDown(): void
+    {
+        parent::tearDown();
+        $this->releaseContainer();
     }
 
     private function db(): \PicoDb\Database

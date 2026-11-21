@@ -8,6 +8,10 @@ use Kanboard\Core\Security\Role;
 use Kanboard\Plugin\Matinee\Controller\MatineePlayController;
 use Kanboard\Plugin\Matinee\Crypto\RefSigner;
 use Kanboard\Plugin\Matinee\Crypto\Subkeys;
+use Kanboard\Plugin\Matinee\Model\MatineeBusyException;
+use Kanboard\Plugin\Matinee\Model\MatineeConnectException;
+use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
+use Kanboard\Plugin\Matinee\Model\MatineeRangeException;
 use Kanboard\Plugin\Matinee\Model\TranscodeModel;
 
 /** Counts closeSession() instead of ending a session (C3d), and records the seams in the order they run. */
@@ -684,6 +688,64 @@ class PlayControllerTest extends Base
         $this->assertArrayNotHasKey('Cache-Control', $r->headers());
     }
 
+    /**
+     * C3g, the guard itself: a model that opens the sink and then refuses (it doesn't today, so a double stands in)
+     * gets nothing more from Kanboard's response: no refusal status and no refusal header.
+     */
+    public function testARefusalAfterTheSinkOpenedSendsNothingMore(): void
+    {
+        $sink = $this->container->raw('matineeResponseSink');
+        $this->container->offsetUnset('matineeResponseSink');
+        $shared = null;
+        // One sink per call, so the double opens the one the controller holds.
+        $this->container['matineeResponseSink'] = $this->container->factory(function ($c) use ($sink, &$shared) {
+            return $shared ??= $sink($c);
+        });
+        $double = new class {
+            public ?\Throwable $throw = null;
+            public ?\Closure $sink = null;
+            private function openThenThrow(): never
+            {
+                ($this->sink)()->open(200, ['content-type' => 'video/mp2t']);
+                throw $this->throw;
+            }
+            public function hlsMaster(int $userId, string $ref, string $session, \Closure $proxyUrl, \Closure $onAuthorized): string
+            {
+                $this->openThenThrow();
+            }
+            public function hlsChild(int $userId, string $ref, string $u, object $sink, \Closure $proxyUrl, \Closure $onAuthorized): ?string
+            {
+                $this->openThenThrow();
+            }
+            public function maybeSweep(): void
+            {
+            }
+        };
+        $double->sink = fn () => $this->container['matineeResponseSink'];
+        $this->container->offsetUnset('matineePlaybackModel');
+        $this->container['matineePlaybackModel'] = $double;
+
+        $refusals = [
+            'forbidden' => new MatineeForbiddenException(),
+            'busy' => new MatineeBusyException(),
+            'range' => new MatineeRangeException(50),
+            'connect' => new MatineeConnectException(),
+        ];
+        foreach ($refusals as $label => $e) {
+            foreach (['start' => fn () => $this->hlsStart('ref', 'session'), 'proxy' => fn () => $this->hlsProxy('ref', 'u')] as $action => $request) {
+                $shared = null;
+                $double->throw = $e;
+                $r = $request();
+                $this->assertSame(200, $this->sinkStatus, "$action $label");
+                $this->assertSame(200, $r->code(), "$action $label");
+                $this->assertSame('', $r->body(), "$action $label");
+                foreach (['Cache-Control', 'Retry-After', 'Content-Range', 'X-Content-Type-Options'] as $header) {
+                    $this->assertArrayNotHasKey($header, $r->headers(), "$action $label $header");
+                }
+            }
+        }
+    }
+
     // ── ping and stop (C2g, C5d, C6b) ────────────────────────────────────────
 
     public function testPingAnswers204AndRefreshesTheRow(): void
@@ -777,7 +839,7 @@ class PlayControllerTest extends Base
         $this->assertSame(1, (int) $this->row($id)['stopped']);
     }
 
-    // ── the 1-in-10 sweep listener (C4d) ─────────────────────────────────────
+    // ── the 1-in-10 sweep (C4d), rolled when a Matinee controller is built ────
 
     private int $rolls = 0;
 
@@ -798,60 +860,119 @@ class PlayControllerTest extends Base
         return $id;
     }
 
-    /** Routes a request to $controller::$action as the router would, then fires app.bootstrap. */
-    private function bootstrap(string $controller, string $action, string $plugin = 'Matinee'): void
+    /**
+     * A GET to $controller::$action through core's Runner (sessions aside), as production serves it: app.bootstrap,
+     * then authentication, 2FA and the ACL, and only then the controller.
+     */
+    private function serve(string $controller, string $action, string $plugin = 'Matinee'): MatineeTestResponse
     {
-        unset($this->container['request']);
+        unset($this->container['sessionManager'], $this->container['request'], $this->container['response']);
+        $this->container['sessionManager'] = new class($this->container) extends \Kanboard\Core\Session\SessionManager {
+            public function open() {}
+        };
         $this->container['request'] = new \Kanboard\Core\Http\Request($this->container, ['REQUEST_METHOD' => 'GET'],
             ['controller' => $controller, 'action' => $action, 'plugin' => $plugin], [], [], []);
-        unset($this->container['response']);
-        $this->container['response'] = new MatineeTestResponse($this->container);
+        $this->container['response'] = $response = new MatineeTestResponse($this->container);
         $this->container['router']->dispatch();
-        $this->container['dispatcher']->dispatch(new \Symfony\Contracts\EventDispatcher\Event(), 'app.bootstrap');
+        (new \Kanboard\Core\Controller\Runner($this->container))->execute();
+        return $response;
     }
 
-    public function testASignedInMatineeRequestRollsTheDiceAndSweeps(): void
+    public function testASignedInMatineePageRollsTheDiceAndSweeps(): void
     {
         $id = $this->stubDice(true);
-        $this->bootstrap('MatineeBrowseController', 'index');
+        $r = $this->serve('MatineeBrowseController', 'index');
+        $this->assertSame(200, $r->code());
         $this->assertSame(1, $this->rolls);
         $this->assertSame(1, (int) $this->row($id)['stopped']);
         $this->assertSame([], $this->t->requests);
     }
 
-    public function testTheSweepSkipsAnonymousStreamingAndOtherRequests(): void
+    /** m1, m7: the frequent actions never roll, in any case PHP's method dispatch accepts. */
+    public function testTheSkippedActionsNeverRollInAnyCase(): void
     {
         $id = $this->stubDice(true);
-        foreach ([
-            [self::PLAY, 'media', 'Matinee'],
-            [self::PLAY, 'hlsProxy', 'Matinee'],
-            [self::PLAY, 'hlsPing', 'Matinee'],
-            [self::PLAY, 'keepalive', 'Matinee'],
-            ['DashboardController', 'show', ''],
-        ] as [$controller, $action, $plugin]) {
-            $this->bootstrap($controller, $action, $plugin);
-            $this->assertSame(0, $this->rolls, "$controller::$action");
+        foreach (['media', 'Media', 'MEDIA', 'hlsProxy', 'HLSPROXY', 'hlsproxy', 'hlsPing', 'HLSPING', 'keepalive',
+            'KeepAlive', 'hlsStart', 'HLSSTART', 'hlsstart'] as $action) {
+            $this->serve(self::PLAY, $action);
+            $this->assertSame(0, $this->rolls, $action);
         }
-        session_set('user', []);
-        $this->bootstrap('MatineeBrowseController', 'index');
-        $this->assertSame(0, $this->rolls, 'anonymous');
         $this->assertSame(0, (int) $this->row($id)['stopped']);
 
-        // Start and stop are not skipped.
-        $this->loginAs($this->owner);
-        $this->bootstrap(self::PLAY, 'hlsStart');
-        $this->bootstrap(self::PLAY, 'hlsStop');
-        $this->assertSame(2, $this->rolls);
+        // Stop, the player page and the browse pages are not skipped.
+        foreach (['hlsStop', 'HLSSTOP'] as $action) {
+            $this->serve(self::PLAY, $action);
+        }
+        $this->serve('MatineeBrowseController', 'INDEX');
+        $this->assertSame(3, $this->rolls);
     }
 
-    public function testAThrowingSweepNeverBreaksThePage(): void
+    /** m2: whatever stops a request before a Matinee controller is built stops the sweep too. */
+    public function testNoRollBeforeEveryMiddlewareHasPassed(): void
     {
-        $this->stubDice(new \RuntimeException('dice broke'));
-        $this->bootstrap('MatineeBrowseController', 'index');
+        $id = $this->stubDice(true);
+
+        // Anonymous: the authentication middleware redirects to the login page.
+        session_set('user', []);
+        $this->serve('MatineeBrowseController', 'index');
+        $this->assertSame(0, $this->rolls, 'anonymous');
+
+        // A session still waiting for its 2FA code: the post-authentication middleware redirects to the code page.
+        $pending = (int) $this->container['userModel']->create(['username' => 'tina', 'role' => Role::APP_USER, 'twofactor_activated' => 1, 'twofactor_secret' => 'JBSWY3DPEHPK3PXP']);
+        $this->container['userSession']->initialize($this->container['userModel']->getById($pending));
+        $this->assertTrue($this->container['userSession']->isLogged());
+        $r = $this->serve('MatineeBrowseController', 'index');
+        $this->assertStringContainsString('TwoFactorController', $r->headers()['Location'] ?? '', '2FA');
+        $this->assertSame(0, $this->rolls, '2FA pending');
+
+        // A disabled user's leftover session: the session check ends it.
+        $this->loginAs($this->friend);
+        $this->container['userModel']->disable($this->friend);
+        $r = $this->serve('MatineeBrowseController', 'index');
+        $this->assertStringContainsString('AuthController', $r->headers()['Location'] ?? '', 'disabled');
+        $this->assertSame(0, $this->rolls, 'disabled user');
+
+        // An unknown controller under plugin=Matinee: core finds no class to build.
+        $this->loginAs($this->owner);
+        try {
+            $this->serve('MatineeNopeController', 'index');
+            $this->fail('expected Controller not found');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('Controller not found', $e->getMessage());
+        }
+        $this->assertSame(0, $this->rolls, 'unknown controller');
+        $this->assertSame(0, (int) $this->row($id)['stopped']);
+
+        // The same signed-in owner on a real page does roll.
+        $this->serve('MatineeBrowseController', 'index');
         $this->assertSame(1, $this->rolls);
-        $r = $this->get('MatineeBrowseController', 'index');
+
+        // Built directly, past core: a controller that refuses for want of sodium or curl, or one with nobody signed
+        // in, still never rolls.
+        try {
+            new class($this->container) extends \Kanboard\Plugin\Matinee\Controller\MatineeBrowseController {
+                protected static function supported(): bool { return false; }
+            };
+            $this->fail('expected forbidden');
+        } catch (AccessForbiddenException) {
+        }
+        session_set('user', []);
+        new \Kanboard\Plugin\Matinee\Controller\MatineeBrowseController($this->container);
+        $this->assertSame(1, $this->rolls, 'unsupported or anonymous');
+    }
+
+    /** m4: a failed sweep never breaks the page, and leaves one log line naming only the exception's class. */
+    public function testAThrowingSweepNeverBreaksThePageAndLogsOneLine(): void
+    {
+        $this->assertSame('Matinee: sweep failed (%s)', \Kanboard\Plugin\Matinee\Controller\MatineeBaseController::SWEEP_FAILED_LOG);
+        // A namespaced class, so its short name and its full name differ.
+        $this->stubDice(new AccessForbiddenException('dice broke '.self::TOKEN));
+        $before = count($this->log->lines);
+        $r = $this->serve('MatineeBrowseController', 'index');
+        $this->assertSame(1, $this->rolls);
         $this->assertSame(200, $r->code());
         $this->assertStringContainsString('Living room', $r->body());
+        $this->assertSame(['warning Matinee: sweep failed (AccessForbiddenException)'], array_slice($this->log->lines, $before));
     }
 
     // ── the player page (Task 18; C2c, C5b, C6) ──────────────────────────────

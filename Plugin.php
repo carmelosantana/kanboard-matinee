@@ -66,7 +66,7 @@ class Plugin extends Base
         // request dies mid-stream (C3f). Tests swap in a fixed clock and a recorder.
         $container['matineeClock'] = $container->protect(time(...));
         $container['matineeShutdown'] = $container->protect(register_shutdown_function(...));
-        // The lazy sweep's dice (C4d): true on one request in ten. Tests stub it.
+        // The lazy sweep's dice (C4d), rolled as a Matinee controller is built: true on one request in ten. Tests stub it.
         $container['matineeSweepDice'] = $container->protect(static fn (): bool => random_int(1, 10) === 1);
         // The sink a stream endpoint writes the browser's response through (C3e); tests wire one to recorders.
         $container['matineeResponseSink'] = $container->factory(static fn (): ResponseSink => new ResponseSink());
@@ -82,8 +82,6 @@ class Plugin extends Base
         // Referrer-Policy on every request routed to Matinee, set on app.bootstrap (the router has dispatched by then)
         // so a refusal core's ACL middleware makes before any Matinee controller is built carries it too (§11 S9).
         $this->dispatcher->addListener('app.bootstrap', [$this, 'sendReferrerPolicy']);
-        // The lazy sweep (C4d): one signed-in Matinee request in ten stops up to two idle transcodes.
-        $this->dispatcher->addListener('app.bootstrap', [$this, 'maybeSweep']);
         // The player (C6a): only matinee/play widens the CSP and loads hls.js and player.js, before core copies the rules.
         $this->dispatcher->addListener('app.bootstrap', [$this, 'playerRoute']);
         $this->hook->on('template:user:sidebar:actions', ['template' => 'Matinee:user/sidebar']);
@@ -144,11 +142,13 @@ class Plugin extends Base
     /**
      * On app.bootstrap, only for MatineePlayController::play (C6a; S10): adds PLAYER_CSP to `cspRules`, which
      * BootstrapMiddleware::sendHeaders() copies into the response right after this event, and hooks PLAYER_JS onto the
-     * layout. Every other key, script-src among them, is left as it is.
+     * layout. Every other key, script-src among them, is left as it is. The router keeps names as typed and PHP
+     * dispatches them in any case, so they are compared lowercased.
      */
     public function playerRoute(): void
     {
-        if ($this->router->getPlugin() !== 'Matinee' || $this->router->getController() !== 'MatineePlayController' || $this->router->getAction() !== 'play') {
+        $route = array_map('strtolower', [$this->router->getPlugin(), $this->router->getController(), $this->router->getAction()]);
+        if ($route !== ['matinee', 'matineeplaycontroller', 'play']) {
             return;
         }
         $rules = $this->container['cspRules'];
@@ -158,28 +158,6 @@ class Plugin extends Base
         $this->container['cspRules'] = $rules;
         foreach (self::PLAYER_JS as $file) {
             $this->hook->on('template:layout:js', ['template' => $file]);
-        }
-    }
-
-    /** The frequent, latency-sensitive actions the sweep never delays (C4d). */
-    public const SWEEP_SKIPS = ['media', 'hlsProxy', 'hlsPing', 'keepalive'];
-
-    /**
-     * On app.bootstrap: for a signed-in user on a Matinee route other than SWEEP_SKIPS, roll the sweep's dice
-     * (PlaybackModel::maybeSweep). Every failure is swallowed: a sweep never breaks a page.
-     */
-    public function maybeSweep(): void
-    {
-        if ($this->router->getPlugin() !== 'Matinee' || ! $this->userSession->isLogged()) {
-            return;
-        }
-        if ($this->router->getController() === 'MatineePlayController' && in_array($this->router->getAction(), self::SWEEP_SKIPS, true)) {
-            return;
-        }
-        try {
-            $this->container['matineePlaybackModel']->maybeSweep();
-        } catch (\Throwable) {
-            // best-effort housekeeping
         }
     }
 

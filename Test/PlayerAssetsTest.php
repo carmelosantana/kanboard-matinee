@@ -13,6 +13,8 @@ use Symfony\Contracts\EventDispatcher\Event;
  */
 class PlayerAssetsTest extends Base
 {
+    use MatineeReleasesContainer;
+
     private const HLS = 'plugins/Matinee/Assets/vendor/hls.js/hls.min.js';
     private const PLAYER = 'plugins/Matinee/Assets/js/player.js';
     /** Core's default rules (ClassProvider), as a test run starts with them. */
@@ -31,8 +33,7 @@ class PlayerAssetsTest extends Base
     protected function tearDown(): void
     {
         parent::tearDown();
-        $this->dispatcher = null;
-        gc_collect_cycles();
+        $this->releaseContainer();
     }
 
     /** Routes a GET to $controller::$action as the router would, then fires app.bootstrap. */
@@ -99,6 +100,28 @@ class PlayerAssetsTest extends Base
             $this->bootstrap($controller, $action, $plugin);
             $this->assertSame(self::CORE, $this->container['cspRules'], "$controller::$action");
             $this->assertSame([], $this->js(), "$controller::$action");
+        }
+    }
+
+    /** m1: PHP dispatches methods and classes in any case, so the player route matches in any case too. */
+    public function testThePlayRouteMatchesInAnyCaseAndOnlyOnThePlayController(): void
+    {
+        $widened = self::CORE + ['media-src' => "'self' blob:", 'worker-src' => "'self' blob:"];
+        foreach ([
+            ['MatineePlayController', 'PLAY', 'Matinee', $widened],
+            ['MatineePlayController', 'Play', 'Matinee', $widened],
+            ['MATINEEPLAYCONTROLLER', 'play', 'Matinee', $widened],
+            ['matineeplaycontroller', 'pLaY', 'matinee', $widened],
+            ['MatineeBrowseController', 'play', 'Matinee', self::CORE],
+            ['MatineeBrowseController', 'PLAY', 'Matinee', self::CORE],
+            ['MatineePlayController', 'playx', 'Matinee', self::CORE],
+            ['MatineePlayController', 'PLAY', '', self::CORE],
+        ] as [$controller, $action, $plugin, $expected]) {
+            $this->container['cspRules'] = self::CORE;
+            $before = count($this->js());
+            $this->bootstrap($controller, $action, $plugin);
+            $this->assertSame($expected, $this->container['cspRules'], "$plugin $controller::$action");
+            $this->assertSame($expected === self::CORE ? 0 : 2, count($this->js()) - $before, "$plugin $controller::$action");
         }
     }
 

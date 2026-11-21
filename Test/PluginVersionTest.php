@@ -1,5 +1,6 @@
 <?php
 require_once 'tests/units/Base.php';
+require_once __DIR__.'/support/ReleasesContainer.php';
 
 use KanboardTests\units\Base;
 use Kanboard\Core\Plugin\Hook;
@@ -8,6 +9,14 @@ use Kanboard\Plugin\Matinee\Plugin;
 // Tag == plugin.json == getPluginVersion(): drift across the three is the most common release defect.
 class PluginVersionTest extends Base
 {
+    use MatineeReleasesContainer;
+
+    protected function tearDown(): void
+    {
+        parent::tearDown();
+        $this->releaseContainer();
+    }
+
     public function testVersionsAgree(): void
     {
         $json = json_decode(file_get_contents(__DIR__.'/../plugin.json'), true);

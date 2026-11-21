@@ -1,5 +1,6 @@
 <?php
 require_once 'tests/units/Base.php';
+require_once __DIR__.'/support/ReleasesContainer.php';
 require_once __DIR__.'/support/FakeTransport.php';
 
 use KanboardTests\units\Base;
@@ -42,6 +43,8 @@ class MatineeTestLogger extends \Psr\Log\AbstractLogger
  */
 class ServerModelTest extends Base
 {
+    use MatineeReleasesContainer;
+
     private const TOKEN = 'test-token-NOT-REAL-0000';
     private const TOKEN2 = 'test-token-NOT-REAL-1111';
     private const BASE = 'https://plex.example.test:32400';
@@ -96,6 +99,7 @@ class ServerModelTest extends Base
         }
         @rmdir($this->keyDir);
         parent::tearDown();
+        $this->releaseContainer();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

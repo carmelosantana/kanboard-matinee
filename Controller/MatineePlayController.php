@@ -238,7 +238,8 @@ class MatineePlayController extends MatineeBaseController
         return $this->container['matineeResponseSink'];
     }
 
-    private function playback(): PlaybackModel
+    /** @return PlaybackModel (an object, so a test can stand a double in) */
+    private function playback(): object
     {
         return $this->container['matineePlaybackModel'];
     }

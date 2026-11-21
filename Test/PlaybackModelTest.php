@@ -1,5 +1,6 @@
 <?php
 require_once 'tests/units/Base.php';
+require_once __DIR__.'/support/ReleasesContainer.php';
 require_once __DIR__.'/support/FakeTransport.php';
 require_once __DIR__.'/support/RecordingSink.php';
 
@@ -45,6 +46,8 @@ class PlaybackCallbackSink extends RecordingSink
  */
 class PlaybackModelTest extends Base
 {
+    use MatineeReleasesContainer;
+
     private const TOKEN = 'test-token-NOT-REAL-0000';
     private const BASE = 'https://plex.example.test:32400';
     private const CLIENT_ID = 'c0ffee00-1111-4222-8333-444455556666';
@@ -129,9 +132,7 @@ class PlaybackModelTest extends Base
         }
         @rmdir($this->keyDir);
         parent::tearDown();
-        // PHPUnit keeps every finished test object, and Base's dispatcher holds the whole container through the
-        // plugin's listeners: drop it so these ~100 tests don't push the suite past a 128 MiB memory_limit.
-        $this->dispatcher = null;
+        $this->releaseContainer();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

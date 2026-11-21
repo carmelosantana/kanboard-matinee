@@ -14,12 +14,14 @@ use Kanboard\Plugin\Matinee\Plugin;
 use Kanboard\Plugin\Matinee\Test\FakeTransport;
 
 require_once __DIR__.'/FakeTransport.php';
+require_once __DIR__.'/ReleasesContainer.php';
 
-/** Records what would be sent instead of calling header(). */
+/** Records what would be sent instead of calling header(). Core's Runner still sees it as sent. */
 class MatineeTestResponse extends Response
 {
     public function send()
     {
+        (new ReflectionProperty(Response::class, 'responseSent'))->setValue($this, true);
     }
 
     private function prop(string $name): mixed
@@ -47,6 +49,8 @@ class MatineeLineLogger extends \Psr\Log\AbstractLogger
 
 trait MatineeControllerHarness
 {
+    use MatineeReleasesContainer;
+
     private const TOKEN = 'test-token-NOT-REAL-0000';
     private const BASE = 'https://plex.example.test:32400';
     private const CLIENT_ID = 'c0ffee00-1111-4222-8333-444455556666';
@@ -88,6 +92,9 @@ trait MatineeControllerHarness
         );
         // Secure-name discovery goes through the current fake ($this->t may be replaced between requests).
         $this->container['matineeTransport'] = $this->container->factory(fn (): FakeTransport => $this->t);
+        // Every Matinee controller rolls the sweep's dice (C4d): they never come up unless a test says so.
+        $this->container->offsetUnset('matineeSweepDice');
+        $this->container['matineeSweepDice'] = $this->container->protect(static fn (): bool => false);
         $this->log = new MatineeLineLogger();
         unset($this->container['logger']);
         $this->container['logger'] = $this->log;
@@ -113,17 +120,6 @@ trait MatineeControllerHarness
         }
         @rmdir($this->keyDir);
         session_set('flash', []);
-    }
-
-    /**
-     * After parent::tearDown(): PHPUnit keeps every test object until the run ends, and core's Base keeps the
-     * dispatcher, whose listeners (Matinee's among them) hold the whole container. Dropping it frees the container, so
-     * a long suite stays under the 128 MiB PHP default (run-realdb-tests.sh).
-     */
-    private function releaseContainer(): void
-    {
-        $this->dispatcher = null;
-        gc_collect_cycles();
     }
 
     private function user(string $name, string $role = Role::APP_USER): int
@@ -185,6 +181,7 @@ trait MatineeControllerHarness
         $response = new MatineeTestResponse($this->container);
         unset($this->container['response']);
         $this->container['response'] = $response;
+        $this->container['router']->dispatch();
         $class ??= 'Kanboard\\Plugin\\Matinee\\Controller\\'.$controller;
         (new $class($this->container))->$action();
         return $response;
