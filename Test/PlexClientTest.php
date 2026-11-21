@@ -577,12 +577,17 @@ class PlexClientTest extends TestCase
             PlexException::tooLarge(),
             PlexException::tokenInUri(),
             PlexException::badType(),
+            PlexException::badRange(),
+            PlexException::badPlaylist(),
         ];
         $this->assertSame(
-            ['plex.unreachable', 'plex.http_error', 'plex.token_rejected', 'plex.bad_json', 'plex.server_changed', 'plex.too_large', 'plex.token_in_uri', 'plex.bad_type'],
+            [
+                'plex.unreachable', 'plex.http_error', 'plex.token_rejected', 'plex.bad_json', 'plex.server_changed',
+                'plex.too_large', 'plex.token_in_uri', 'plex.bad_type', 'plex.bad_range', 'plex.bad_playlist',
+            ],
             array_map(fn (PlexException $e) => $e->getMessage(), $all),
         );
-        $this->assertSame([0, 503, 401, 0, 0, 0, 0, 0], array_map(fn (PlexException $e) => $e->status, $all));
+        $this->assertSame([0, 503, 401, 0, 0, 0, 0, 0, 0, 0], array_map(fn (PlexException $e) => $e->status, $all));
     }
 
     // ── children() (spec §3, S9, S13; ruling B4) ─────────────────────────────
@@ -1923,7 +1928,7 @@ class PlexClientTest extends TestCase
     {
         return [
             'one digit'  => ['1', true],
-            '18 digits'  => [str_repeat('9', 18), true],
+            'the cap'    => ['67108864', true],
             '19 digits'  => [str_repeat('9', 19), false],
             'empty'      => ['', false],
             'negative'   => ['-1', false],
@@ -1963,6 +1968,24 @@ class PlexClientTest extends TestCase
         $this->t->streams(200, ['Content-Type' => 'video/mp2t'], [$chunk, $chunk, $chunk, $chunk, 'x']);
         $this->expectPlexError(fn () => $this->client()->hlsSegment(self::HLS_BASE . '/00000.ts', self::SESSION, $sink), PlexException::TOO_LARGE);
         $this->assertSame(67108864, $sink->bytes);
+    }
+
+    /** @dataProvider overCapLengths */
+    public function testASegmentDeclaredOver64MiBIsTooLargeBeforeTheSinkOpens(string $length): void
+    {
+        $sink = $this->sink();
+        $this->t->streams(200, ['Content-Type' => 'video/mp2t', 'Content-Length' => $length], ['UPSTREAM-BODY']);
+        $this->expectPlexError(fn () => $this->client()->hlsSegment(self::HLS_BASE . '/00000.ts', self::SESSION, $sink), PlexException::TOO_LARGE);
+        $this->assertSame(0, $sink->opens);
+        $this->assertSame('', $sink->body);
+    }
+
+    public function overCapLengths(): array
+    {
+        return [
+            'one byte over' => ['67108865'],
+            '18 digits'     => [str_repeat('9', 18)],
+        ];
     }
 
     public function testSegmentTransportFailuresAreFixed(): void

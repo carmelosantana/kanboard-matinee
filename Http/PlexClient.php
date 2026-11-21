@@ -482,9 +482,11 @@ final class PlexClient
             if (! in_array($type, $types, true)) {
                 throw PlexException::badType();
             }
-            $length = $headers['content-length'] ?? null;
-            return [200, ['content-type' => $type]
-                + (self::uint($length) === null ? [] : ['content-length' => (string) self::uint($length)])];
+            $length = self::uint($headers['content-length'] ?? null);
+            if ($length !== null && $length > self::MAX_SEGMENT_BYTES) {
+                throw PlexException::tooLarge();
+            }
+            return [200, ['content-type' => $type] + ($length === null ? [] : ['content-length' => (string) $length])];
         };
 
         $this->stream($u, [], [
