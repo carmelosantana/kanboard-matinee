@@ -205,6 +205,58 @@ class HlsPlaylistTest extends TestCase
         $this->assertSame([self::BASE . '/00000.ts', self::BASE . '/00001.ts', self::BASE . '/00002.ts?x=1'], $seen);
     }
 
+    // ── L1: a line is at most MAX_LINE_BYTES and a tag at most MAX_ATTRIBUTES attributes ───────────────────
+
+    public function testALineOfExactlyTheCapPasses(): void
+    {
+        $head = '#EXT-X-MEDIA:A="';
+        $line = $head . str_repeat('a', HlsPlaylist::MAX_LINE_BYTES - strlen($head) - 1) . '"';
+        $this->assertSame(8192, strlen($line));
+        $this->assertSame("#EXTM3U\n" . $line, self::rewrite("#EXTM3U\n" . $line));
+    }
+
+    /** @dataProvider overlongLines */
+    public function testALineOverTheCapFailsWhole(string $line): void
+    {
+        $this->assertSame(8193, strlen($line));
+        $this->assertBadPlaylist(fn () => self::rewrite("#EXTM3U\n" . $line . "\n"));
+    }
+
+    /** @return array<string, array{string}> */
+    public function overlongLines(): array
+    {
+        $head = '#EXT-X-MEDIA:A="';
+        return [
+            'attribute line' => [$head . str_repeat('a', 8192 - strlen($head)) . '"'],
+            'bare uri'       => ['00000.ts?' . str_repeat('a', 8193 - 9)],
+            'extinf title'   => ['#EXTINF:2.0,' . str_repeat('t', 8193 - 12)],
+        ];
+    }
+
+    public function testATagWithExactlyTheAttributeCapPasses(): void
+    {
+        $list = implode(',', array_map(static fn (int $i): string => 'X' . $i . '=1', range(1, HlsPlaylist::MAX_ATTRIBUTES)));
+        $this->assertSame(64, HlsPlaylist::MAX_ATTRIBUTES);
+        $this->assertSame("#EXTM3U\n#EXT-X-MEDIA:" . $list, self::rewrite("#EXTM3U\n#EXT-X-MEDIA:" . $list));
+    }
+
+    public function testATagOverTheAttributeCapFailsWhole(): void
+    {
+        $list = implode(',', array_map(static fn (int $i): string => 'X' . $i . '=1', range(1, HlsPlaylist::MAX_ATTRIBUTES + 1)));
+        $this->assertBadPlaylist(fn () => self::rewrite("#EXTM3U\n#EXT-X-MEDIA:" . $list));
+    }
+
+    /** The reviewer's probe: one 2 MiB attribute line of `A=,` used to allocate ~600 MB in preg_match_all. */
+    public function testAHugeAttributeLineFailsWithoutAllocatingMuch(): void
+    {
+        $body = "#EXTM3U\n#EXT-X-MEDIA:" . str_repeat('A=,', 666667);
+        $this->assertGreaterThan(2000000, strlen($body));
+        memory_reset_peak_usage();
+        $before = memory_get_usage();
+        $this->assertBadPlaylist(fn () => self::rewrite($body));
+        $this->assertLessThan(32 * 1024 * 1024, memory_get_peak_usage() - $before);
+    }
+
     /** @dataProvider badPlaylists */
     public function testAnUnsafePlaylistFailsWhole(string $body): void
     {

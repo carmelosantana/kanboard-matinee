@@ -18,7 +18,9 @@ namespace Kanboard\Plugin\Matinee\Http;
  *   kept, a relative one joins the directory of the upstream path (its query dropped). Dot segments are never
  *   resolved, so `..` stays in and PlexPaths refuses it. The result must be an HLS child of this very session.
  * - The builder's URL must be printable ASCII with no space and no `"`.
- * - At most MAX_URIS URIs and MAX_BYTES of output.
+ * - At most MAX_URIS URIs and MAX_BYTES of output. A line (the first aside, which must be `#EXTM3U`) is at most
+ *   MAX_LINE_BYTES, checked before any pattern runs on it, and a tag carries at most MAX_ATTRIBUTES attributes: an
+ *   unbounded attribute line once cost ~600 MB in preg_match_all's offset captures (L1).
  *
  * @package Kanboard\Plugin\Matinee\Http
  */
@@ -26,6 +28,9 @@ final class HlsPlaylist
 {
     public const MAX_URIS = 50000;
     public const MAX_BYTES = 16777216;
+    /** L1: the longest line, and the most attributes one tag may carry, before anything is matched. */
+    public const MAX_LINE_BYTES = 8192;
+    public const MAX_ATTRIBUTES = 64;
 
     private const LINE = '#\A[\x20-\x7e\t]*\z#';
     private const SCHEME = '#\A[A-Za-z][A-Za-z0-9+.-]*:#';
@@ -78,7 +83,7 @@ final class HlsPlaylist
         $last = count($lines) - 1;
         for ($i = 1; $i <= $last; $i++) {
             $line = self::chomp($lines[$i]);
-            if (preg_match(self::LINE, $line) !== 1) {
+            if (strlen($line) > self::MAX_LINE_BYTES || preg_match(self::LINE, $line) !== 1) {
                 throw PlexException::badPlaylist();
             }
             if ($line === '') {
@@ -135,7 +140,8 @@ final class HlsPlaylist
      */
     private static function attributes(string $list, \Closure $proxy): string
     {
-        if (preg_match_all(self::ATTR, $list, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE) < 1) {
+        $count = preg_match_all(self::ATTR, $list, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE);
+        if ($count < 1 || $count > self::MAX_ATTRIBUTES) {
             throw PlexException::badPlaylist();
         }
         $out = '';
