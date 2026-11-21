@@ -287,6 +287,17 @@ The key and the database together still decrypt every stored token, so delete bo
 backups you keep. Owners should also revoke their tokens in Plex: signing out of all devices, or changing the
 Plex password, invalidates existing tokens.
 
+## Vendored files
+
+Matinee ships one third-party file, copied unmodified from the npm tarball after a supply-chain check. Nothing
+from the package was installed or run. `Test/VendorTest.php` checks the file against the sha256 in this table.
+
+| File | Version | Source tarball | npm integrity | sha256 | Vendored |
+|---|---|---|---|---|---|
+| `Assets/vendor/hls.js/hls.min.js` | 1.7.1 | `https://registry.npmjs.org/hls.js/-/hls.js-1.7.1.tgz` | `sha512-DlzIkeBAS9IIQ432k3BUf3HlwbsR0+trB1i2lDdN2gUkNkrehFurh0/48M5c1/EjlDkdGng1gwZIpwyPxvdZ/g==` | `6cfad701a61fb8a99add5e84449e64661169b0652bf44ceb2a28465c8817b5f1` | 2026-11-21 |
+
+hls.js is licensed under Apache-2.0; its license is at `Assets/vendor/hls.js/LICENSE`.
+
 ## License
 
 MIT
