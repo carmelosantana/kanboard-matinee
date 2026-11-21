@@ -9,14 +9,23 @@ use Kanboard\Plugin\Matinee\Crypto\RefSigner;
 use Kanboard\Plugin\Matinee\Crypto\Subkeys;
 use Kanboard\Plugin\Matinee\Model\TranscodeModel;
 
-/** Counts closeSession() instead of ending a session (C3d). */
+/** Counts closeSession() instead of ending a session (C3d), and records the seams in the order they run. */
 class MatineePlayControllerSpy extends MatineePlayController
 {
     public static int $closed = 0;
 
+    /** @var list<string> */
+    public static array $events = [];
+
     protected function closeSession(): void
     {
         self::$closed++;
+        self::$events[] = 'close';
+    }
+
+    protected function ignoreUserAbort(): void
+    {
+        self::$events[] = 'ignore';
     }
 }
 
@@ -66,6 +75,7 @@ class PlayControllerTest extends Base
         $this->t = new \Kanboard\Plugin\Matinee\Test\FakeTransport();
         $this->loginAs($this->owner);
         MatineePlayControllerSpy::$closed = 0;
+        MatineePlayControllerSpy::$events = [];
     }
 
     protected function tearDown(): void
@@ -85,6 +95,18 @@ class PlayControllerTest extends Base
     private function media(mixed $ref, ?string $range = null): MatineeTestResponse
     {
         return $this->call(self::PLAY, 'media', ['ref' => $ref], [], false, 'GET', $range === null ? [] : ['HTTP_RANGE' => $range], MatineePlayControllerSpy::class);
+    }
+
+    /** matinee/media with another method, as the spy. */
+    private function mediaWith(string $method, mixed $ref): MatineeTestResponse
+    {
+        return $this->call(self::PLAY, 'media', ['ref' => $ref], [], false, $method, [], MatineePlayControllerSpy::class);
+    }
+
+    /** POST matinee/keepalive as the spy, with $token as the posted csrf_token (none when null). */
+    private function keepalive(?string $token, string $method = 'POST'): MatineeTestResponse
+    {
+        return $this->call(self::PLAY, 'keepalive', [], $token === null ? [] : ['csrf_token' => $token], false, $method, [], MatineePlayControllerSpy::class);
     }
 
     private function queuePart(array $chunks = ['0123456789'], string $range = 'bytes 0-9/10'): void
@@ -130,7 +152,7 @@ class PlayControllerTest extends Base
     {
         $map = $this->container['applicationAccessMap'];
         $auth = $this->container['applicationAuthorization'];
-        $this->assertSame(['media'], self::actions());
+        $this->assertSame(['keepalive', 'media'], self::actions());
         $rows = array_values(array_filter(\Kanboard\Plugin\Matinee\Plugin::ACL, fn (array $row): bool => $row[0] === self::PLAY));
         $this->assertCount(1, $rows);
         $this->assertSame([self::actions(), Role::APP_USER], [$rows[0][1], $rows[0][2]]);
@@ -146,6 +168,96 @@ class PlayControllerTest extends Base
         $src = (string) file_get_contents(__DIR__.'/../Controller/MatineePlayController.php');
         $this->assertMatchesRegularExpression('/function closeSession\(\): void\s*\{[^}]*session_abort\(\);/s', $src);
         $this->assertStringNotContainsString('session_write_close', $src);
+    }
+
+    public function testTheAbortSeamIsIgnoreUserAbortTrue(): void
+    {
+        $src = (string) file_get_contents(__DIR__.'/../Controller/MatineePlayController.php');
+        $this->assertMatchesRegularExpression('/function ignoreUserAbort\(\): void\s*\{\s*ignore_user_abort\(true\);\s*\}/s', $src);
+        $this->assertSame(1, substr_count($src, 'ignore_user_abort('), 'only the seam calls it');
+    }
+
+    /** m1, C3f: the abort seam runs before the model does anything (its first step resolves the ref signer). */
+    public function testIgnoreUserAbortRunsBeforeTheModel(): void
+    {
+        $signer = $this->container->raw('matineeRefSigner');
+        $this->container->offsetUnset('matineeRefSigner');
+        $this->container['matineeRefSigner'] = $this->container->factory(function ($c) use ($signer) {
+            MatineePlayControllerSpy::$events[] = 'model';
+            return $signer($c);
+        });
+        $ref = $this->ref($this->owner);
+        MatineePlayControllerSpy::$events = [];
+        $this->queuePart();
+        $this->media($ref);
+        $this->assertSame(['ignore', 'model', 'close'], MatineePlayControllerSpy::$events);
+
+        $this->loginAs($this->outsider);
+        $ref = $this->ref($this->outsider);
+        MatineePlayControllerSpy::$events = [];
+        $this->media($ref);
+        $this->assertSame(['ignore', 'model'], MatineePlayControllerSpy::$events, 'a refusal too');
+    }
+
+    // ── methods (m2) ─────────────────────────────────────────────────────────
+
+    /** media serves GET only: anything else is an empty 405 before the model runs (no claim, no Plex, no close). */
+    public function testMediaRefusesEveryOtherMethodWithAnEmpty405(): void
+    {
+        foreach (['HEAD', 'POST', 'PUT', 'OPTIONS'] as $method) {
+            foreach ([$this->ref($this->owner), $this->ref($this->owner, 'media', self::ITEM)] as $ref) {
+                MatineePlayControllerSpy::$events = [];
+                $r = $this->mediaWith($method, $ref);
+                $this->assertRefused(405, $r, $method);
+                $this->assertSame('GET', $r->headers()['Allow'] ?? null, $method);
+                $this->assertSame([], MatineePlayControllerSpy::$events, $method);
+            }
+        }
+        $this->assertSame([], $this->t->requests);
+        $this->assertSame(0, MatineePlayControllerSpy::$closed);
+        $this->assertSame(0, $this->container['db']->table(TranscodeModel::TABLE)->count());
+    }
+
+    // ── keepalive (M1) ───────────────────────────────────────────────────────
+
+    public function testKeepaliveWithTheReusableTokenIsAnEmpty204AndWritesTheSession(): void
+    {
+        $token = $this->container['token']->getReusableCSRFToken();
+        foreach ([1, 2] as $n) {
+            $r = $this->keepalive($token);
+            $this->assertSame(204, $r->code(), "call $n");
+            $this->assertSame('', $r->body(), "call $n");
+            $this->assertArrayNotHasKey('Content-Type', $r->headers());
+            $this->assertSame('no-store', $r->headers()['Cache-Control'] ?? null);
+        }
+        $this->assertSame(0, MatineePlayControllerSpy::$closed, 'the session is written normally');
+        $this->assertSame([], MatineePlayControllerSpy::$events);
+        $this->assertSame([], $this->t->requests);
+    }
+
+    public function testKeepaliveWithoutTheReusableTokenIsAnEmpty403(): void
+    {
+        $cases = [
+            'none'       => null,
+            'bad'        => 'not-a-token',
+            'single-use' => $this->container['token']->getCSRFToken(),
+        ];
+        foreach ($cases as $label => $token) {
+            $this->assertRefused(403, $this->keepalive($token), $label);
+        }
+        $token = $this->container['token']->getReusableCSRFToken();
+        session_set('user', []);
+        $this->assertRefused(403, $this->keepalive($token), 'signed out');
+    }
+
+    public function testKeepaliveRefusesEveryOtherMethodWithAnEmpty405(): void
+    {
+        $token = $this->container['token']->getReusableCSRFToken();
+        foreach (['GET', 'HEAD', 'PUT'] as $method) {
+            $r = $this->keepalive($token, $method);
+            $this->assertRefused(405, $r, $method);
+            $this->assertSame('POST', $r->headers()['Allow'] ?? null, $method);
+        }
     }
 
     // ── success ──────────────────────────────────────────────────────────────
@@ -169,11 +281,23 @@ class PlayControllerTest extends Base
             ], self::FIXED), $this->sinkHeaders);
             $this->assertSame(['Pragma', 'Expires', 'X-Powered-By'], $this->sinkRemoved);
             $this->assertSame('0123456789', $this->sinkBody);
+            $this->assertContains('Content-Length: '.strlen($this->sinkBody), $this->sinkHeaders);
             // Kanboard's response sent nothing of its own.
             $this->assertSame(200, $r->code());
             $this->assertSame('', $r->body());
             $this->assertSame(1, MatineePlayControllerSpy::$closed);
         }
+    }
+
+    /** H1: whatever Plex sends, the body is never longer than the Content-Length the browser was given. */
+    public function testTheBodyIsCutAtTheContentLength(): void
+    {
+        $this->queuePart([str_repeat('a', 1000)], 'bytes 0-499/5000');
+        $r = $this->media($this->ref($this->owner), 'bytes=0-999');
+        $this->assertContains('Content-Length: 500', $this->sinkHeaders);
+        $this->assertSame(500, strlen($this->sinkBody));
+        $this->assertSame('', $r->body());
+        $this->assertStringContainsString('stream ended early', implode("\n", $this->log->lines));
     }
 
     public function testTheRangeHeaderReachesPlex(): void

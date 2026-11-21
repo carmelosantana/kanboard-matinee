@@ -22,6 +22,7 @@ class RoutesTest extends Base
         'matinee/browse/7' => ['MatineeBrowseController', 'server', ['server_id' => '7']],
         'matinee/art' => ['MatineeBrowseController', 'art', []],
         'matinee/media' => ['MatineePlayController', 'media', []],
+        'matinee/keepalive' => ['MatineePlayController', 'keepalive', []],
         'matinee/admin' => ['MatineeAdminController', 'show', []],
         'matinee/admin/save' => ['MatineeAdminController', 'save', []],
         'matinee/admin/servers/7/toggle' => ['MatineeAdminController', 'toggle', ['server_id' => '7']],
