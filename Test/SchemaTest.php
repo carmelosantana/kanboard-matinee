@@ -153,6 +153,29 @@ class SchemaTest extends Base
         );
     }
 
+    public function testSeedingTheLockRowAgainChangesNothing(): void
+    {
+        $pdo = $this->db()->getConnection();
+        \Kanboard\Plugin\Matinee\Schema\seed_streams_lock($pdo);
+        \Kanboard\Plugin\Matinee\Schema\seed_streams_lock($pdo);
+        $this->assertSame(
+            [['name' => 'streams', 'n' => 0]],
+            array_map(fn ($r) => ['name' => $r['name'], 'n' => (int) $r['n']], $this->db()->table('matinee_locks')->findAll())
+        );
+    }
+
+    /** SQL Server is not in the test matrix: its seed is checked by reading it. */
+    public function testTheMssqlSeedIsGuarded(): void
+    {
+        $src = (string) file_get_contents(__DIR__.'/../Schema/Mssql.php');
+        $this->assertMatchesRegularExpression(
+            "/function seed_streams_lock\\(PDO \\\$pdo\\)\\s*\\{\\s*\\\$pdo->exec\\(\"IF NOT EXISTS \\(SELECT 1 FROM dbo\\.matinee_locks WHERE name = 'streams'\\)\\s+INSERT INTO dbo\\.matinee_locks \\(name, n\\) VALUES \\('streams', 0\\)\"\\);\\s*\\}/",
+            $src
+        );
+        $this->assertSame(1, substr_count($src, 'INSERT INTO dbo.matinee_locks'), 'the only insert is the guarded one');
+        $this->assertStringContainsString("seed_streams_lock(\$pdo);\n}", $src, 'version_3 seeds through it');
+    }
+
     public function testTranscodesStoreARowAndStoppedDefaultsToZero(): void
     {
         $alice = $this->user('alice');

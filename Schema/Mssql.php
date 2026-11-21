@@ -76,5 +76,11 @@ function version_3(PDO $pdo)
           , n int NOT NULL DEFAULT 0
         );
     ');
-    $pdo->exec("INSERT INTO dbo.matinee_locks (name, n) VALUES ('streams', 0)");
+    seed_streams_lock($pdo);
+}
+
+/** Seeds the `streams` lock row; running it again changes nothing. */
+function seed_streams_lock(PDO $pdo)
+{
+    $pdo->exec("IF NOT EXISTS (SELECT 1 FROM dbo.matinee_locks WHERE name = 'streams') INSERT INTO dbo.matinee_locks (name, n) VALUES ('streams', 0)");
 }

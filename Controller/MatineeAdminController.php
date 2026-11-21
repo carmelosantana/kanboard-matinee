@@ -16,9 +16,6 @@ use Kanboard\Plugin\Matinee\Model\Settings;
  */
 class MatineeAdminController extends MatineeBaseController
 {
-    /** The highest attempt limit or server cap the form accepts. */
-    private const LIMIT_MAX = 1000;
-
     public function show(): void
     {
         $this->assertAdmin();
@@ -96,9 +93,9 @@ class MatineeAdminController extends MatineeBaseController
                 => t('Private targets: line %d is not a host, IP address or CIDR range with an optional port.', $line),
             ($line = self::badLine($hosts, [UrlGuard::class, 'isValidHostEntry'])) !== null
                 => t('Allowed hosts: line %d is not a host name, IP address or *.domain.', $line),
-            ! self::validLimit($attempts) => t('The attempt limit must be a whole number from 1 to %d.', self::LIMIT_MAX),
-            ! self::validLimit($maxServers) => t('The server limit must be a whole number from 1 to %d.', self::LIMIT_MAX),
-            array_filter($caps, [self::class, 'validLimit']) !== $caps => t('The stream limits must be whole numbers from 1 to %d.', self::LIMIT_MAX),
+            ! self::validLimit($attempts) => t('The attempt limit must be a whole number from 1 to %d.', Settings::LIMIT_MAX),
+            ! self::validLimit($maxServers) => t('The server limit must be a whole number from 1 to %d.', Settings::LIMIT_MAX),
+            array_filter($caps, [self::class, 'validLimit']) !== $caps => t('The stream limits must be whole numbers from 1 to %d.', Settings::LIMIT_MAX),
             default => null,
         };
         if ($error !== null) {
@@ -152,7 +149,7 @@ class MatineeAdminController extends MatineeBaseController
 
     private static function validLimit(string $value): bool
     {
-        return ctype_digit($value) && strlen($value) <= 4 && (int) $value >= 1 && (int) $value <= self::LIMIT_MAX;
+        return ctype_digit($value) && strlen($value) <= 4 && (int) $value >= 1 && (int) $value <= Settings::LIMIT_MAX;
     }
 
     private function assertAdmin(): void

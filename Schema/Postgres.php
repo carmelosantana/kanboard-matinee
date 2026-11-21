@@ -63,5 +63,11 @@ function version_3(PDO $pdo)
         name VARCHAR(32) PRIMARY KEY,
         n INTEGER NOT NULL DEFAULT 0
     )');
-    $pdo->exec("INSERT INTO matinee_locks (name, n) VALUES ('streams', 0)");
+    seed_streams_lock($pdo);
+}
+
+/** Seeds the `streams` lock row; running it again changes nothing. */
+function seed_streams_lock(PDO $pdo)
+{
+    $pdo->exec("INSERT INTO matinee_locks (name, n) VALUES ('streams', 0) ON CONFLICT (name) DO NOTHING");
 }

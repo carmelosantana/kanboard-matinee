@@ -71,5 +71,11 @@ function version_3(PDO $pdo)
         n INT NOT NULL DEFAULT 0,
         PRIMARY KEY(name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci');
-    $pdo->exec("INSERT INTO matinee_locks (name, n) VALUES ('streams', 0)");
+    seed_streams_lock($pdo);
+}
+
+/** Seeds the `streams` lock row; running it again changes nothing. */
+function seed_streams_lock(PDO $pdo)
+{
+    $pdo->exec("INSERT IGNORE INTO matinee_locks (name, n) VALUES ('streams', 0)");
 }

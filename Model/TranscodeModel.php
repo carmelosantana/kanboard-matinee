@@ -10,9 +10,11 @@ use Pimple\Container;
  * DB only: no Plex calls here.
  *
  * - A row is active while stopped = 0 and last_seen_at >= now - ACTIVE_WINDOW. A stale row never blocks a claim.
- * - claim() checks the per-server, per-user and global caps (Settings) and inserts in one transaction. Its first
- *   statement is the UPDATE of the `streams` lock row, which serializes every claim: on MariaDB the InnoDB snapshot
- *   is then taken after the lock, so the counts see every claim committed before this one.
+ * - claim() checks the per-server, per-user and global caps (Settings) and inserts in one transaction of its own. Its
+ *   first data statement is the UPDATE of the `streams` lock row, which serializes every claim: on MariaDB the InnoDB
+ *   snapshot is then taken after the lock (on Postgres each statement takes its own), so the counts see every claim
+ *   committed before this one. The lock wait is bounded at LOCK_WAIT seconds; a wait that runs out is busy.
+ * - heartbeat() refreshes only an active row: a stale or stopped one is never revived.
  * - stop() is idempotent: only the call that flips the row returns true.
  */
 final class TranscodeModel extends Base
@@ -21,6 +23,10 @@ final class TranscodeModel extends Base
     public const LOCKS_TABLE = 'matinee_locks';
     public const LOCK_NAME = 'streams';
     public const ACTIVE_WINDOW = 120;
+    /** Seconds a claim waits for the lock row before it is busy. */
+    public const LOCK_WAIT = 5;
+    /** The fixed line logged when the lock row can't be taken; the SQL error itself is never logged. */
+    public const LOCK_FAILED_LOG = 'Matinee: streams lock unavailable';
     public const KINDS = ['hls', 'mp3'];
     public const RETENTION = 86400;
     public const SESSION_RE = '/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/';
@@ -40,17 +46,32 @@ final class TranscodeModel extends Base
      *
      * @throws MatineeBusyException a cap is reached, or the lock row is missing or could not be taken in time
      * @throws \InvalidArgumentException an unknown kind
+     * @throws \LogicException called inside an open transaction, whose commit or rollback claim() would take over
      */
     public function claim(int $userId, int $serverId, string $kind, int $now): string
     {
         if (! in_array($kind, self::KINDS, true)) {
             throw new \InvalidArgumentException('Unknown Matinee stream kind.');
         }
+        $pdo = $this->db->getConnection();
+        if ($pdo->inTransaction()) {
+            throw new \LogicException('Matinee: claim() needs a transaction of its own.');
+        }
         $settings = new Settings($this->container);
         $caps = [$settings->streamCapServer(), $settings->streamCapUser(), $settings->streamCapGlobal()];
+        $driver = $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
 
+        if ($driver === 'mysql') {
+            $pdo->exec('SET SESSION innodb_lock_wait_timeout = '.self::LOCK_WAIT);
+        } elseif ($driver === 'sqlsrv' || $driver === 'dblib') {
+            $pdo->exec('SET LOCK_TIMEOUT '.(self::LOCK_WAIT * 1000));
+        }
         $this->db->startTransaction();
         try {
+            if ($driver === 'pgsql') {
+                // SET LOCAL takes no snapshot, so the lock UPDATE stays the first data statement.
+                $pdo->exec("SET LOCAL lock_timeout = '".self::LOCK_WAIT."s'");
+            }
             try {
                 $locked = $this->db->execute(
                     'UPDATE '.self::LOCKS_TABLE.' SET n = n + 1 WHERE name = ?',
@@ -58,9 +79,10 @@ final class TranscodeModel extends Base
                 );
             } catch (\PicoDb\SQLException) {
                 // A lock wait timeout (or any failure to take the lock) reads as busy.
-                throw new MatineeBusyException();
+                $locked = false;
             }
             if ($locked === false || $locked->rowCount() !== 1) {
+                $this->logger->error(self::LOCK_FAILED_LOG);
                 throw new MatineeBusyException();
             }
 
@@ -108,9 +130,21 @@ final class TranscodeModel extends Base
         return $row ?: null;
     }
 
-    public function heartbeat(int $id, int $now): void
+    /**
+     * Refreshes an active row's last_seen_at; false when the row is unknown, stopped or stale (never revived, so a
+     * resumed player can't push a server past a cap someone else has since claimed). Callers treat false as ended.
+     */
+    public function heartbeat(int $id, int $now): bool
     {
-        $this->db->table(self::TABLE)->eq('id', $id)->update(['last_seen_at' => $now]);
+        $done = $this->db->execute(
+            'UPDATE '.self::TABLE.' SET last_seen_at = ? WHERE id = ? AND stopped = 0 AND last_seen_at >= ?',
+            [$now, $id, $now - self::ACTIVE_WINDOW]
+        );
+        if ($done !== false && $done->rowCount() === 1) {
+            return true;
+        }
+        // MySQL counts changed rows, not matched ones: a second beat in the same second changes nothing but is live.
+        return $this->db->table(self::TABLE)->eq('id', $id)->eq('stopped', 0)->eq('last_seen_at', $now)->exists();
     }
 
     /** Marks the row stopped; true only for the call that changed it. */

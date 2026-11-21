@@ -38,6 +38,8 @@ final class Settings extends Base
     public const STREAM_CAP_SERVER = 4;
     public const STREAM_CAP_USER = 2;
     public const STREAM_CAP_GLOBAL = 5;
+    /** The highest attempt limit, server cap or stream cap the admin form accepts; stream caps above it read as unset. */
+    public const LIMIT_MAX = 1000;
 
     public function connectPolicy(): string
     {
@@ -56,17 +58,17 @@ final class Settings extends Base
 
     public function streamCapServer(): int
     {
-        return $this->positiveInt(self::STREAM_CAP_SERVER_KEY, self::STREAM_CAP_SERVER);
+        return $this->positiveInt(self::STREAM_CAP_SERVER_KEY, self::STREAM_CAP_SERVER, self::LIMIT_MAX);
     }
 
     public function streamCapUser(): int
     {
-        return $this->positiveInt(self::STREAM_CAP_USER_KEY, self::STREAM_CAP_USER);
+        return $this->positiveInt(self::STREAM_CAP_USER_KEY, self::STREAM_CAP_USER, self::LIMIT_MAX);
     }
 
     public function streamCapGlobal(): int
     {
-        return $this->positiveInt(self::STREAM_CAP_GLOBAL_KEY, self::STREAM_CAP_GLOBAL);
+        return $this->positiveInt(self::STREAM_CAP_GLOBAL_KEY, self::STREAM_CAP_GLOBAL, self::LIMIT_MAX);
     }
 
     /** The per-install client id, or '' before ensureClientId() has run. Read-only: never writes. */
@@ -93,9 +95,13 @@ final class Settings extends Base
         return $this->clientId();
     }
 
-    private function positiveInt(string $key, int $default): int
+    /** The saved whole number from 1 to $max (unbounded when null), else $default. */
+    private function positiveInt(string $key, int $default, ?int $max = null): int
     {
         $raw = (string) $this->configModel->getOption($key);
-        return ctype_digit($raw) && (int) $raw >= 1 ? (int) $raw : $default;
+        if (! ctype_digit($raw) || (int) $raw < 1) {
+            return $default;
+        }
+        return $max !== null && (int) $raw > $max ? $default : (int) $raw;
     }
 }

@@ -13,9 +13,13 @@ class TranscodeModelTest extends Base
 {
     private const UUID = '/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/';
     private const NOW = 1_800_000_000;
+    private const LOCK_LINE = 'error Matinee: streams lock unavailable';
     private const TOKEN_ROW = ['token_nonce' => 'bm9uY2U=', 'token_ct' => 'Y3Q=', 'key_id' => 'k1'];
 
     private int $seq = 0;
+
+    /** Every line the model logs, as "level message". */
+    private \Psr\Log\AbstractLogger $log;
 
     protected function setUp(): void
     {
@@ -27,6 +31,16 @@ class TranscodeModelTest extends Base
         \Kanboard\Plugin\Matinee\Schema\version_2($pdo);
         \Kanboard\Plugin\Matinee\Schema\version_3($pdo);
         (new Plugin($this->container))->initialize();
+        $this->log = new class extends \Psr\Log\AbstractLogger {
+            /** @var list<string> */
+            public array $lines = [];
+
+            public function log($level, $message, array $context = []): void
+            {
+                $this->lines[] = $level.' '.$message.($context === [] ? '' : ' '.json_encode($context));
+            }
+        };
+        $this->container['logger'] = $this->log;
     }
 
     private function db(): \PicoDb\Database
@@ -140,6 +154,7 @@ class TranscodeModelTest extends Base
 
         $this->assertBusy(fn () => $this->model()->claim($u3, $a, 'hls', self::NOW));
         $this->assertMatchesRegularExpression(self::UUID, $this->model()->claim($u3, $b, 'hls', self::NOW));
+        $this->assertSame([], $this->log->lines, 'a reached cap is not a lock failure');
     }
 
     public function testPerUserCap(): void
@@ -218,16 +233,42 @@ class TranscodeModelTest extends Base
 
         $this->assertBusy(fn () => $this->model()->claim($alice, $a, 'hls', self::NOW));
         $this->assertSame(0, $this->rowCount());
+        $this->assertSame([self::LOCK_LINE], $this->log->lines);
+    }
+
+    public function testClaimRefusesToRunInsideAnOpenTransaction(): void
+    {
+        $alice = $this->user('alice');
+        $a = $this->server($alice);
+        $this->db()->startTransaction();
+        try {
+            $caught = null;
+            try {
+                $this->model()->claim($alice, $a, 'hls', self::NOW);
+            } catch (\Throwable $e) {
+                $caught = $e;
+            }
+            $this->assertNotNull($caught, 'claim() ran inside the caller\'s transaction');
+            $this->assertSame(\LogicException::class, get_class($caught));
+            $this->assertSame(0, $this->lockCount(), 'the lock row is untouched');
+            $this->assertSame(0, $this->rowCount());
+            $this->assertTrue($this->db()->getConnection()->inTransaction(), "the caller's transaction is left alone");
+        } finally {
+            $this->db()->cancelTransaction();
+        }
+        $this->assertSame(0, $this->lockCount());
     }
 
     /** A second connection to the same test database, outside PicoDb. */
     private function secondConnection(): PDO
     {
+        return new PDO(self::dsn(), DB_USERNAME, DB_PASSWORD, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    }
+
+    private static function dsn(): string
+    {
         $port = defined('DB_PORT') && DB_PORT ? ';port='.DB_PORT : '';
-        $dsn = DB_DRIVER === 'mysql'
-            ? 'mysql:host='.DB_HOSTNAME.$port.';dbname='.DB_NAME
-            : 'pgsql:host='.DB_HOSTNAME.$port.';dbname='.DB_NAME;
-        return new PDO($dsn, DB_USERNAME, DB_PASSWORD, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        return (DB_DRIVER === 'mysql' ? 'mysql' : 'pgsql').':host='.DB_HOSTNAME.$port.';dbname='.DB_NAME;
     }
 
     private function setLockWait(int $seconds): void
@@ -249,11 +290,15 @@ class TranscodeModelTest extends Base
         try {
             $other->beginTransaction();
             $this->assertSame(1, $other->exec("UPDATE matinee_locks SET n = n + 1 WHERE name = 'streams'"));
-            $this->setLockWait(1);
+            // A safety net only, so a regression fails in 20 s instead of hanging: claim() bounds its own wait at 5 s.
+            $this->setLockWait(20);
 
             $started = microtime(true);
             $this->assertBusy(fn () => $this->model()->claim($alice, $a, 'hls', self::NOW));
-            $this->assertGreaterThanOrEqual(0.9, microtime(true) - $started, 'the claim waited on the lock');
+            $waited = microtime(true) - $started;
+            $this->assertGreaterThanOrEqual(4.5, $waited, 'the claim waited on the lock');
+            $this->assertLessThanOrEqual(6.5, $waited, 'claim() bounds the lock wait at 5 s');
+            $this->assertSame([self::LOCK_LINE], $this->log->lines, 'the SQL error is not logged');
         } finally {
             $other->rollBack();
             $other = null;
@@ -262,13 +307,14 @@ class TranscodeModelTest extends Base
     }
 
     /**
-     * MariaDB's InnoDB takes a transaction's snapshot at its first plain read. The lock UPDATE is claim()'s first
-     * statement, so the counts run after the lock is granted and see the row B committed while A waited.
+     * MariaDB's InnoDB takes a transaction's snapshot at its first plain read, and Postgres (READ COMMITTED) takes one
+     * per statement. The lock UPDATE is claim()'s first data statement, so on both the counts run after the lock is
+     * granted and see the row B committed while A waited.
      */
     public function testCountsRunAfterTheLockIsTaken(): void
     {
-        if (DB_DRIVER !== 'mysql') {
-            $this->markTestSkipped('needs InnoDB snapshot semantics');
+        if (DB_DRIVER === 'sqlite') {
+            $this->markTestSkipped('needs a second server connection');
         }
         $owner = $this->user('owner');
         $a = $this->server($owner);
@@ -292,9 +338,8 @@ class TranscodeModelTest extends Base
             $b->commit();
             fwrite(STDOUT, "committed\n");
             PHP;
-        $port = defined('DB_PORT') && DB_PORT ? ';port='.DB_PORT : '';
         $env = [
-            'M_DSN' => 'mysql:host='.DB_HOSTNAME.$port.';dbname='.DB_NAME, 'M_USER' => DB_USERNAME, 'M_PASS' => (string) DB_PASSWORD,
+            'M_DSN' => self::dsn(), 'M_USER' => DB_USERNAME, 'M_PASS' => (string) DB_PASSWORD,
             'M_SERVER' => (string) $a, 'M_USER_ID' => (string) $u, 'M_NOW' => (string) self::NOW,
         ];
         $proc = proc_open([PHP_BINARY, '-r', $child], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, $env);
@@ -323,13 +368,15 @@ class TranscodeModelTest extends Base
         $taken = $this->row($a, $alice, ['stopped' => 1, 'last_seen_at' => self::NOW]);
         $old = $this->row($a, $alice, ['stopped' => 1, 'last_seen_at' => self::NOW - TranscodeModel::RETENTION - 1]);
 
+        $caught = null;
         try {
             $this->model(fn (): string => $taken)->claim($alice, $a, 'hls', self::NOW);
-            $this->fail('expected the duplicate session to fail the claim');
-        } catch (MatineeBusyException) {
-            $this->fail('a failed insert is not busy');
-        } catch (\RuntimeException) {
+        } catch (\Throwable $e) {
+            $caught = $e;
         }
+        $this->assertNotNull($caught, 'the duplicate session fails the claim');
+        $this->assertSame(\RuntimeException::class, get_class($caught), 'a failed insert is not busy');
+        $this->assertSame('Matinee: could not record the stream.', $caught->getMessage());
 
         $this->assertFalse($this->db()->getConnection()->inTransaction());
         $this->assertEqualsCanonicalizing([$taken, $old], $this->db()->table(TranscodeModel::TABLE)->findAllByColumn('session'), 'the housekeeping delete was rolled back too');
@@ -375,10 +422,46 @@ class TranscodeModelTest extends Base
         $other = $this->model()->claim($alice, $a, 'hls', self::NOW);
         $id = (int) $this->model()->find($session, $alice)['id'];
 
-        $this->model()->heartbeat($id, self::NOW + 30);
+        $this->assertTrue($this->model()->heartbeat($id, self::NOW + 30));
 
         $this->assertSame(self::NOW + 30, (int) $this->model()->find($session, $alice)['last_seen_at']);
         $this->assertSame(self::NOW, (int) $this->model()->find($other, $alice)['last_seen_at']);
+        $this->assertTrue($this->model()->heartbeat($id, self::NOW + 30), 'a second beat in the same second still counts');
+        $this->assertFalse($this->model()->heartbeat(999999, self::NOW + 30), 'unknown id');
+    }
+
+    public function testHeartbeatNeverRevivesAStaleRow(): void
+    {
+        $alice = $this->user('alice');
+        $a = $this->server($alice);
+        $session = $this->row($a, $alice, ['last_seen_at' => self::NOW - TranscodeModel::ACTIVE_WINDOW - 1]);
+        $id = (int) $this->model()->find($session, $alice)['id'];
+
+        $this->assertFalse($this->model()->heartbeat($id, self::NOW));
+        $this->assertSame(self::NOW - TranscodeModel::ACTIVE_WINDOW - 1, (int) $this->model()->find($session, $alice)['last_seen_at']);
+    }
+
+    public function testHeartbeatAtTheWindowEdgeStillRefreshes(): void
+    {
+        $alice = $this->user('alice');
+        $a = $this->server($alice);
+        $session = $this->row($a, $alice, ['last_seen_at' => self::NOW - TranscodeModel::ACTIVE_WINDOW]);
+        $id = (int) $this->model()->find($session, $alice)['id'];
+
+        $this->assertTrue($this->model()->heartbeat($id, self::NOW));
+        $this->assertSame(self::NOW, (int) $this->model()->find($session, $alice)['last_seen_at']);
+    }
+
+    public function testHeartbeatNeverRevivesAStoppedRow(): void
+    {
+        $alice = $this->user('alice');
+        $a = $this->server($alice);
+        $session = $this->row($a, $alice, ['stopped' => 1]);
+        $id = (int) $this->model()->find($session, $alice)['id'];
+
+        $this->assertFalse($this->model()->heartbeat($id, self::NOW + 30));
+        $this->assertFalse($this->model()->heartbeat($id, self::NOW), 'not even in the second it was last seen');
+        $this->assertSame([self::NOW, 1], [(int) $this->model()->find($session, $alice)['last_seen_at'], (int) $this->model()->find($session, $alice)['stopped']]);
     }
 
     public function testStopSucceedsOnce(): void
@@ -444,12 +527,18 @@ class TranscodeModelTest extends Base
         $this->setCap(Settings::STREAM_CAP_GLOBAL_KEY, '9');
         $this->assertSame([7, 3, 9], [$s->streamCapServer(), $s->streamCapUser(), $s->streamCapGlobal()]);
 
-        foreach (['0', '-1', 'abc', ''] as $bad) {
+        foreach (['0', '-1', 'abc', '', '1001', '99999999999999999999'] as $bad) {
             foreach ([Settings::STREAM_CAP_SERVER_KEY, Settings::STREAM_CAP_USER_KEY, Settings::STREAM_CAP_GLOBAL_KEY] as $key) {
                 $this->setCap($key, $bad);
             }
             $this->assertSame([4, 2, 5], [$s->streamCapServer(), $s->streamCapUser(), $s->streamCapGlobal()], "'$bad' falls back");
         }
+
+        foreach ([Settings::STREAM_CAP_SERVER_KEY, Settings::STREAM_CAP_USER_KEY, Settings::STREAM_CAP_GLOBAL_KEY] as $key) {
+            $this->setCap($key, (string) Settings::LIMIT_MAX);
+        }
+        $this->assertSame(1000, Settings::LIMIT_MAX);
+        $this->assertSame([1000, 1000, 1000], [$s->streamCapServer(), $s->streamCapUser(), $s->streamCapGlobal()], 'the top of the range is kept');
     }
 
     public function testThePluginRegistersTheModel(): void
