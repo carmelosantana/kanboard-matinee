@@ -10,7 +10,11 @@ namespace Kanboard\Plugin\Matinee\Http;
  */
 final class PlexPaths
 {
-    public const BROWSE_RE = '#\A/library/(?:sections/\d{1,20}/all|metadata/\d{1,20}/children)\z#';
+    /**
+     * A section's items, one item's children, or an artist's albums (the section filtered by artist: Plex's artist
+     * children leave out compilations and EPs). The artist query is the one fixed shape artistAlbums() builds.
+     */
+    public const BROWSE_RE = '#\A/library/(?:sections/\d{1,20}/all(?:\?type=9&artist\.id=\d{1,20})?|metadata/\d{1,20}/children)\z#';
     /** Veranda's ART_PATH_RE. */
     public const ART_RE = '#\A/library/metadata/\d{1,20}/(?:thumb|art)/\d{1,20}\z#';
     public const SECTION_KEY_RE = '#\A\d{1,20}\z#';
@@ -47,6 +51,15 @@ final class PlexPaths
             throw new \InvalidArgumentException('plex paths: bad section key');
         }
         return '/library/sections/'.$key.'/all';
+    }
+
+    /** "/library/sections/{section}/all?type=9&artist.id={artist}": every album (type 9) of one artist. */
+    public static function artistAlbums(string $section, string $artist): string
+    {
+        if (! self::isSectionKey($section) || ! self::isSectionKey($artist)) {
+            throw new \InvalidArgumentException('plex paths: bad section or artist key');
+        }
+        return self::sectionAll($section).'?type=9&artist.id='.$artist;
     }
 
     public static function isPart(string $path): bool

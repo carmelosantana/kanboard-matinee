@@ -97,7 +97,8 @@ final class BrowseModel extends Base
                 'type' => $i['type'],
                 'index' => $i['index'],
                 'leafCount' => $i['leafCount'],
-                'browseRef' => $mint('browse', $i['key']),
+                // Plex's artist children leave out compilations and EPs; the section filtered by artist lists them all.
+                'browseRef' => $mint('browse', $i['type'] === 'artist' ? PlexPaths::artistAlbums($p['s'], $i['ratingKey']) : $i['key']),
                 'artRef' => $mint('art', $i['thumb']),
                 'playRef' => isset(self::PLAY_KINDS[$i['type']])
                     ? $signer->sign($userId, $p['sv'], $p['s'], self::PLAY_KINDS[$i['type']], PlexPaths::item($i['ratingKey']), RefSigner::TTLS[self::PLAY_KINDS[$i['type']]])

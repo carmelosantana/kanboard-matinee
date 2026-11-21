@@ -212,7 +212,14 @@ final class PlexClient
             throw new \InvalidArgumentException('A Plex listing page is out of range.');
         }
 
-        $mc = $this->fetch($path, ['X-Plex-Container-Start' => $start, 'X-Plex-Container-Size' => $size]);
+        // A browse path's only query is artistAlbums()'s fixed one: it goes first, then the paging.
+        [$path, $fixed] = explode('?', $path, 2) + [1 => ''];
+        $filter = [];
+        foreach ($fixed === '' ? [] : explode('&', $fixed) as $pair) { // not parse_str: it renames "artist.id" to "artist_id"
+            [$k, $v] = explode('=', $pair, 2);
+            $filter[$k] = $v;
+        }
+        $mc = $this->fetch($path, $filter + ['X-Plex-Container-Start' => $start, 'X-Plex-Container-Size' => $size]);
 
         $section = $mc['librarySectionID'] ?? null;
         $section = is_int($section) ? (string) $section : $section;

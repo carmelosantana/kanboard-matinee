@@ -628,6 +628,19 @@ class PlexClientTest extends TestCase
         );
     }
 
+    /** An artist's albums come from the section, filtered: the fixed query goes first, then the paging. */
+    public function testChildrenOfAnArtistAlbumsPath(): void
+    {
+        $this->t->respond(200, $this->fixture('artist-albums'));
+        $page = $this->client()->children('/library/sections/5/all?type=9&artist.id=301', 0, 60);
+        $this->assertSame(
+            self::BASE . '/library/sections/5/all?type=9&artist.id=301&X-Plex-Container-Start=0&X-Plex-Container-Size=60',
+            $this->t->requests[0]['url'],
+        );
+        $this->assertSame('5', $page['section']);
+        $this->assertSame(['album', 'album'], array_column($page['items'], 'type'));
+    }
+
     public function testChildrenItemsAreWhitelisted(): void
     {
         $this->t->respond(200, $this->fixture('children-section'));

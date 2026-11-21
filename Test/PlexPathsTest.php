@@ -14,6 +14,8 @@ class PlexPathsTest extends TestCase
             'section all' => ['/library/sections/2/all', true, false],
             'section all, 20 digits' => ["/library/sections/$twenty/all", true, false],
             'children' => ['/library/metadata/123/children', true, false],
+            'artist albums' => ['/library/sections/2/all?type=9&artist.id=123', true, false],
+            'artist albums, 20 digits' => ["/library/sections/$twenty/all?type=9&artist.id=$twenty", true, false],
             'thumb' => ['/library/metadata/123/thumb/1700000000', false, true],
             'art' => ['/library/metadata/123/art/1700000000', false, true],
             'art, 20-digit ids' => ["/library/metadata/$twenty/art/$twenty", false, true],
@@ -34,6 +36,13 @@ class PlexPathsTest extends TestCase
             'encoded dot in art' => ['/library/metadata/1/%2e%2e/1', false, false],
             'encoded slash' => ['/library/metadata/1%2fchildren', false, false],
             'query' => ['/library/sections/2/all?x', false, false],
+            'artist albums, other type' => ['/library/sections/2/all?type=10&artist.id=123', false, false],
+            'artist albums, no id' => ['/library/sections/2/all?type=9&artist.id=', false, false],
+            'artist albums, 21-digit id' => ["/library/sections/2/all?type=9&artist.id=$twentyOne", false, false],
+            'artist albums, reordered' => ['/library/sections/2/all?artist.id=123&type=9', false, false],
+            'artist albums, extra key' => ['/library/sections/2/all?type=9&artist.id=123&X-Plex-Token=x', false, false],
+            'artist albums, trailing newline' => ["/library/sections/2/all?type=9&artist.id=123\n", false, false],
+            'artist albums on children' => ['/library/metadata/1/children?type=9&artist.id=123', false, false],
             'query in art' => ['/library/metadata/1/thumb/2?X-Plex-Token=x', false, false],
             'fragment' => ['/library/metadata/1/children#x', false, false],
             'double slash' => ['//library/sections/2/all', false, false],
@@ -98,6 +107,20 @@ class PlexPathsTest extends TestCase
     {
         $this->assertSame('/library/sections/12/all', PlexPaths::sectionAll('12'));
         $this->assertTrue(PlexPaths::isBrowse(PlexPaths::sectionAll('12')));
+    }
+
+    public function testArtistAlbumsBuildsABrowsePath(): void
+    {
+        $this->assertSame('/library/sections/12/all?type=9&artist.id=345', PlexPaths::artistAlbums('12', '345'));
+        $this->assertTrue(PlexPaths::isBrowse(PlexPaths::artistAlbums('12', '345')));
+        foreach ([['1a', '2'], ['1', '2a'], ['1', ''], ['', '1']] as [$section, $artist]) {
+            try {
+                PlexPaths::artistAlbums($section, $artist);
+                $this->fail('expected InvalidArgumentException');
+            } catch (\InvalidArgumentException) {
+                $this->addToAssertionCount(1);
+            }
+        }
     }
 
     /** @dataProvider sectionKeys */

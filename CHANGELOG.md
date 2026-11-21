@@ -50,8 +50,9 @@ Plex's `*.plex.direct` certificate never covers a bare IP.
 - **Streaming transport:** `PlexTransport::stream()` writes through a `ResponseSink` with per-call timeouts (60 s,
   900 s for the mp3 transcode, 3 s for stops), a 1 KiB/s low-speed floor over 15 s, and an exact byte cap.
 - **Browse (Media):** a **Media** link in the dashboard sidebar lists the servers you may browse, then a
-  server's libraries, then a library as a poster grid of 60 items a page. Shows, seasons, artists and albums
-  open into their children. The breadcrumb names the server and library. A page past the end of a shrunken
+  server's libraries, then a library as a poster grid of 60 items a page. Shows, seasons and albums open into
+  their children. An artist opens into every album, compilations and EPs included: the library filtered by
+  artist (`type=9&artist.id=`), since Plex's artist children leave those out. The breadcrumb names the server and library. A page past the end of a shrunken
   library links back to the first page.
 - **Proxied posters (`matinee/art`):** 144 or 512 pixel posters fetched through Plex's photo transcoder,
   JPEG/PNG/WebP only, buffered under the 2 MiB cap.

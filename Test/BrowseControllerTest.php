@@ -277,9 +277,10 @@ class BrowseControllerTest extends Base
         preg_match('#ref=([A-Za-z0-9_.-]+)&amp;size=144#', $imgs[0][0], $m);
         $this->assertSame(['sv' => $this->server, 's' => '1', 'k' => 'art', 'r' => self::THUMB], $this->container['matineeRefSigner']->verify($m[1], $this->owner, 'art'));
 
-        // The show and the season link to their own listing.
-        $this->assertSame(2, preg_match_all('#href="[^"?]*\?controller=MatineeBrowseController&amp;action=listing&amp;plugin=Matinee&amp;ref=([A-Za-z0-9_.-]+)"#', $body, $links));
+        // The show and the season link to their own listing, the artist to its albums.
+        $this->assertSame(3, preg_match_all('#href="[^"?]*\?controller=MatineeBrowseController&amp;action=listing&amp;plugin=Matinee&amp;ref=([A-Za-z0-9_.-]+)"#', $body, $links));
         $this->assertSame('/library/metadata/102/children', $this->container['matineeRefSigner']->verify($links[1][0], $this->owner, 'browse')['r']);
+        $this->assertSame('/library/sections/1/all?type=9&artist.id=105', $this->container['matineeRefSigner']->verify($links[1][2], $this->owner, 'browse')['r']);
 
         // Never a Plex path, host or token-shaped thing.
         foreach (['/library/', 'plex.example.test', 'evil.example.test', 'X-Plex', 'UPSTREAM-SUMMARY', '/data/movies'] as $raw) {

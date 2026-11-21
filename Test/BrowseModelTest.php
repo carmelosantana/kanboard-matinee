@@ -342,8 +342,10 @@ class BrowseModelTest extends Base
             $this->assertSame(['title', 'subtitle', 'year', 'type', 'index', 'leafCount', 'browseRef', 'artRef', 'playRef'], array_keys($item));
         }
 
-        // Browse refs only for browse keys (the show and the season), art refs only for art thumbs; same s and server.
-        $this->assertSame([false, true, true, false, false, false, false, false], array_map(fn ($i) => $i['browseRef'] !== null, $items));
+        // Browse refs only for browse keys (the show and the season) and artists (their albums, whatever their key), art refs
+        // only for art thumbs; same s and server.
+        $this->assertSame([false, true, true, false, true, false, false, false], array_map(fn ($i) => $i['browseRef'] !== null, $items));
+        $this->assertSame('/library/sections/1/all?type=9&artist.id=105', $this->verify($items[4]['browseRef'], $this->alice, 'browse')['r']);
         $this->assertSame([true, true, false, false, false, false, false, false], array_map(fn ($i) => $i['artRef'] !== null, $items));
         $this->assertSame(
             ['sv' => $this->serverId, 's' => '1', 'k' => 'browse', 'r' => '/library/metadata/102/children'],
@@ -438,6 +440,41 @@ class BrowseModelTest extends Base
         $this->assertSame('1', $page['section']);
         $this->assertSame(['Season 1'], array_column($page['items'], 'title'));
         $this->assertSame(self::BASE.'/library/metadata/102/children?X-Plex-Container-Start=0&X-Plex-Container-Size=60', $this->t->requests[1]['url']);
+    }
+
+    /**
+     * Plex's /library/metadata/{artist}/children leaves out an artist's compilations and EPs (live: an artist with two
+     * Compilation albums answers size 0, "Nothing to show here"). An artist opens the section's albums filtered by artist
+     * instead, which lists every album; an album opens its tracks, and a track plays.
+     */
+    public function testAnArtistOpensAllItsAlbumsThroughTheSectionFilter(): void
+    {
+        $this->t->respond(200, $this->fixture('sections'));
+        $this->t->respondJson(['MediaContainer' => ['librarySectionID' => 5, 'totalSize' => 1, 'viewGroup' => 'artist', 'Metadata' => [
+            ['ratingKey' => '301', 'key' => '/library/metadata/301/children', 'type' => 'artist', 'title' => 'Fake Artist', 'index' => '1', 'thumb' => '/library/metadata/301/thumb/1700000001'],
+        ]]]);
+        $artist = $this->model()->listing($this->alice, $this->browseRef($this->alice, '5'), 0)['items'][0];
+        $this->assertSame(
+            ['sv' => $this->serverId, 's' => '5', 'k' => 'browse', 'r' => '/library/sections/5/all?type=9&artist.id=301'],
+            $this->verify($artist['browseRef'], $this->alice, 'browse')
+        );
+
+        $this->reset();
+        $this->t->respond(200, $this->fixture('sections'));
+        $this->t->respond(200, $this->fixture('artist-albums'));
+        $page = $this->model()->listing($this->alice, $artist['browseRef'], 0);
+        $this->assertSame(self::BASE.'/library/sections/5/all?type=9&artist.id=301&X-Plex-Container-Start=0&X-Plex-Container-Size=60', $this->t->requests[1]['url']);
+        $this->assertSame(2, $page['total']);
+        $this->assertSame(['Fake B-Sides, Volume 1', 'Fake B-Sides, Volume 2'], array_column($page['items'], 'title'));
+        $this->assertSame('/library/metadata/302/children', $this->verify($page['items'][0]['browseRef'], $this->alice, 'browse')['r']);
+
+        $this->reset();
+        $this->t->respond(200, $this->fixture('sections'));
+        $this->t->respondJson(['MediaContainer' => ['librarySectionID' => 5, 'totalSize' => 1, 'viewGroup' => 'track', 'Metadata' => [
+            ['ratingKey' => '304', 'key' => '/library/metadata/304', 'type' => 'track', 'title' => 'Fake Song', 'parentTitle' => 'Fake B-Sides, Volume 1', 'grandparentTitle' => 'Fake Artist', 'index' => '1'],
+        ]]]);
+        $track = $this->model()->listing($this->alice, $page['items'][0]['browseRef'], 0)['items'][0];
+        $this->assertSame('/library/metadata/304', $this->verify($track['playRef'], $this->alice, 'media')['r']);
     }
 
     public function testPagingIsPassedThroughAndStartIsBounded(): void
