@@ -26,8 +26,8 @@ use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
  *   segment and ping heartbeats it, and a request for a session that is not this user's active hls row on the ref's
  *   server is Forbidden. Stopping marks the row first, then asks Plex (hls rows only, failures swallowed).
  * - Every Plex client is named for the viewer (C9).
- * - Every Plex request made for a browser request runs inside the in-flight gate (M1): the page's lookups, the HLS
- *   master, a child playlist or segment, a direct part window. A full gate is Busy with Retry-After 5. The mp3
+ * - Every playback request to Plex runs inside the in-flight gate (M1): the page's lookups, the HLS master, a child
+ *   playlist or segment, a direct part window. A gate still full after its 2 s wait is Busy with Retry-After 5. The mp3
  *   transcode is not gated; it holds a long-stream row instead.
  * - Before a stream's sink opens, Plex, URL-guard, token and key-store failures are one MatineeConnectException, logged
  *   by stage with a fixed reason. After it opens, any failure is logged as STREAM_ENDED_LOG and nothing more is

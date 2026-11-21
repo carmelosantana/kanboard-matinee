@@ -14,14 +14,16 @@ trait MatineeTempInflight
     /** @var list<resource> in-flight slot files the test holds */
     private array $inflightHeld = [];
 
-    /** Call after Plugin::initialize(). */
+    /** Call after Plugin::initialize(). The gate's 2 s wait polls without sleeping, so a full gate is Busy at once. */
     private function useTempInflightGate(): void
     {
         $this->inflightDir = sys_get_temp_dir().'/matinee-inflight-'.bin2hex(random_bytes(6));
         $this->container->offsetUnset('matineeInflightGate');
         $this->container['matineeInflightGate'] = fn ($c): InflightGate => new InflightGate(
             $this->inflightDir,
-            static fn (): int => (new Settings($c))->inflightGlobal()
+            static fn (): int => (new Settings($c))->inflightGlobal(),
+            sleep: static function (int $ms): void {
+            }
         );
     }
 

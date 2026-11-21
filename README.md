@@ -192,12 +192,14 @@ the busy page; reloading fixes it.
 
 ### Requests in flight
 
-Every request Plex answers for a browser (a direct-play music window, a video playlist or segment, a poster, a
+Every browse and playback request to Plex (a direct-play music window, a video playlist or segment, a poster, a
 library page, the player page's lookups) holds one of the viewer's 4 in-flight slots and one of the
 install's, 8 by default (**Plex requests in flight on this Kanboard**). The mp3 transcode and the video session
-itself don't take one; the stream caps bound those. When either is full the request is answered at once with
-`503` and `Retry-After: 5`: an empty body for media, playlists, segments and posters, the busy page for the
-player and the library pages. hls.js retries a segment by itself.
+itself don't take one; the stream caps bound those. Nor do the connect, update and verify probes on the server
+form; their attempt limit bounds those. When either cap is full the request waits, trying again every 50 ms for
+up to 2 s, so a library page's burst of posters queues instead of breaking. A request still waiting after 2 s is
+answered with `503` and `Retry-After: 5`: an empty body for media, playlists, segments and posters, the busy page
+for the player and the library pages. hls.js retries a segment by itself.
 
 Slots are `flock` locks on files in `DATA_DIR/matinee/inflight/` (0700), so a worker that dies frees its slots
 with it. Each one bounds how many PHP-FPM workers a slow or hostile Plex can hold for up to 60 s.
@@ -359,9 +361,9 @@ Deleting a user removes their servers.
   With `true`, the response sink notices the abort itself, curl stops cleanly, and the row is stopped at once.
   A shutdown function stops any row the request claimed as a backstop. The cost is that a worker may read one
   more chunk from Plex after the browser leaves.
-- **Requests in flight.** Every Plex request made for a browser holds a per-user and a global
-  [in-flight slot](#requests-in-flight), so a hostile or stalled Plex can't tie up every PHP-FPM worker and
-  take down the rest of Kanboard. Playlist fetches, like streams, give up after 15 s below 1 KiB/s.
+- **Requests in flight.** Every browse and playback request to Plex holds a per-user and a global
+  [in-flight slot](#requests-in-flight), waiting up to 2 s for one to free, so a hostile or stalled Plex can't
+  tie up every PHP-FPM worker and take down the rest of Kanboard. Playlist fetches, like streams, give up after 15 s below 1 KiB/s.
 - **Bounded parsing.** A playlist line over 8 KiB, or a tag with more than 64 attributes, refuses the whole
   playlist before any pattern runs on it. A segment whose upstream sends a `Content-Length` is cut at exactly
   that many bytes, as a music window is.
