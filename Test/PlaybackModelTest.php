@@ -910,4 +910,338 @@ class PlaybackModelTest extends Base
         $this->assertGreaterThan(100, $hits);
         $this->assertLessThan(320, $hits);
     }
+
+    // ── HLS: the page claim, the master and children (Task 14; C2c, C5c, C5d) ─
+
+    private const MOVIE = '/library/metadata/7';
+    private const PLAYLIST_TYPE = ['Content-Type' => 'application/vnd.apple.mpegurl'];
+
+    private function hlsRef(int $userId, string $r = self::MOVIE, string $section = '1', ?int $serverId = null): string
+    {
+        return $this->signer()->sign($userId, $serverId ?? $this->serverId, $section, 'hls', $r, 28800);
+    }
+
+    /** Queues the live sections, then a movie (or $type) item in section 1. */
+    private function queueHlsPage(string $type = 'movie'): void
+    {
+        $this->queuePage(self::item(['container' => 'mkv', 'videoCodec' => 'h264'], $type, 1));
+    }
+
+    private static function child(string $session, string $rest = 'base/index.m3u8'): string
+    {
+        return '/video/:/transcode/universal/session/'.$session.'/'.$rest;
+    }
+
+    private static function master(string $session): string
+    {
+        return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=8000000,RESOLUTION=1920x1080,CODECS=\"avc1.640028,mp4a.40.2\"\n"
+            .'session/'.$session."/base/index.m3u8\n";
+    }
+
+    private static function proxyUrl(): \Closure
+    {
+        return static fn (string $u): string => 'P('.$u.')';
+    }
+
+    /** How often the last hlsMaster() or hlsChild() call ran $onAuthorized (a property, so arrow functions see it). */
+    private int $authorized = 0;
+
+    private function hlsMaster(int $userId, string $ref, string $session): string
+    {
+        $this->authorized = 0;
+        return $this->model()->hlsMaster($userId, $ref, $session, self::proxyUrl(), function (): void {
+            $this->authorized++;
+        });
+    }
+
+    private function hlsChild(int $userId, string $ref, string $u, PlexStreamSink $sink): ?string
+    {
+        $this->authorized = 0;
+        return $this->model()->hlsChild($userId, $ref, $u, $sink, self::proxyUrl(), function (): void {
+            $this->authorized++;
+        });
+    }
+
+    /** A second server of Alice's, connected through the fake. */
+    private function secondServer(): int
+    {
+        $this->t->respond(200, $this->fixture('identity'));
+        $this->t->respond(200, $this->fixture('sections'));
+        $id = $this->container['matineeServerModel']->connect($this->alice, 'Den', 'https://den.example.test:32400', self::TOKEN);
+        $this->reset();
+        return $id;
+    }
+
+    public function testAnHlsPageClaimsOneRowAndReturnsItsSession(): void
+    {
+        $this->queueHlsPage();
+        $ref = $this->hlsRef($this->alice);
+        $this->now += 3600;
+        $page = $this->model()->page($this->alice, $ref);
+
+        $this->assertSame(['kind', 'server', 'title', 'subtitle', 'session', 'hlsRef'], array_keys($page));
+        $this->assertSame('hls', $page['kind']);
+        $this->assertSame(['id' => $this->serverId, 'name' => 'Living room'], $page['server']);
+        $this->assertSame('Song', $page['title']);
+        $rows = $this->rows();
+        $this->assertCount(1, $rows);
+        $this->assertSame(
+            [$page['session'], 'hls', $this->alice, $this->serverId, 0, self::T0 + 3600],
+            [$rows[0]['session'], $rows[0]['kind'], (int) $rows[0]['user_id'], (int) $rows[0]['server_id'], (int) $rows[0]['stopped'], (int) $rows[0]['last_seen_at']]
+        );
+        // The session outlives this request: no shutdown net stops it.
+        $this->assertSame([], $this->shutdowns);
+        // hlsRef is the item-path hls ref, re-minted for a full 8 h.
+        $this->assertNotSame($ref, $page['hlsRef']);
+        $this->now += 28799;
+        $this->assertSame(['sv' => $this->serverId, 's' => '1', 'k' => 'hls', 'r' => self::MOVIE], $this->verify($page['hlsRef'], $this->alice, 'hls'));
+        $this->assertSame([self::BASE.'/library/sections', self::BASE.self::MOVIE], array_column($this->t->requests, 'url'));
+    }
+
+    public function testAnEpisodePlaysAndATrackIsRefusedOnAnHlsPage(): void
+    {
+        $this->queueHlsPage('episode');
+        $this->assertSame('hls', $this->model()->page($this->alice, $this->hlsRef($this->alice))['kind']);
+
+        $this->reset();
+        $this->queueHlsPage('track');
+        $this->expectForbidden(fn () => $this->model()->page($this->alice, $this->hlsRef($this->alice)), true);
+        $this->assertCount(1, $this->rows(), 'a refused page claimed a row');
+    }
+
+    public function testAnHlsPageAtTheCapIsBusyAndClaimsNothing(): void
+    {
+        $this->claimRow($this->alice);
+        $this->claimRow($this->alice);
+        $this->queueHlsPage();
+        try {
+            $this->model()->page($this->alice, $this->hlsRef($this->alice));
+            $this->fail('expected MatineeBusyException');
+        } catch (MatineeBusyException) {
+        }
+        $this->assertCount(2, $this->rows());
+    }
+
+    public function testThePageSweepsStaleRowsBeforeItClaims(): void
+    {
+        // Two stale rows on the per-user cap: the page succeeds, and the sweep stopped both through Plex.
+        $a = $this->claimRow($this->alice, 'hls', self::T0 - 600);
+        $b = $this->claimRow($this->alice, 'hls', self::T0 - 500);
+        $this->queueHlsPage();
+        $this->t->respond(200, '')->respond(200, '');
+        $page = $this->model()->page($this->alice, $this->hlsRef($this->alice));
+        $this->assertSame([1, 1], [(int) $this->row((int) $a['id'])['stopped'], (int) $this->row((int) $b['id'])['stopped']]);
+        $this->assertSame(
+            [self::BASE.'/library/sections', self::BASE.self::MOVIE, $this->stopUrl($a['session']), $this->stopUrl($b['session'])],
+            array_column($this->t->requests, 'url')
+        );
+        $this->assertSame($page['session'], $this->rows()[2]['session']);
+    }
+
+    public function testABusyPageHasStillSweptFirst(): void
+    {
+        // Alice is at her cap with live rows; Bob's stale row is swept even though her claim then fails.
+        $this->share();
+        $stale = $this->claimRow($this->bob, 'hls', self::T0 - 500);
+        $this->claimRow($this->alice);
+        $this->claimRow($this->alice);
+        $this->queueHlsPage();
+        $this->t->respond(200, '');
+        try {
+            $this->model()->page($this->alice, $this->hlsRef($this->alice));
+            $this->fail('expected MatineeBusyException');
+        } catch (MatineeBusyException) {
+        }
+        $this->assertSame(1, (int) $this->row((int) $stale['id'])['stopped']);
+        $this->assertSame('Matinee (bob)', $this->t->requests[2]['headers']['X-Plex-Device-Name']);
+    }
+
+    public function testHlsMasterHeartbeatsAndRewritesEveryUri(): void
+    {
+        $row = $this->claimRow($this->alice, 'hls', self::T0 - 50);
+        $session = $row['session'];
+        $seen = null;
+        $this->t->respond(200, self::master($session), self::PLAYLIST_TYPE);
+        $body = $this->model()->hlsMaster($this->alice, $this->hlsRef($this->alice), $session, self::proxyUrl(), function () use (&$seen): void {
+            $seen = [count($this->t->requests), (int) $this->rows()[0]['last_seen_at']];
+        });
+
+        // Authorized before the heartbeat and before any Plex call (C3d).
+        $this->assertSame([0, self::T0 - 50], $seen);
+        $this->assertSame(self::T0, (int) $this->row((int) $row['id'])['last_seen_at']);
+        $uris = array_values(array_filter(explode("\n", $body), static fn (string $l): bool => $l !== '' && $l[0] !== '#'));
+        $this->assertSame(['P('.self::child($session).')'], $uris);
+        $this->assertStringNotContainsString('/library', $body);
+
+        [$req] = $this->t->requests;
+        $this->assertStringStartsWith(self::BASE.'/video/:/transcode/universal/start.m3u8?', $req['url']);
+        $this->assertStringContainsString('&path=%2Flibrary%2Fmetadata%2F7&', $req['url']);
+        $this->assertStringContainsString('&session='.$session.'&', $req['url']);
+        $this->assertSame('Matinee (alice)', $req['headers']['X-Plex-Device-Name']);
+    }
+
+    public function testHlsMasterRefusesBeforePlex(): void
+    {
+        $this->share();
+        $mine = $this->claimRow($this->alice)['session'];
+        $bobs = $this->claimRow($this->bob)['session'];
+        $mp3 = $this->claimRow($this->alice, 'mp3')['session'];
+        $stopped = $this->claimRow($this->bob, 'hls');
+        $this->container['matineeTranscodeModel']->stop((int) $stopped['id']);
+        $den = $this->secondServer();
+        ['session' => $onDen] = $this->container['matineeTranscodeModel']->claim($this->bob, $den, 'hls', $this->now);
+
+        foreach ([
+            'another user\'s session' => [$this->alice, $this->hlsRef($this->alice), $bobs],
+            'a session on another server' => [$this->bob, $this->hlsRef($this->bob), $onDen],
+            'a stopped session' => [$this->bob, $this->hlsRef($this->bob), $stopped['session']],
+            'an mp3 row' => [$this->alice, $this->hlsRef($this->alice), $mp3],
+            'an unknown session' => [$this->alice, $this->hlsRef($this->alice), '00000000-0000-4000-8000-000000000009'],
+            'a media ref' => [$this->alice, $this->ref($this->alice, 'media', self::MOVIE, '1'), $mine],
+            'another user\'s ref' => [$this->alice, $this->hlsRef($this->bob), $mine],
+        ] as $case => [$user, $ref, $session]) {
+            $this->expectForbidden(fn () => $this->hlsMaster($user, $ref, $session));
+            $this->assertSame(0, $this->authorized, $case);
+        }
+
+        // Unshared since the page was opened.
+        $ref = $this->hlsRef($this->bob);
+        $this->share(false);
+        $this->expectForbidden(fn () => $this->hlsMaster($this->bob, $ref, $bobs));
+        $this->assertSame(0, $this->authorized);
+    }
+
+    /** Addendum: a heartbeat that finds the row stale is Forbidden, and Plex is never asked. */
+    public function testHlsMasterOnAStaleRowIsForbidden(): void
+    {
+        $row = $this->claimRow($this->alice, 'hls', self::T0 - 121);
+        $this->expectForbidden(fn () => $this->hlsMaster($this->alice, $this->hlsRef($this->alice), $row['session']));
+        $this->assertSame(self::T0 - 121, (int) $this->row((int) $row['id'])['last_seen_at']);
+    }
+
+    public function testAFailingHeartbeatIsLoggedAndTheMasterStillPlays(): void
+    {
+        $session = $this->claimRow($this->alice)['session'];
+        $db = $this->container['db']->getConnection();
+        $this->t->respond(200, self::master($session), self::PLAYLIST_TYPE);
+        $body = $this->model()->hlsMaster($this->alice, $this->hlsRef($this->alice), $session, self::proxyUrl(), function () use ($db): void {
+            $db->exec('ALTER TABLE '.TranscodeModel::TABLE.' RENAME TO matinee_transcodes_gone');
+        });
+        $db->exec('ALTER TABLE matinee_transcodes_gone RENAME TO '.TranscodeModel::TABLE);
+
+        $this->assertStringContainsString('P('.self::child($session).')', $body);
+        $this->assertSame(['warning Matinee: heartbeat failed (server '.$this->serverId.')'], $this->log->lines);
+    }
+
+    public function testABadMasterIsTheConnectFailureLoggedAtStart(): void
+    {
+        $session = $this->claimRow($this->alice)['session'];
+        $this->t->respond(200, self::master('0f1e2d3c-4b5a-4987-8a6b-5c4d3e2f1a0b'), self::PLAYLIST_TYPE);
+        try {
+            $this->hlsMaster($this->alice, $this->hlsRef($this->alice), $session);
+            $this->fail('expected MatineeConnectException');
+        } catch (MatineeConnectException) {
+        }
+        $this->assertSame(['info Matinee: playback failed at start (server '.$this->serverId.', plex.bad_playlist)'], $this->log->lines);
+    }
+
+    public function testAnM3u8ChildReturnsARewrittenPlaylist(): void
+    {
+        $row = $this->claimRow($this->alice, 'hls', self::T0 - 50);
+        $session = $row['session'];
+        $sink = new RecordingSink();
+        $this->t->respond(200, (string) file_get_contents(__DIR__.'/fixtures/plex/hls-index.m3u8'), self::PLAYLIST_TYPE);
+        $body = $this->hlsChild($this->alice, $this->hlsRef($this->alice), self::child($session).'?x=1', $sink);
+
+        $this->assertSame(1, $this->authorized);
+        $this->assertSame(self::T0, (int) $this->row((int) $row['id'])['last_seen_at']);
+        $this->assertSame([self::BASE.self::child($session).'?x=1'], array_column($this->t->requests, 'url'));
+        $uris = array_values(array_filter(explode("\n", (string) $body), static fn (string $l): bool => $l !== '' && $l[0] !== '#'));
+        $this->assertSame([
+            'P('.self::child($session, 'base/00000.ts').')',
+            'P('.self::child($session, 'base/00001.ts').')',
+            'P('.self::child($session, 'base/00002.ts?x=1').')',
+        ], $uris);
+        $this->assertSame(0, $sink->opens);
+    }
+
+    public function testATsChildStreamsIntoTheSink(): void
+    {
+        $session = $this->claimRow($this->alice)['session'];
+        $sink = new RecordingSink();
+        $this->t->streams(200, ['Content-Type' => 'video/mp2t', 'Content-Length' => '6'], ['seg', 'ment']);
+        $this->assertNull($this->hlsChild($this->alice, $this->hlsRef($this->alice), self::child($session, 'base/00000.ts'), $sink));
+
+        $this->assertSame(1, $this->authorized);
+        $this->assertSame(200, $sink->status);
+        $this->assertSame(['content-type' => 'video/mp2t', 'content-length' => '6'], $sink->headers);
+        $this->assertSame('segment', $sink->body);
+        $this->assertSame(PlexClient::MAX_SEGMENT_BYTES, $this->t->requests[0]['opts']['maxBytes']);
+    }
+
+    public function testASegmentThatDiesAfterOpeningIsLoggedAndAppendsNothing(): void
+    {
+        $session = $this->claimRow($this->alice)['session'];
+        $sink = new PlaybackCallbackSink(function (): void {
+            throw new \RuntimeException('client sink broke');
+        });
+        $this->t->streams(200, ['Content-Type' => 'video/mp2t'], ['a', 'b']);
+        $this->assertNull($this->hlsChild($this->alice, $this->hlsRef($this->alice), self::child($session, 'base/00000.ts'), $sink));
+        $this->assertSame('a', $sink->body);
+        $this->assertSame(['warning Matinee: stream ended early (server '.$this->serverId.', plex.unreachable)'], $this->log->lines);
+        $this->assertSame(0, (int) $this->rows()[0]['stopped'], 'a segment failure leaves the session alone');
+    }
+
+    public function testAChildOfASessionNotInTheTableIsForbidden(): void
+    {
+        $this->claimRow($this->alice);
+        $this->share();
+        $bobs = $this->claimRow($this->bob)['session'];
+        foreach (['00000000-0000-4000-8000-000000000009', $bobs] as $session) {
+            $this->expectForbidden(fn () => $this->hlsChild($this->alice, $this->hlsRef($this->alice), self::child($session, 'base/00000.ts'), new RecordingSink()));
+            $this->assertSame(0, $this->authorized);
+        }
+    }
+
+    /** @dataProvider badChildren */
+    public function testAChildFailingS2IsForbiddenWithNoPlexRequest(string $rest): void
+    {
+        $session = $this->claimRow($this->alice)['session'];
+        $u = str_replace('{s}', $session, $rest);
+        $this->expectForbidden(fn () => $this->hlsChild($this->alice, $this->hlsRef($this->alice), $u, new RecordingSink()));
+        $this->assertSame(0, $this->authorized);
+        $this->assertSame(self::T0, (int) $this->rows()[0]['last_seen_at']);
+    }
+
+    public function badChildren(): array
+    {
+        $base = '/video/:/transcode/universal/session/{s}/';
+        return [
+            'an item path'     => ['/library/metadata/7'],
+            'dot segments'     => [$base.'base/../../library/x.ts'],
+            'percent'          => [$base.'base/a%2e.ts'],
+            'a token'          => [$base.'base/x.ts?X-Plex-Token=t'],
+            'an X-Plex key'    => [$base.'base/x.ts?X-Plex-Device-Name=me'],
+            'an absolute url'  => ['https://evil.test'.$base.'base/x.ts'],
+            'a double slash'   => [$base.'base//x.ts'],
+            'a bad extension'  => [$base.'base/x.mp4'],
+            'empty'            => [''],
+        ];
+    }
+
+    public function testPlexSeesTheViewerOnHls(): void
+    {
+        $this->share();
+        $this->queueHlsPage();
+        $page = $this->model()->page($this->bob, $this->hlsRef($this->bob));
+        $this->t->respond(200, self::master($page['session']), self::PLAYLIST_TYPE);
+        $this->t->streams(200, ['Content-Type' => 'video/mp2t'], ['x']);
+        $this->hlsMaster($this->bob, $page['hlsRef'], $page['session']);
+        $this->hlsChild($this->bob, $page['hlsRef'], self::child($page['session'], 'base/00000.ts'), new RecordingSink());
+
+        $this->assertCount(4, $this->t->requests);
+        foreach ($this->t->requests as $req) {
+            $this->assertSame('Matinee (bob)', $req['headers']['X-Plex-Device-Name']);
+        }
+    }
 }

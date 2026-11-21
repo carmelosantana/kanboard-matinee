@@ -7,6 +7,7 @@ use Kanboard\Plugin\Matinee\Crypto\CryptoException;
 use Kanboard\Plugin\Matinee\Crypto\KeyStoreException;
 use Kanboard\Plugin\Matinee\Crypto\RefSigner;
 use Kanboard\Plugin\Matinee\Http\ByteRange;
+use Kanboard\Plugin\Matinee\Http\HlsPlaylist;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
 use Kanboard\Plugin\Matinee\Http\PlexException;
 use Kanboard\Plugin\Matinee\Http\PlexPaths;
@@ -14,12 +15,16 @@ use Kanboard\Plugin\Matinee\Http\PlexStreamSink;
 use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
 
 /**
- * Playback (plan P3; spec §6, §7; C1, C3f, C3g, C4a, C5, C9). Turns a verified media ref into a player page or an audio
- * stream, re-authorizing on every use. Task 14 adds the hls half.
+ * Playback (plan P3; spec §6, §7; C1, C2, C3f, C3g, C4, C5, C9). Turns a verified media or hls ref into a player page,
+ * an audio stream, a playlist or a segment, re-authorizing on every use; it also stops, pings and sweeps long streams.
  *
  * - Every refusal is the one MatineeForbiddenException, decided before any Plex call where it can be: a bad, expired,
  *   other-user or wrong-kind ref, a server this user may not browse now (live rows), a part-path ref on the page. The
- *   page also needs Plex: the ref's section must be live and the item must sit in it, as a track.
+ *   page also needs Plex: the ref's section must be live and the item must sit in it, as a track (media) or a movie or
+ *   an episode (hls).
+ * - An HLS session is a long-stream row the page claims (after a sweep) and the player keeps alive: every playlist,
+ *   segment and ping heartbeats it, and a request for a session that is not this user's active hls row on the ref's
+ *   server is Forbidden. Stopping marks the row first, then asks Plex (hls rows only, failures swallowed).
  * - Every Plex client is named for the viewer (C9).
  * - Before a stream's sink opens, Plex, URL-guard, token and key-store failures are one MatineeConnectException, logged
  *   by stage with a fixed reason. After it opens, any failure is logged as STREAM_ENDED_LOG and nothing more is
@@ -44,16 +49,22 @@ final class PlaybackModel extends Base
     /** The part extensions each container family may carry (C1a: the part's extension matches its container). */
     private const PART_EXTENSIONS = ['mp3' => ['mp3'], 'flac' => ['flac'], 'mp4' => ['mp4', 'm4a'], 'm4a' => ['mp4', 'm4a']];
     private const SUBTITLE_GLUE = ' · ';
+    /** The item types an hls ref plays. */
+    private const VIDEO_TYPES = ['movie', 'episode'];
 
     /**
-     * The player page for a media ref naming an item. A direct-eligible track (C1a) gets a media ref to its part;
-     * anything else a fresh media ref to the item, which plays as a transcode.
+     * The player page for a play ref naming an item: an hls ref (a movie or an episode) or a media ref (a track). The
+     * ref's kind is told by verifying it as `hls` first, then as `media`; any other ref is Forbidden.
+     * - media: a direct-eligible track (C1a) gets a media ref to its part; anything else a fresh media ref to the
+     *   item, which plays as a transcode.
+     * - hls (C2c): once the item passes, the sweep runs, then a long-stream row is claimed under the caps (Busy passes
+     *   through), and the page carries its session with a fresh hls ref to the item. The row outlives this request.
      *
-     * @return array{kind: 'audio', server: array{id: int, name: string}, title: string, subtitle: string, mediaRef: string}
+     * @return array{kind: 'audio'|'hls', server: array{id: int, name: string}, title: string, subtitle: string, mediaRef?: string, session?: string, hlsRef?: string}
      */
     public function page(int $userId, string $ref): array
     {
-        $p = $this->signer()->verify($ref, $userId, 'media');
+        [$kind, $p] = $this->playRef($ref, $userId);
         if (! PlexPaths::isItem($p['r'])) {
             throw new MatineeForbiddenException();
         }
@@ -65,18 +76,73 @@ final class PlaybackModel extends Base
             throw new MatineeForbiddenException();
         }
         $item = $this->plex($server, 'item', fn () => $client->item($p['r']));
-        if ($item['section'] === null || $item['section'] !== $p['s'] || $item['type'] !== 'track') {
+        $types = $kind === 'hls' ? self::VIDEO_TYPES : ['track'];
+        if ($item['section'] === null || $item['section'] !== $p['s'] || ! in_array($item['type'], $types, true)) {
             throw new MatineeForbiddenException();
         }
 
-        $resource = self::directPart($item) ?? $p['r'];
-        return [
-            'kind' => 'audio',
+        $page = [
+            'kind' => $kind === 'hls' ? 'hls' : 'audio',
             'server' => ['id' => (int) $server['id'], 'name' => (string) $server['name']],
             'title' => $item['title'],
             'subtitle' => implode(self::SUBTITLE_GLUE, array_filter([$item['grandparentTitle'], $item['parentTitle']], static fn (string $t): bool => $t !== '')),
-            'mediaRef' => $this->signer()->sign($userId, $p['sv'], $p['s'], 'media', $resource, self::REF_TTL),
         ];
+        if ($kind === 'media') {
+            $resource = self::directPart($item) ?? $p['r'];
+            return $page + ['mediaRef' => $this->signer()->sign($userId, $p['sv'], $p['s'], 'media', $resource, self::REF_TTL)];
+        }
+
+        $this->sweep();
+        ['session' => $session] = $this->transcodes()->claim($userId, (int) $server['id'], 'hls', $this->now());
+        return $page + [
+            'session' => $session,
+            'hlsRef' => $this->signer()->sign($userId, $p['sv'], $p['s'], 'hls', $p['r'], RefSigner::TTLS['hls']),
+        ];
+    }
+
+    /**
+     * The rewritten master playlist of this user's HLS session (C2c, C5c, C5d). The ref is verified as hls with a live
+     * browse check, and the session must be this user's active hls row on the ref's server. $onAuthorized runs once
+     * after that and before the heartbeat and any Plex call (C3d); a heartbeat that finds the row stale is Forbidden.
+     *
+     * @param \Closure(string): string $proxyUrl the controller's Matinee URL for one HLS child path
+     * @throws MatineeForbiddenException refused
+     * @throws MatineeConnectException Plex failed, or its playlist was refused (plex.bad_playlist)
+     */
+    public function hlsMaster(int $userId, string $ref, string $session, \Closure $proxyUrl, \Closure $onAuthorized): string
+    {
+        [$p, $server] = $this->hlsAuthorize($userId, $ref, $session, $onAuthorized);
+        $client = $this->client($server, $userId);
+        return $this->plex($server, 'start', fn () => HlsPlaylist::rewrite(
+            $client->hlsStart($p['r'], $session),
+            PlexPaths::HLS_PREFIX.'start.m3u8',
+            $session,
+            $proxyUrl
+        ));
+    }
+
+    /**
+     * One child of this user's HLS session, named by its S2 path $u (whose session it must be, as hlsMaster checks).
+     * A `.m3u8` child comes back rewritten, relative to $u without its query; anything else streams into $sink and
+     * returns null, with failures after the sink opened logged and swallowed (C3g).
+     *
+     * @param \Closure(string): string $proxyUrl
+     * @throws MatineeForbiddenException refused, before any Plex call
+     * @throws MatineeConnectException a failure before $sink opened
+     */
+    public function hlsChild(int $userId, string $ref, string $u, PlexStreamSink $sink, \Closure $proxyUrl, \Closure $onAuthorized): ?string
+    {
+        $session = PlexPaths::hlsSession($u);
+        [, $server] = $this->hlsAuthorize($userId, $ref, $session, $onAuthorized);
+        $client = $this->client($server, $userId);
+
+        $path = explode('?', $u, 2)[0];
+        if (str_ends_with($path, '.m3u8')) {
+            return $this->plex($server, 'playlist', fn () => HlsPlaylist::rewrite($client->hlsPlaylist($u, $session), $path, $session, $proxyUrl));
+        }
+        $tracked = self::tracked($sink);
+        $this->stream((int) $server['id'], 'segment', $tracked, fn () => $client->hlsSegment($u, $session, $tracked));
+        return null;
     }
 
     /**
@@ -114,18 +180,13 @@ final class PlaybackModel extends Base
                 $transcodes->stop($rowId);
             });
             $lastBeat = $now;
-            $beat = function () use ($transcodes, $rowId, $serverId, &$lastBeat): bool {
+            $beat = function () use ($rowId, $serverId, &$lastBeat): bool {
                 $now = $this->now();
                 if ($now - $lastBeat < self::HEARTBEAT_EVERY) {
                     return true;
                 }
                 $lastBeat = $now;
-                try {
-                    return $transcodes->heartbeat($rowId, $now);
-                } catch (\Throwable) {
-                    $this->logger->warning(sprintf(self::HEARTBEAT_FAILED_LOG, $serverId));
-                    return true;
-                }
+                return $this->heartbeat($rowId, $serverId);
             };
             $tracked = self::tracked($sink, $beat);
             $this->stream($serverId, 'transcode', $tracked, fn () => $client->musicTranscode($p['r'], $session, $tracked));
@@ -183,6 +244,57 @@ final class PlaybackModel extends Base
     }
 
     // ── internals ────────────────────────────────────────────────────────────
+
+    /**
+     * The ref verified as `hls`, else as `media`, with the kind that passed. A ref of any other kind, or a bad one, is
+     * Forbidden either way.
+     *
+     * @return array{0: 'hls'|'media', 1: array{sv: int, s: string, k: string, r: string}}
+     */
+    private function playRef(string $ref, int $userId): array
+    {
+        $signer = $this->signer();
+        try {
+            return ['hls', $signer->verify($ref, $userId, 'hls')];
+        } catch (MatineeForbiddenException) {
+            return ['media', $signer->verify($ref, $userId, 'media')];
+        }
+    }
+
+    /**
+     * The shared HLS gate (C5c, C5d): an hls ref of this user, a server they may browse now, and $session naming their
+     * own active hls row on that server. Then $onAuthorized, then a heartbeat; a false beat is Forbidden.
+     *
+     * @return array{0: array{sv: int, s: string, k: string, r: string}, 1: array}
+     */
+    private function hlsAuthorize(int $userId, string $ref, ?string $session, \Closure $onAuthorized): array
+    {
+        $p = $this->signer()->verify($ref, $userId, 'hls');
+        if ($session === null) {
+            throw new MatineeForbiddenException();
+        }
+        $server = $this->authorize($userId, $p['sv']);
+        $row = $this->transcodes()->find($session, $userId);
+        if ($row === null || (int) $row['server_id'] !== (int) $server['id'] || $row['kind'] !== 'hls' || (int) $row['stopped'] !== 0) {
+            throw new MatineeForbiddenException();
+        }
+        $onAuthorized();
+        if (! $this->heartbeat((int) $row['id'], (int) $server['id'])) {
+            throw new MatineeForbiddenException();
+        }
+        return [$p, $server];
+    }
+
+    /** A best-effort heartbeat (C3g): false when the row is stopped or stale; a failure is logged and reads as alive. */
+    private function heartbeat(int $rowId, int $serverId): bool
+    {
+        try {
+            return $this->transcodes()->heartbeat($rowId, $this->now());
+        } catch (\Throwable) {
+            $this->logger->warning(sprintf(self::HEARTBEAT_FAILED_LOG, $serverId));
+            return true;
+        }
+    }
 
     /**
      * Marks the row stopped first (only one caller wins), then, for an hls row only, asks Plex to stop the transcode
