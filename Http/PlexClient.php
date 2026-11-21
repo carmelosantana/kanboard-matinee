@@ -311,11 +311,11 @@ final class PlexClient
      * GET a path (with a query built by http_build_query, never holding the token) and check status and size.
      * On a non-2xx the body is not read.
      */
-    private function request(string $path, array $query = []): PlexResponse
+    private function request(string $path, array $query = [], array $opts = []): PlexResponse
     {
         $url = $this->baseUrl . $path . ($query === [] ? '' : '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986));
         try {
-            $r = $this->transport->get($url, $this->headers());
+            $r = $this->transport->get($url, $this->headers(), $opts);
         } catch (PlexException | UnsafeUrlException $e) {
             throw $e;
         } catch (\Throwable) {

@@ -56,6 +56,52 @@ switch ($path) {
             flush();
         }
         return true;
+    case '/stream/chunks':
+        // Three chunks one second apart, so a streaming reader sees the first long before the last.
+        while (ob_get_level() > 0) {
+            ob_end_flush();
+        }
+        http_response_code(206);
+        header('Content-Type: audio/mpeg');
+        header('Set-Cookie: session=fake');
+        foreach (['aaa', 'bbb', 'ccc'] as $i => $chunk) {
+            if ($i > 0) {
+                sleep(1);
+            }
+            echo $chunk;
+            flush();
+        }
+        return true;
+    case '/stream/slow':
+        // One byte every two seconds, ten times: slow enough to trip any low-speed limit or short timeout.
+        while (ob_get_level() > 0) {
+            ob_end_flush();
+        }
+        header('Content-Type: audio/mpeg');
+        for ($i = 0; $i < 10; $i++) {
+            echo 's';
+            flush();
+            sleep(2);
+        }
+        return true;
+    case '/stream/big':
+        // 3000 bytes in 700-byte pieces, so a 1000-byte cap falls inside the second piece.
+        while (ob_get_level() > 0) {
+            ob_end_flush();
+        }
+        header('Content-Type: application/octet-stream');
+        for ($i = 0, $sent = 0; $sent < 3000; $i++) {
+            $piece = str_repeat(chr(ord('a') + $i), min(700, 3000 - $sent));
+            echo $piece;
+            flush();
+            $sent += strlen($piece);
+            usleep(20_000);
+        }
+        return true;
+    case '/stream/empty':
+        header('Content-Type: audio/mpeg');
+        header('Set-Cookie: session=fake');
+        return true;
 }
 http_response_code(404);
 echo 'not found';

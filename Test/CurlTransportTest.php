@@ -2,6 +2,8 @@
 
 use Kanboard\Plugin\Matinee\Http\CurlTransport;
 use Kanboard\Plugin\Matinee\Http\PlexException;
+use Kanboard\Plugin\Matinee\Http\PlexResponse;
+use Kanboard\Plugin\Matinee\Http\PlexStreamSink;
 use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 use PHPUnit\Framework\TestCase;
@@ -59,7 +61,8 @@ class CurlTransportTest extends TestCase
      */
     private static function startFixture(array $command, string $cwd, string $probe)
     {
-        $env = ['FAKE_PLEX_HITS' => self::$hitsFile];
+        // Several workers, so a stream the client abandoned mid-sleep cannot hold up the next test's request.
+        $env = ['FAKE_PLEX_HITS' => self::$hitsFile, 'PHP_CLI_SERVER_WORKERS' => '4'];
         foreach (['PATH', 'SYSTEMROOT', 'TMPDIR'] as $name) {
             if (getenv($name) !== false) {
                 $env[$name] = (string) getenv($name);
@@ -147,10 +150,10 @@ class CurlTransportTest extends TestCase
         return (int) file_get_contents(self::$hitsFile);
     }
 
-    private function transport(?array $targets = null, int $maxBytes = 2097152): CurlTransport
+    private function transport(?array $targets = null, int $maxBytes = 2097152, ?\Closure $primaryIp = null): CurlTransport
     {
         $guard = new UrlGuard([], $targets ?? ['127.0.0.1:' . self::$port]);
-        return new CurlTransport($guard, 2, 10, $maxBytes);
+        return new CurlTransport($guard, 2, 10, $maxBytes, null, $primaryIp);
     }
 
     private function url(string $path, ?int $port = null): string
@@ -482,6 +485,330 @@ class CurlTransportTest extends TestCase
             $this->assertSame('application/json', $r->headers['content-type'] ?? null);
         } finally {
             self::stopFixture($server);
+        }
+    }
+
+    // ── stream() (spec §3; C3a, C3c, C3f) ────────────────────────────────────
+
+    /** The S3-shaped opts every stream must carry; tests override one key at a time. */
+    private static function opts(array $over = []): array
+    {
+        return $over + ['timeout' => 10, 'lowSpeedLimit' => 1, 'lowSpeedTime' => 30, 'maxBytes' => 1048576];
+    }
+
+    /**
+     * A sink that records every call. $openAnswer is what open() returns; write() returns false once $stopAfter
+     * writes have happened (null: never), and throws $throwOnWrite on the first write when one is given.
+     */
+    private static function sink(bool $openAnswer = true, ?int $stopAfter = null, ?\Throwable $throwOnWrite = null): PlexStreamSink
+    {
+        return new class ($openAnswer, $stopAfter, $throwOnWrite) implements PlexStreamSink {
+            /** @var list<array{0: int, 1: array<string, string>}> */
+            public array $opens = [];
+            /** @var list<string> */
+            public array $writes = [];
+            /** @var list<float> microtime of each write */
+            public array $times = [];
+
+            public function __construct(private bool $openAnswer, private ?int $stopAfter, private ?\Throwable $throwOnWrite)
+            {
+            }
+
+            public function open(int $status, array $headers): bool
+            {
+                $this->opens[] = [$status, $headers];
+                return $this->openAnswer;
+            }
+
+            public function write(string $chunk): bool
+            {
+                $this->writes[] = $chunk;
+                $this->times[]  = microtime(true);
+                if ($this->throwOnWrite !== null) {
+                    throw $this->throwOnWrite;
+                }
+                return $this->stopAfter === null || count($this->writes) < $this->stopAfter;
+            }
+        };
+    }
+
+    public function testStreamDeliversTheChunksInOrderWithOnlyForwardableHeaders(): void
+    {
+        $sink = self::sink();
+        $r = $this->transport()->stream($this->url('/stream/chunks'), $this->headers(), self::opts(), $sink);
+
+        $this->assertSame(206, $r->status);
+        $this->assertSame('', $r->body);
+        $this->assertSame(['aaa', 'bbb', 'ccc'], $sink->writes);
+        $this->assertCount(1, $sink->opens);
+        [$status, $headers] = $sink->opens[0];
+        $this->assertSame(206, $status);
+        $this->assertSame('audio/mpeg', $headers['content-type'] ?? null);
+        $this->assertArrayNotHasKey('set-cookie', $headers);
+        foreach (array_keys($headers) as $name) {
+            $this->assertContains($name, PlexResponse::FORWARDED_HEADERS);
+        }
+    }
+
+    public function testTheFirstChunkReachesTheSinkBeforeTheLastIsSent(): void
+    {
+        $sink = self::sink();
+        $this->transport()->stream($this->url('/stream/chunks'), $this->headers(), self::opts(), $sink);
+
+        $this->assertCount(3, $sink->times);
+        // The fixture sleeps 1 s between chunks: a buffered transport would write all three at once.
+        $this->assertGreaterThan(1.5, end($sink->times) - $sink->times[0]);
+    }
+
+    public function testARefusedOpenWritesNothingAndReturnsTheUpstreamStatus(): void
+    {
+        $sink = self::sink(false);
+        $r = $this->transport()->stream($this->url('/stream/chunks'), $this->headers(), self::opts(), $sink);
+
+        $this->assertSame(206, $r->status);
+        $this->assertCount(1, $sink->opens);
+        $this->assertSame([], $sink->writes);
+    }
+
+    public function testAWriteThatReturnsFalseStopsTheStream(): void
+    {
+        $sink = self::sink(true, 1);
+        $r = $this->transport()->stream($this->url('/stream/chunks'), $this->headers(), self::opts(), $sink);
+
+        $this->assertSame(206, $r->status);
+        $this->assertSame(['aaa'], $sink->writes);
+    }
+
+    public function testAnEmptyBodyStillOpensOnce(): void
+    {
+        $sink = self::sink();
+        $r = $this->transport()->stream($this->url('/stream/empty'), $this->headers(), self::opts(), $sink);
+
+        $this->assertSame(200, $r->status);
+        $this->assertCount(1, $sink->opens);
+        $this->assertSame(200, $sink->opens[0][0]);
+        $this->assertSame('audio/mpeg', $sink->opens[0][1]['content-type'] ?? null);
+        $this->assertArrayNotHasKey('set-cookie', $sink->opens[0][1]);
+        $this->assertSame([], $sink->writes);
+    }
+
+    public function testASinkExceptionIsRethrownAfterTheTransfer(): void
+    {
+        $boom = new \RuntimeException('x');
+        $sink = self::sink(true, null, $boom);
+        try {
+            $this->transport()->stream($this->url('/stream/chunks'), $this->headers(), self::opts(), $sink);
+            $this->fail('expected the sink exception');
+        } catch (\RuntimeException $e) {
+            $this->assertSame($boom, $e);
+        }
+        $this->assertSame(['aaa'], $sink->writes, 'no write after the throw');
+    }
+
+    public function testMaxBytesWritesExactlyThePrefixThenThrowsTooLarge(): void
+    {
+        $sink = self::sink();
+        try {
+            $this->transport()->stream($this->url('/stream/big'), $this->headers(), self::opts(['maxBytes' => 1000]), $sink);
+            $this->fail('expected plex.too_large');
+        } catch (PlexException $e) {
+            $this->assertSame(PlexException::TOO_LARGE, $e->reason);
+        }
+        $written = implode('', $sink->writes);
+        $this->assertSame(1000, strlen($written));
+        $this->assertSame(str_repeat('a', 700) . str_repeat('b', 300), $written);
+    }
+
+    public function testABodyOfExactlyMaxBytesCompletes(): void
+    {
+        $sink = self::sink();
+        $r = $this->transport()->stream($this->url('/stream/big'), $this->headers(), self::opts(['maxBytes' => 3000]), $sink);
+        $this->assertSame(200, $r->status);
+        $this->assertSame(3000, strlen(implode('', $sink->writes)));
+    }
+
+    public function testALowSpeedStreamIsUnreachable(): void
+    {
+        $start = microtime(true);
+        try {
+            $this->transport()->stream($this->url('/stream/slow'), $this->headers(),
+                self::opts(['lowSpeedLimit' => 1024, 'lowSpeedTime' => 2, 'timeout' => 60]), self::sink());
+            $this->fail('expected plex.unreachable');
+        } catch (PlexException $e) {
+            $this->assertSame(PlexException::UNREACHABLE, $e->reason);
+        }
+        $this->assertLessThan(6.0, microtime(true) - $start);
+    }
+
+    public function testTheStreamTimeoutComesFromOpts(): void
+    {
+        $start = microtime(true);
+        try {
+            $this->transport()->stream($this->url('/stream/slow'), $this->headers(),
+                self::opts(['timeout' => 1, 'lowSpeedLimit' => 1, 'lowSpeedTime' => 60]), self::sink());
+            $this->fail('expected plex.unreachable');
+        } catch (PlexException $e) {
+            $this->assertSame(PlexException::UNREACHABLE, $e->reason);
+        }
+        $this->assertLessThan(4.0, microtime(true) - $start);
+    }
+
+    public function testGetTakesItsTimeoutFromOpts(): void
+    {
+        $start = microtime(true);
+        try {
+            $this->transport()->get($this->url('/stream/slow'), $this->headers(), ['timeout' => 1]);
+            $this->fail('expected plex.unreachable');
+        } catch (PlexException $e) {
+            $this->assertSame(PlexException::UNREACHABLE, $e->reason);
+        }
+        $this->assertLessThan(4.0, microtime(true) - $start);
+    }
+
+    /** @dataProvider badGetOpts */
+    public function testGetRefusesBadOptsBeforeAnyConnection(array $opts): void
+    {
+        $before = self::hits();
+        try {
+            $this->transport()->get($this->url('/identity'), $this->headers(), $opts);
+            $this->fail('expected a refusal');
+        } catch (\InvalidArgumentException) {
+        }
+        $this->assertSame($before, self::hits());
+    }
+
+    public static function badGetOpts(): array
+    {
+        return [
+            'timeout 0'   => [['timeout' => 0]],
+            'string'      => [['timeout' => '5']],
+            'unknown key' => [['maxBytes' => 5]],
+        ];
+    }
+
+    public function testWithoutAPrivateTargetAStreamConnectsNowhere(): void
+    {
+        $before = self::hits();
+        $sink = self::sink();
+        try {
+            $this->transport([])->stream($this->url('/stream/chunks'), $this->headers(), self::opts(), $sink);
+            $this->fail('expected UnsafeUrlException');
+        } catch (UnsafeUrlException $e) {
+            $this->assertSame(UnsafeUrlException::PRIVATE_NETWORK, $e->reason);
+        }
+        $this->assertSame($before, self::hits());
+        $this->assertSame([], $sink->opens);
+    }
+
+    public function testTheGuardRunsOnEveryStream(): void
+    {
+        $t = $this->transport();
+        $t->stream($this->url('/stream/empty'), $this->headers(), self::opts(), self::sink());
+        $this->assertSame(1, $this->resolverCalls);
+        $t->stream($this->url('/stream/empty'), $this->headers(), self::opts(), self::sink());
+        $this->assertSame(2, $this->resolverCalls);
+    }
+
+    /** @dataProvider badStreamOpts */
+    public function testStreamRefusesBadOptsBeforeAnyConnection(array $opts): void
+    {
+        $before = self::hits();
+        $sink = self::sink();
+        try {
+            $this->transport()->stream($this->url('/stream/chunks'), $this->headers(), $opts, $sink);
+            $this->fail('expected a refusal');
+        } catch (\InvalidArgumentException) {
+        }
+        $this->assertSame($before, self::hits());
+        $this->assertSame([], $sink->opens);
+    }
+
+    public static function badStreamOpts(): array
+    {
+        $full = ['timeout' => 10, 'lowSpeedLimit' => 1, 'lowSpeedTime' => 30, 'maxBytes' => 1000];
+        $without = static function (string $key) use ($full): array {
+            unset($full[$key]);
+            return $full;
+        };
+        return [
+            'missing maxBytes'      => [$without('maxBytes')],
+            'missing timeout'       => [$without('timeout')],
+            'missing lowSpeedLimit' => [$without('lowSpeedLimit')],
+            'missing lowSpeedTime'  => [$without('lowSpeedTime')],
+            'timeout 0'             => [['timeout' => 0] + $full],
+            'maxBytes -1'           => [['maxBytes' => -1] + $full],
+            'a string'              => [['lowSpeedTime' => '30'] + $full],
+            'an unknown key'        => [$full + ['range' => 'bytes=0-']],
+        ];
+    }
+
+    /** @dataProvider pinPaths */
+    public function testAPinMismatchNeverOpensTheSink(string $path): void
+    {
+        $sink = self::sink();
+        $t = $this->transport(null, 2097152, static fn (\CurlHandle $ch): string => '203.0.113.9');
+        try {
+            $t->stream($this->url($path), $this->headers(), self::opts(), $sink);
+            $this->fail('expected plex.unreachable');
+        } catch (PlexException $e) {
+            $this->assertSame(PlexException::UNREACHABLE, $e->reason);
+        }
+        $this->assertSame([], $sink->opens);
+        $this->assertSame([], $sink->writes);
+    }
+
+    public static function pinPaths(): array
+    {
+        return ['a body' => ['/stream/chunks'], 'an empty body' => ['/stream/empty']];
+    }
+
+    public function testThePrimaryIpSeamAlsoGuardsGet(): void
+    {
+        $t = $this->transport(null, 2097152, static fn (\CurlHandle $ch): string => '203.0.113.9');
+        try {
+            $t->get($this->url('/identity'), $this->headers());
+            $this->fail('expected plex.unreachable');
+        } catch (PlexException $e) {
+            $this->assertSame(PlexException::UNREACHABLE, $e->reason);
+        }
+    }
+
+    public function testStreamWritesNothingToTheOutputBuffer(): void
+    {
+        $sink = self::sink();
+        ob_start();
+        try {
+            $this->transport()->stream($this->url('/stream/chunks'), $this->headers(), self::opts(), $sink);
+            try {
+                $this->transport()->stream($this->url('/stream/big'), $this->headers(), self::opts(['maxBytes' => 1000]), self::sink());
+            } catch (PlexException $e) {
+                $this->assertSame(PlexException::TOO_LARGE, $e->reason);
+            }
+        } finally {
+            $echoed = (string) ob_get_clean();
+        }
+        $this->assertSame('', $echoed);
+        $this->assertSame(['aaa', 'bbb', 'ccc'], $sink->writes);
+    }
+
+    public function testStreamHeadersAreRedactedFromStackTraces(): void
+    {
+        $previous = ini_set('zend.exception_ignore_args', '0');
+        try {
+            $this->transport()->stream($this->url('/stream/chunks'), ['X-Plex-Token' => self::TOKEN . "\nX-Evil: 1"], self::opts(), self::sink());
+            $this->fail('expected a refusal');
+        } catch (\InvalidArgumentException $e) {
+            $frames = [];
+            foreach ($e->getTrace() as $frame) {
+                if (($frame['class'] ?? '') === CurlTransport::class) {
+                    $frames[$frame['function']] = $frame['args'] ?? [];
+                }
+            }
+            $this->assertArrayHasKey('stream', $frames);
+            $this->assertInstanceOf(\SensitiveParameterValue::class, $frames['stream'][1] ?? null);
+            $this->assertStringNotContainsString(self::TOKEN, $e->getTraceAsString());
+        } finally {
+            ini_set('zend.exception_ignore_args', (string) $previous);
         }
     }
 
