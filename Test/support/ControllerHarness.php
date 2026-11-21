@@ -15,6 +15,7 @@ use Kanboard\Plugin\Matinee\Test\FakeTransport;
 
 require_once __DIR__.'/FakeTransport.php';
 require_once __DIR__.'/ReleasesContainer.php';
+require_once __DIR__.'/TempInflight.php';
 
 /** Records what would be sent instead of calling header(). Core's Runner still sees it as sent. */
 class MatineeTestResponse extends Response
@@ -50,6 +51,7 @@ class MatineeLineLogger extends \Psr\Log\AbstractLogger
 trait MatineeControllerHarness
 {
     use MatineeReleasesContainer;
+    use MatineeTempInflight;
 
     private const TOKEN = 'test-token-NOT-REAL-0000';
     private const BASE = 'https://plex.example.test:32400';
@@ -98,6 +100,8 @@ trait MatineeControllerHarness
         $this->log = new MatineeLineLogger();
         unset($this->container['logger']);
         $this->container['logger'] = $this->log;
+        // M1: the in-flight gate on a temp dir of this test's own; holdInflight() fills its slots.
+        $this->useTempInflightGate();
         // The real ResponseSink, its PHP calls swapped for recorders (and no output buffer is ended under PHPUnit).
         $this->sinkAborted = static fn (): bool => false;
         $this->container['matineeResponseSink'] = $this->container->factory(fn (): ResponseSink => new ResponseSink(
@@ -115,6 +119,7 @@ trait MatineeControllerHarness
 
     private function cleanKeyDir(): void
     {
+        $this->cleanInflight();
         foreach (['secret.key', '.lock'] as $f) {
             @unlink($this->keyDir.'/'.$f);
         }

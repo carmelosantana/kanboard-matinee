@@ -1144,4 +1144,85 @@ class PlayControllerTest extends Base
         $this->assertStringContainsString('Could not reach that server.', $r->body());
         $this->assertStringNotContainsString(self::TOKEN, $r->body());
     }
+
+    // ── M1: the in-flight gate ─────────────────────────────────────────────────
+
+    /** An empty 503 asking for a 5 s wait, with no Plex request made. */
+    private function assertInflightBusy(MatineeTestResponse $r, string $label): void
+    {
+        $this->assertRefused(503, $r, $label);
+        $this->assertSame('5', $r->headers()['Retry-After'] ?? null, $label);
+        $this->assertSame([], $this->t->requests, $label);
+    }
+
+    /** Every gated stream endpoint, as [label, request], each with what Plex would answer queued (it must never be asked). */
+    private function gatedRequests(): array
+    {
+        [, $session] = $this->claim($this->owner);
+        $ref = $this->hlsRef($this->owner);
+        return [
+            'media part'      => fn () => $this->media($this->ref($this->owner)),
+            'hls start'       => fn () => $this->hlsStart($ref, $session),
+            'proxy playlist'  => fn () => $this->hlsProxy($ref, self::child($session)),
+            'proxy segment'   => fn () => $this->hlsProxy($ref, self::child($session, 'base/00000.ts')),
+        ];
+    }
+
+    public function testEveryGatedStreamEndpointIsAnEmpty503WhenTheUsersSlotsAreFull(): void
+    {
+        $this->holdInflight('u'.$this->owner.'-', 4);
+        foreach ($this->gatedRequests() as $label => $request) {
+            $this->assertInflightBusy($request(), $label);
+        }
+    }
+
+    public function testEveryGatedStreamEndpointIsAnEmpty503WhenTheGlobalSlotsAreFull(): void
+    {
+        $this->holdInflight('g-', 8);
+        foreach ($this->gatedRequests() as $label => $request) {
+            $this->assertInflightBusy($request(), $label);
+        }
+    }
+
+    public function testAnotherUsersFullSlotsLeaveThisUserAlone(): void
+    {
+        $this->holdInflight('u'.$this->friend.'-', 4);
+        $this->queuePart();
+        $this->media($this->ref($this->owner));
+        $this->assertSame(206, $this->sinkStatus);
+    }
+
+    public function testAGatedRequestFreesItsSlotsWhenItEnds(): void
+    {
+        $this->queuePart();
+        $this->media($this->ref($this->owner));
+        $this->assertSame(206, $this->sinkStatus);
+        $this->t->streams(500, [], ['x']);
+        $this->media($this->ref($this->owner));
+        // Both requests have ended: every slot is free again.
+        $this->holdInflight('u'.$this->owner.'-', 4);
+        $this->holdInflight('g-', 8);
+    }
+
+    public function testTheMp3TranscodeIsNotGated(): void
+    {
+        $this->holdInflight('u'.$this->owner.'-', 4);
+        $this->holdInflight('g-', 8);
+        $this->t->streams(200, ['Content-Type' => 'audio/mpeg'], ['ID3']);
+        $this->media($this->ref($this->owner, 'media', self::ITEM));
+        $this->assertSame(200, $this->sinkStatus);
+        $this->assertSame('ID3', $this->sinkBody);
+    }
+
+    public function testThePlayerPageIsTheBusyPageWithRetryAfter5AndClaimsNothing(): void
+    {
+        $this->holdInflight('u'.$this->owner.'-', 4);
+        $this->queueItem('item-movie-avi');
+        $r = $this->play($this->movieRef($this->owner));
+        $this->assertSame(503, $r->code());
+        $this->assertSame('5', $r->headers()['Retry-After'] ?? null);
+        $this->assertStringContainsString('<p class="alert alert-error">'.self::BUSY.'</p>', $r->body());
+        $this->assertSame([], $this->t->requests);
+        $this->assertSame([], $this->container['db']->table(TranscodeModel::TABLE)->findAll());
+    }
 }

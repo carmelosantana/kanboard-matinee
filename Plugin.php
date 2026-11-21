@@ -12,6 +12,7 @@ use Kanboard\Plugin\Matinee\Http\PlexTransport;
 use Kanboard\Plugin\Matinee\Http\ResponseSink;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 use Kanboard\Plugin\Matinee\Model\BrowseModel;
+use Kanboard\Plugin\Matinee\Model\InflightGate;
 use Kanboard\Plugin\Matinee\Model\MatineePolicy;
 use Kanboard\Plugin\Matinee\Model\PlaybackModel;
 use Kanboard\Plugin\Matinee\Model\ServerModel;
@@ -68,6 +69,16 @@ class Plugin extends Base
         $container['matineeShutdown'] = $container->protect(register_shutdown_function(...));
         // The lazy sweep's dice (C4d), rolled as a Matinee controller is built: true on one request in ten. Tests stub it.
         $container['matineeSweepDice'] = $container->protect(static fn (): bool => random_int(1, 10) === 1);
+        // M1: bounds the Plex requests browsers have in flight (flock slots under DATA_DIR/matinee/inflight); the global
+        // cap is read from the settings on every run. Tests swap in a temp dir.
+        $container['matineeInflightGate'] = static fn ($c): InflightGate => new InflightGate(
+            DATA_DIR.'/matinee/inflight',
+            static fn (): int => (new Settings($c))->inflightGlobal(),
+            InflightGate::PER_USER,
+            static function (string $line) use ($c): void {
+                $c['logger']->error($line);
+            }
+        );
         // The sink a stream endpoint writes the browser's response through (C3e); tests wire one to recorders.
         $container['matineeResponseSink'] = $container->factory(static fn (): ResponseSink => new ResponseSink());
 

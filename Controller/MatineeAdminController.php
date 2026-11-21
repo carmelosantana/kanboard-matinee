@@ -10,7 +10,7 @@ use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
 use Kanboard\Plugin\Matinee\Model\Settings;
 
 /**
- * Settings → Matinee (spec §4 admin list, §11 S1): who may connect, private targets, allowed hosts and the two limits,
+ * Settings → Matinee (spec §4 admin list, §11 S1): who may connect, private targets, allowed hosts, the limits and caps,
  * and every server with its owner, host, status and shared flag behind an enable/disable switch. No token, no edit.
  * ACL is APP_ADMIN; each action checks again.
  */
@@ -47,6 +47,7 @@ class MatineeAdminController extends MatineeBaseController
                 Settings::STREAM_CAP_SERVER_KEY => (string) $settings->streamCapServer(),
                 Settings::STREAM_CAP_USER_KEY => (string) $settings->streamCapUser(),
                 Settings::STREAM_CAP_GLOBAL_KEY => (string) $settings->streamCapGlobal(),
+                Settings::INFLIGHT_GLOBAL_KEY => (string) $settings->inflightGlobal(),
             ],
             'policies' => [Settings::POLICY_EVERYONE => t('Every user'), Settings::POLICY_ADMINS => t('Administrators only')],
             'servers' => $rows,
@@ -86,6 +87,7 @@ class MatineeAdminController extends MatineeBaseController
             Settings::STREAM_CAP_USER_KEY => $this->field(Settings::STREAM_CAP_USER_KEY),
             Settings::STREAM_CAP_GLOBAL_KEY => $this->field(Settings::STREAM_CAP_GLOBAL_KEY),
         ];
+        $inflight = $this->field(Settings::INFLIGHT_GLOBAL_KEY);
 
         $error = match (true) {
             ! in_array($policy, [Settings::POLICY_EVERYONE, Settings::POLICY_ADMINS], true) => t('Choose who may connect servers.'),
@@ -96,6 +98,7 @@ class MatineeAdminController extends MatineeBaseController
             ! self::validLimit($attempts) => t('The attempt limit must be a whole number from 1 to %d.', Settings::LIMIT_MAX),
             ! self::validLimit($maxServers) => t('The server limit must be a whole number from 1 to %d.', Settings::LIMIT_MAX),
             array_filter($caps, [self::class, 'validLimit']) !== $caps => t('The stream limits must be whole numbers from 1 to %d.', Settings::LIMIT_MAX),
+            ! self::validLimit($inflight) => t('The in-flight request limit must be a whole number from 1 to %d.', Settings::LIMIT_MAX),
             default => null,
         };
         if ($error !== null) {
@@ -110,6 +113,7 @@ class MatineeAdminController extends MatineeBaseController
             Settings::ALLOWED_HOSTS => implode("\n", UrlGuard::parseHostList($hosts)),
             Settings::ATTEMPT_LIMIT_KEY => (string) (int) $attempts,
             Settings::MAX_SERVERS_KEY => (string) (int) $maxServers,
+            Settings::INFLIGHT_GLOBAL_KEY => (string) (int) $inflight,
         ] + array_map(static fn (string $cap): string => (string) (int) $cap, $caps));
         if ($saved) {
             $this->flash->success(t('Settings saved successfully.'));

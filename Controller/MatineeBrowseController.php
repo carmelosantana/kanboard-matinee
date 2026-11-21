@@ -5,6 +5,7 @@ namespace Kanboard\Plugin\Matinee\Controller;
 use Kanboard\Core\Controller\AccessForbiddenException;
 use Kanboard\Plugin\Matinee\Http\PlexClient;
 use Kanboard\Plugin\Matinee\Model\BrowseModel;
+use Kanboard\Plugin\Matinee\Model\MatineeBusyException;
 use Kanboard\Plugin\Matinee\Model\MatineeConnectException;
 use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
 
@@ -14,7 +15,8 @@ use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
  *
  * - Pages: a refusal is core's 403 page; a Plex failure, or a key store that will not load, is one fixed sentence
  *   with a 502. Nothing a model or Plex said is shown.
- * - Art: the upstream bytes with exactly the S11 headers, or an empty 403 (refused) or 502 (failed). Never HTML.
+ * - Art: the upstream bytes with exactly the S11 headers, or an empty 403 (refused), 502 (failed) or 503 with
+ *   `Retry-After: 5` (the in-flight gate is full, M1). Never HTML.
  * - Links and image sources are Matinee URLs carrying a ref; a Plex path, host or token never reaches a page.
  */
 class MatineeBrowseController extends MatineeBaseController
@@ -93,6 +95,9 @@ class MatineeBrowseController extends MatineeBaseController
         } catch (MatineeConnectException) {
             $this->refuse(502);
             return;
+        } catch (MatineeBusyException $e) {
+            $this->refuse(503, ['Retry-After' => (string) $e->retryAfter]);
+            return;
         }
         // The type goes into Content-Type as is, so it is checked here too, against the one allow-list.
         if (! in_array($image['type'], PlexClient::ART_TYPES, true)) {
@@ -122,7 +127,8 @@ class MatineeBrowseController extends MatineeBaseController
 
     /**
      * Runs a model call for a page. Forbidden is core's 403; a connect failure (a Plex failure, or a key store that
-     * will not load, which BrowseModel maps to the same) renders the fixed failure page and returns null.
+     * will not load, which BrowseModel maps to the same) renders the fixed failure page and returns null; a full
+     * in-flight gate (M1) renders the busy page with a 503 and its Retry-After and returns null.
      */
     private function attempt(callable $call): ?array
     {
@@ -133,12 +139,19 @@ class MatineeBrowseController extends MatineeBaseController
         } catch (MatineeConnectException) {
             $this->renderMedia('Matinee:browse/failed', [], 502);
             return null;
+        } catch (MatineeBusyException $e) {
+            $this->response->withHeader('Retry-After', (string) $e->retryAfter);
+            $this->renderMedia('Matinee:play/busy', [], 503);
+            return null;
         }
     }
 
     /** An empty art refusal: no body, so nothing for a browser to render or sniff. */
-    private function refuse(int $status): void
+    private function refuse(int $status, array $headers = []): void
     {
+        foreach ($headers as $name => $value) {
+            $this->response->withHeader($name, $value);
+        }
         $this->response->withHeader('X-Content-Type-Options', 'nosniff');
         $this->response->withHeader('Cache-Control', 'no-store');
         $this->response->status($status);

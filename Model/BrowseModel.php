@@ -23,6 +23,7 @@ use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
  *   the stage, the server id (when there is one) and a fixed reason code go to the log (never a message, URL or
  *   token). A key-store failure leaves the server's status alone.
  * - A listing re-fetches the live sections (B3); art does not (B2).
+ * - Every Plex request runs inside the in-flight gate (M1); a full gate is MatineeBusyException (Retry-After 5).
  * - Browse and art refs are minted for 3600 s; play refs (an hls ref for a movie or episode, a media ref for a track,
  *   naming the item) for their kind's TTL (8 h). All carry the server and section of the ref they came from.
  */
@@ -160,7 +161,8 @@ final class BrowseModel extends Base
         try {
             $client = $this->servers()->clientFor($server, $userId);
             $at = $stage;
-            return $call($client);
+            // M1: one in-flight slot of this user's and one global, held while Plex answers; full is Busy (passes through).
+            return $this->gate()->run($userId, fn () => $call($client));
         } catch (MatineeForbiddenException $e) {
             throw $e;
         } catch (\InvalidArgumentException $e) {
@@ -203,6 +205,11 @@ final class BrowseModel extends Base
             $this->logger->info(sprintf('Matinee: browse failed at refs (%s)', self::reason($e)));
             throw new MatineeConnectException();
         }
+    }
+
+    private function gate(): InflightGate
+    {
+        return $this->container['matineeInflightGate'];
     }
 
     private function policy(): MatineePolicy

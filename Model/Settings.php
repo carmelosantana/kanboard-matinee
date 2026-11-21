@@ -38,7 +38,16 @@ final class Settings extends Base
     public const STREAM_CAP_SERVER = 4;
     public const STREAM_CAP_USER = 2;
     public const STREAM_CAP_GLOBAL = 5;
-    /** The highest attempt limit, server cap or stream cap the admin form accepts; stream caps above it read as unset. */
+    /**
+     * M1: Plex requests in flight on the whole install (InflightGate's global cap; its per-user cap is
+     * InflightGate::PER_USER).
+     */
+    public const INFLIGHT_GLOBAL_KEY = 'matinee_inflight_global';
+    public const INFLIGHT_GLOBAL = 8;
+    /**
+     * The highest attempt limit, server cap, stream cap or in-flight cap the admin form accepts; stream and in-flight
+     * caps above it read as unset.
+     */
     public const LIMIT_MAX = 1000;
 
     public function connectPolicy(): string
@@ -69,6 +78,11 @@ final class Settings extends Base
     public function streamCapGlobal(): int
     {
         return $this->positiveInt(self::STREAM_CAP_GLOBAL_KEY, self::STREAM_CAP_GLOBAL, self::LIMIT_MAX);
+    }
+
+    public function inflightGlobal(): int
+    {
+        return $this->positiveInt(self::INFLIGHT_GLOBAL_KEY, self::INFLIGHT_GLOBAL, self::LIMIT_MAX);
     }
 
     /** The per-install client id, or '' before ensureClientId() has run. Read-only: never writes. */

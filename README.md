@@ -190,6 +190,18 @@ right now. Try again in a minute." A media or HLS request over a cap is an empty
 Opening the next film in the same tab at a per-user cap of 1 can beat the previous page's stop beacon and get
 the busy page; reloading fixes it.
 
+### Requests in flight
+
+Every request Plex answers for a browser (a direct-play music window, a video playlist or segment, a poster, a
+library page, the player page's lookups) holds one of the viewer's 4 in-flight slots and one of the
+install's, 8 by default (**Plex requests in flight on this Kanboard**). The mp3 transcode and the video session
+itself don't take one; the stream caps bound those. When either is full the request is answered at once with
+`503` and `Retry-After: 5`: an empty body for media, playlists, segments and posters, the busy page for the
+player and the library pages. hls.js retries a segment by itself.
+
+Slots are `flock` locks on files in `DATA_DIR/matinee/inflight/` (0700), so a worker that dies frees its slots
+with it. Each one bounds how many PHP-FPM workers a slow or hostile Plex can hold for up to 60 s.
+
 ## Web server
 
 Each long stream holds one PHP-FPM worker for as long as Plex is sending. Three settings keep that bounded:
@@ -203,6 +215,8 @@ Each long stream holds one PHP-FPM worker for as long as Plex is sending. Three 
 - **Keep the global stream cap under a quarter of `pm.max_children`.** Every long stream pins a worker, and the
   rest of Kanboard needs the others. The default global cap of 5 wants `pm.max_children` of 21 or more; lower
   the cap if your pool is smaller.
+- **Keep the in-flight cap under half of `pm.max_children`.** Each in-flight request holds a worker for up to
+  60 s when Plex is slow. The default of 8, with the default stream caps, wants `pm.max_children` of 26 or more.
 
 ## Admin settings
 
@@ -216,6 +230,7 @@ Each long stream holds one PHP-FPM worker for as long as Plex is sending. Three 
 | Long streams per server | 4 | Video sessions and transcoded tracks one server may run at once (see [Stream caps](#stream-caps)) |
 | Long streams per user | 2 | Long streams one user may run at once, across every server |
 | Long streams on this Kanboard | 5 | Long streams across every server and user; keep it under a quarter of `pm.max_children` |
+| Plex requests in flight on this Kanboard | 8 | Short Plex requests running at once for every user together, 4 per user at most (see [Requests in flight](#requests-in-flight)) |
 | Private targets | empty | Private addresses Matinee may reach (below) |
 | Allowed hosts | empty | When set, the only hosts Matinee may reach at all |
 
@@ -344,6 +359,12 @@ Deleting a user removes their servers.
   With `true`, the response sink notices the abort itself, curl stops cleanly, and the row is stopped at once.
   A shutdown function stops any row the request claimed as a backstop. The cost is that a worker may read one
   more chunk from Plex after the browser leaves.
+- **Requests in flight.** Every Plex request made for a browser holds a per-user and a global
+  [in-flight slot](#requests-in-flight), so a hostile or stalled Plex can't tie up every PHP-FPM worker and
+  take down the rest of Kanboard. Playlist fetches, like streams, give up after 15 s below 1 KiB/s.
+- **Bounded parsing.** A playlist line over 8 KiB, or a tag with more than 64 attributes, refuses the whole
+  playlist before any pattern runs on it. A segment whose upstream sends a `Content-Length` is cut at exactly
+  that many bytes, as a music window is.
 
 ## Roles
 
@@ -373,12 +394,13 @@ server whose owner is deactivated.
   is an mp3 transcode. The [stream caps](#stream-caps) bound how many run at once.
 - **All media bandwidth flows through Kanboard.** Every byte is proxied, so the Kanboard host's upload is the
   ceiling for everyone playing at once.
-- **Segment requests within a session aren't limited.** A viewer holding one session can fetch its playlists
-  and segments as fast as they like; only the number of sessions is capped.
+- **Segment requests within a session are limited only by the in-flight slots.** A viewer holding one session
+  can fetch its playlists and segments as fast as Plex answers, four at a time; there is no per-minute rate.
 - **A transcoded track can't seek or resume after a long pause** (see [Music](#music)).
 - **Browsing has no rate limit.** Each library page costs Plex two requests and each poster one, for anyone
   the server is shared with. A user who keeps reloading adds load to the owner's Plex (never more than one
-  Plex call per Matinee request beyond those). Keep a server private if you don't trust everyone on the board.
+  Plex call per Matinee request beyond those), four requests at a time. Keep a server private if you don't
+  trust everyone on the board.
 - **A poster stays in a viewer's browser cache for up to an hour** after the server is made private.
 
 ## Roadmap

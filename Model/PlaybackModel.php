@@ -26,6 +26,9 @@ use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
  *   segment and ping heartbeats it, and a request for a session that is not this user's active hls row on the ref's
  *   server is Forbidden. Stopping marks the row first, then asks Plex (hls rows only, failures swallowed).
  * - Every Plex client is named for the viewer (C9).
+ * - Every Plex request made for a browser request runs inside the in-flight gate (M1): the page's lookups, the HLS
+ *   master, a child playlist or segment, a direct part window. A full gate is Busy with Retry-After 5. The mp3
+ *   transcode is not gated; it holds a long-stream row instead.
  * - Before a stream's sink opens, Plex, URL-guard, token and key-store failures are one MatineeConnectException, logged
  *   by stage with a fixed reason. After it opens, any failure is logged as STREAM_ENDED_LOG and nothing more is
  *   appended (C3g): the response has already started.
@@ -71,11 +74,11 @@ final class PlaybackModel extends Base
         $server = $this->authorize($userId, $p['sv']);
         $client = $this->client($server, $userId);
 
-        $live = $this->plex($server, 'sections', fn () => $client->sections());
+        $live = $this->gated($userId, fn () => $this->plex($server, 'sections', fn () => $client->sections()));
         if (! $this->policy()->sectionAllowed($live, $p['s'])) {
             throw new MatineeForbiddenException();
         }
-        $item = $this->plex($server, 'item', fn () => $client->item($p['r']));
+        $item = $this->gated($userId, fn () => $this->plex($server, 'item', fn () => $client->item($p['r'])));
         $types = $kind === 'hls' ? self::VIDEO_TYPES : ['track'];
         if ($item['section'] === null || $item['section'] !== $p['s'] || ! in_array($item['type'], $types, true)) {
             throw new MatineeForbiddenException();
@@ -113,12 +116,12 @@ final class PlaybackModel extends Base
     {
         [$p, $server] = $this->hlsAuthorize($userId, $ref, $session, $onAuthorized);
         $client = $this->client($server, $userId);
-        return $this->plex($server, 'start', fn () => HlsPlaylist::rewrite(
+        return $this->gated($userId, fn () => $this->plex($server, 'start', fn () => HlsPlaylist::rewrite(
             $client->hlsStart($p['r'], $session),
             PlexPaths::HLS_PREFIX.'start.m3u8',
             $session,
             $proxyUrl
-        ));
+        )));
     }
 
     /**
@@ -138,10 +141,10 @@ final class PlaybackModel extends Base
 
         $path = explode('?', $u, 2)[0];
         if (str_ends_with($path, '.m3u8')) {
-            return $this->plex($server, 'playlist', fn () => HlsPlaylist::rewrite($client->hlsPlaylist($u, $session), $path, $session, $proxyUrl));
+            return $this->gated($userId, fn () => $this->plex($server, 'playlist', fn () => HlsPlaylist::rewrite($client->hlsPlaylist($u, $session), $path, $session, $proxyUrl)));
         }
         $tracked = self::tracked($sink);
-        $this->stream((int) $server['id'], 'segment', $tracked, fn () => $client->hlsSegment($u, $session, $tracked));
+        $this->gated($userId, fn () => $this->stream((int) $server['id'], 'segment', $tracked, fn () => $client->hlsSegment($u, $session, $tracked)));
         return null;
     }
 
@@ -165,7 +168,7 @@ final class PlaybackModel extends Base
         if (PlexPaths::isPart($p['r'])) {
             [$start, $end] = ByteRange::window($range);
             $tracked = self::tracked($sink);
-            $result = $this->stream($serverId, 'part', $tracked, fn () => $client->part($p['r'], $start, $end, $tracked));
+            $result = $this->gated($userId, fn () => $this->stream($serverId, 'part', $tracked, fn () => $client->part($p['r'], $start, $end, $tracked)));
             if ($result !== null && $result['status'] === 416) {
                 throw new MatineeRangeException((int) $result['total']);
             }
@@ -378,6 +381,15 @@ final class PlaybackModel extends Base
         }
     }
 
+    /**
+     * Runs $call holding one of $userId's in-flight slots and a global one (M1); a full gate is Busy (Retry-After 5)
+     * before any Plex request. The mp3 transcode and the HLS session's claim are not gated: the stream caps bound them.
+     */
+    private function gated(int $userId, \Closure $call): mixed
+    {
+        return $this->gate()->run($userId, $call);
+    }
+
     /** Runs a buffered Plex call; a failure maps as failure() says. */
     private function plex(array $server, string $stage, callable $call): mixed
     {
@@ -454,6 +466,11 @@ final class PlaybackModel extends Base
     private function now(): int
     {
         return ($this->container['matineeClock'])();
+    }
+
+    private function gate(): InflightGate
+    {
+        return $this->container['matineeInflightGate'];
     }
 
     private function transcodes(): TranscodeModel

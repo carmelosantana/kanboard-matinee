@@ -1,6 +1,7 @@
 <?php
 require_once 'tests/units/Base.php';
 require_once __DIR__.'/support/ReleasesContainer.php';
+require_once __DIR__.'/support/TempInflight.php';
 require_once __DIR__.'/support/FakeTransport.php';
 require_once __DIR__.'/support/RecordingSink.php';
 
@@ -47,6 +48,7 @@ class PlaybackCallbackSink extends RecordingSink
 class PlaybackModelTest extends Base
 {
     use MatineeReleasesContainer;
+    use MatineeTempInflight;
 
     private const TOKEN = 'test-token-NOT-REAL-0000';
     private const BASE = 'https://plex.example.test:32400';
@@ -82,6 +84,7 @@ class PlaybackModelTest extends Base
         \Kanboard\Plugin\Matinee\Schema\version_3($pdo);
 
         (new Plugin($this->container))->initialize();
+        $this->useTempInflightGate();
 
         $this->keyDir = sys_get_temp_dir().'/matinee-playback-'.bin2hex(random_bytes(6));
         $this->container['matineeKeyStore'] = new KeyStore($this->keyDir, null);
@@ -131,6 +134,7 @@ class PlaybackModelTest extends Base
             @unlink($this->keyDir.'/'.$f);
         }
         @rmdir($this->keyDir);
+        $this->cleanInflight();
         parent::tearDown();
         $this->releaseContainer();
     }

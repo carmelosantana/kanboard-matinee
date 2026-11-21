@@ -34,6 +34,10 @@
         <?= $this->form->label(t('Long streams on this Kanboard'), 'matinee_stream_cap_global') ?>
         <?= $this->form->number('matinee_stream_cap_global', $values, [], ['min="1"', 'max="1000"', 'required']) ?>
         <p class="form-help"><?= t('Video sessions and transcoded music count. Keep the last limit under a quarter of PHP-FPM\'s pm.max_children.') ?></p>
+
+        <?= $this->form->label(t('Plex requests in flight on this Kanboard'), 'matinee_inflight_global') ?>
+        <?= $this->form->number('matinee_inflight_global', $values, [], ['min="1"', 'max="1000"', 'required']) ?>
+        <p class="form-help"><?= t('Playlists, video segments, music, posters and listings Plex is answering at once, at most 4 per user. Keep it under half of PHP-FPM\'s pm.max_children.') ?></p>
     </fieldset>
 
     <fieldset>

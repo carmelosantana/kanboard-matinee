@@ -5,6 +5,7 @@ require_once __DIR__.'/support/ReleasesContainer.php';
 use KanboardTests\units\Base;
 use Kanboard\Model\UserModel;
 use Kanboard\Plugin\Matinee\Model\MatineeBusyException;
+use Kanboard\Plugin\Matinee\Model\InflightGate;
 use Kanboard\Plugin\Matinee\Model\Settings;
 use Kanboard\Plugin\Matinee\Model\TranscodeModel;
 use Kanboard\Plugin\Matinee\Plugin;
@@ -558,5 +559,37 @@ class TranscodeModelTest extends Base
     public function testThePluginRegistersTheModel(): void
     {
         $this->assertInstanceOf(TranscodeModel::class, $this->container['matineeTranscodeModel']);
+    }
+
+    /** M1: the in-flight gate's global cap is one admin setting, read the way the stream caps are. */
+    public function testTheInflightGlobalCapDefaultsTo8AndFallsBackOnBadValues(): void
+    {
+        $s = new Settings($this->container);
+        $this->assertSame('matinee_inflight_global', Settings::INFLIGHT_GLOBAL_KEY);
+        $this->assertSame(8, $s->inflightGlobal());
+        $this->setCap(Settings::INFLIGHT_GLOBAL_KEY, '3');
+        $this->assertSame(3, $s->inflightGlobal());
+        foreach (['0', '-1', 'abc', '', '1001', '99999999999999999999'] as $bad) {
+            $this->setCap(Settings::INFLIGHT_GLOBAL_KEY, $bad);
+            $this->assertSame(8, $s->inflightGlobal(), "'$bad' falls back");
+        }
+        $this->setCap(Settings::INFLIGHT_GLOBAL_KEY, '1000');
+        $this->assertSame(1000, $s->inflightGlobal());
+    }
+
+    /**
+     * The plugin's gate sits under DATA_DIR/matinee/inflight, 4 per user, and reads the saved global cap on every run.
+     * It is inspected, never run: DATA_DIR is read-only in the real-DB runs.
+     */
+    public function testThePluginRegistersTheInflightGateOnTheSavedCap(): void
+    {
+        $gate = $this->container['matineeInflightGate'];
+        $this->assertInstanceOf(InflightGate::class, $gate);
+        $prop = fn (string $name): mixed => (new \ReflectionProperty(InflightGate::class, $name))->getValue($gate);
+        $this->assertSame(DATA_DIR.'/matinee/inflight', $prop('dir'));
+        $this->assertSame(InflightGate::PER_USER, $prop('perUser'));
+        $this->assertSame(8, ($prop('globalCap'))());
+        $this->setCap(Settings::INFLIGHT_GLOBAL_KEY, '2');
+        $this->assertSame(2, ($prop('globalCap'))());
     }
 }

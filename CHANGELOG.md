@@ -91,6 +91,20 @@ Plex's `*.plex.direct` certificate never covers a bare IP.
 - P3: playlists fail closed on non-ASCII text, an unlisted tag, an unquoted `URI` attribute, a slash outside
   one, more than 50,000 URIs or 16 MiB. HLS child paths carrying an `X-Plex` query key are refused.
 - P3: Plex names each viewer's device `Matinee (<username>)`, the viewer's rather than the owner's.
+- P3 security gate: every Plex request made for a browser (direct music windows, HLS master and child playlists,
+  segments, posters, listings and the player page's lookups) holds an in-flight slot: 4 per user and 8 on the
+  install (**Plex requests in flight on this Kanboard**, 1 to 1000). They are `flock` locks under
+  `DATA_DIR/matinee/inflight/` (0700), released in `finally` and by the kernel if the worker dies. A full gate is
+  a `503` with `Retry-After: 5` (the busy page for the player and library pages). Before, 20 concurrent requests
+  against a stalled Plex could fill `pm.max_children` and take down Kanboard. The mp3 transcode and the HLS
+  session keep their stream caps.
+- P3 security gate: buffered playlist GETs have the streams' low-speed floor (1 KiB/s over 15 s), so a Plex that
+  hangs frees the worker after 15 s rather than 60.
+- P3 security gate: a playlist line over 8 KiB or a tag with more than 64 attributes is `plex.bad_playlist`
+  before any pattern runs on it. A 2 MiB attribute line used to cost about 600 MB of memory.
+- P3 security gate: a segment's forwarded `Content-Length` is the exact byte cut, as a part's is: an upstream
+  that sends more writes exactly that prefix, then ends.
+- Test data uses a neutral LAN address (`192.168.1.10`) and a fake plex.direct hash.
 - P3: only the player page widens the CSP (`media-src` and `worker-src` `'self' blob:`); `script-src` is
   untouched, and hls.js loads there only.
 - Tokens are sealed with XChaCha20-Poly1305 under a subkey of a root key from `MATINEE_KEY` or

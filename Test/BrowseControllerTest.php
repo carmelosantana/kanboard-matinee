@@ -625,4 +625,53 @@ class BrowseControllerTest extends Base
             $this->assertDoesNotMatchRegularExpression('#<script|<style|\sstyle=|\son[a-z]+=#i', $src, basename($file));
         }
     }
+
+    // ── M1: the in-flight gate ─────────────────────────────────────────────────
+
+    private const BUSY = 'This server is busy right now. Try again in a minute.';
+
+    /** The server page and the listing: the busy page at 503 with Retry-After 5; art: an empty 503. No Plex request. */
+    private function assertGatedBusy(string $label): void
+    {
+        foreach ([
+            'server' => fn () => $this->get(self::BRW, 'server', ['server_id' => $this->server]),
+            'listing' => fn () => $this->listing($this->browseRef($this->owner)),
+        ] as $page => $request) {
+            $r = $request();
+            $this->assertSame(503, $r->code(), "$label $page");
+            $this->assertSame('5', $r->headers()['Retry-After'] ?? null, "$label $page");
+            $this->assertStringContainsString('<p class="alert alert-error">'.self::BUSY.'</p>', $r->body(), "$label $page");
+        }
+        $r = $this->art($this->artRef($this->owner));
+        $this->assertSame(503, $r->code(), "$label art");
+        $this->assertSame('', $r->body(), "$label art");
+        $this->assertSame('5', $r->headers()['Retry-After'] ?? null, "$label art");
+        $this->assertSame('nosniff', $r->headers()['X-Content-Type-Options'] ?? null, "$label art");
+        $this->assertSame('no-store', $r->headers()['Cache-Control'] ?? null, "$label art");
+        $this->assertArrayNotHasKey('Content-Type', $r->headers(), "$label art");
+        $this->assertSame([], $this->t->requests, $label);
+    }
+
+    public function testBrowseAndArtAre503WhenTheUsersSlotsAreFull(): void
+    {
+        $this->holdInflight('u'.$this->owner.'-', 4);
+        $this->assertGatedBusy('user');
+    }
+
+    public function testBrowseAndArtAre503WhenTheGlobalSlotsAreFull(): void
+    {
+        $this->holdInflight('g-', 8);
+        $this->assertGatedBusy('global');
+    }
+
+    public function testBrowseAndArtFreeTheirSlotsAndOtherUsersAreUnaffected(): void
+    {
+        $this->holdInflight('u'.$this->friend.'-', 4);
+        $this->queueListing();
+        $this->assertSame(200, $this->listing($this->browseRef($this->owner))->code());
+        $this->t->respond(200, self::JPEG, ['content-type' => 'image/jpeg']);
+        $this->assertSame(200, $this->art($this->artRef($this->owner))->code());
+        $this->holdInflight('u'.$this->owner.'-', 4);
+        $this->holdInflight('g-', 8);
+    }
 }

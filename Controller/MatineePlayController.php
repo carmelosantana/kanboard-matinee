@@ -17,12 +17,13 @@ use Kanboard\Plugin\Matinee\Model\PlaybackModel;
  * - `play` (C2c, C5b, C6): the player page in the dashboard layout. Audio gets an `<audio>` sourced from `media`; video
  *   gets a `<video>` whose claimed session, hls/start, ping, stop and keepalive URLs and reusable CSRF token travel in
  *   `data-` attributes for player.js (no inline script). Forbidden is core's 403; Busy is the busy page with a 503
- *   and `Retry-After: 30`; Connect is P2's failure page with a 502.
+ *   and `Retry-After: 30` (a stream cap) or `5` (the in-flight gate, M1); Connect is P2's failure page with a 502.
  * - `media`: GET only. One window of a direct part, or an mp3 transcode, streamed through the ResponseSink, which alone
  *   opens the response (C3e). Once the ref and the server pass, the session is dropped without a write (C3d), and
  *   client aborts end the stream cleanly (C3f). A refusal is an empty body at 403, 405 (any other method, HEAD
  *   included, before the model runs), 416 (with `Content-Range: bytes * / N`), 502 or 503 (with `Retry-After: 30`),
- *   sent through Kanboard's response; once the sink has opened, nothing more is sent.
+ *   sent through Kanboard's response; once the sink has opened, nothing more is sent. A full in-flight gate (M1) is
+ *   the 503 with `Retry-After: 5`.
  * - `hlsStart` and `hlsProxy` (C2d, C5d): GET only, like media. Start answers Plex's master playlist for a session this
  *   user already holds; proxy answers a child playlist the same way, or streams a segment. A playlist goes through the
  *   ResponseSink too (open, then one write), as `application/vnd.apple.mpegurl` with the fixed set and no upstream
@@ -42,8 +43,8 @@ class MatineePlayController extends MatineeBaseController
             $page = $this->playback()->page($this->actorId(), $this->param('ref'));
         } catch (MatineeForbiddenException) {
             throw new AccessForbiddenException();
-        } catch (MatineeBusyException) {
-            $this->response->withHeader('Retry-After', '30');
+        } catch (MatineeBusyException $e) {
+            $this->response->withHeader('Retry-After', (string) $e->retryAfter);
             $this->renderMedia('Matinee:play/busy', [], 503);
             return;
         } catch (MatineeConnectException) {
@@ -142,7 +143,8 @@ class MatineePlayController extends MatineeBaseController
     }
 
     /**
-     * Runs a model call and maps its refusals to empty answers: Forbidden 403, Busy 503 with `Retry-After: 30`, Range
+     * Runs a model call and maps its refusals to empty answers: Forbidden 403, Busy 503 with its Retry-After (30 for a
+     * stream cap, 5 for the in-flight gate), Range
      * 416 with `Content-Range: bytes * / N`, Connect 502. Nothing is sent once $sink has opened (C3g).
      */
     private function answer(?ResponseSink $sink, \Closure $run): void
@@ -151,8 +153,8 @@ class MatineePlayController extends MatineeBaseController
             $run();
         } catch (MatineeForbiddenException) {
             $this->refuse($sink, 403);
-        } catch (MatineeBusyException) {
-            $this->refuse($sink, 503, ['Retry-After' => '30']);
+        } catch (MatineeBusyException $e) {
+            $this->refuse($sink, 503, ['Retry-After' => (string) $e->retryAfter]);
         } catch (MatineeRangeException $e) {
             $this->refuse($sink, 416, ['Content-Range' => 'bytes */'.$e->total]);
         } catch (MatineeConnectException) {

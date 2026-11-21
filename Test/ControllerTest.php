@@ -189,14 +189,14 @@ class ControllerTest extends Base
         foreach ([$this->owner, $this->user('mgr', Role::APP_MANAGER)] as $userId) {
             $this->loginAs($userId);
             $this->forbidden(fn () => $this->get(self::ADM, 'show'), 'show');
-            $this->forbidden(fn () => $this->call(self::ADM, 'save', [], ['matinee_connect_policy' => 'admins', 'matinee_attempt_limit' => '1', 'matinee_max_servers' => '1', 'matinee_stream_cap_server' => '1', 'matinee_stream_cap_user' => '1', 'matinee_stream_cap_global' => '1']), 'save');
+            $this->forbidden(fn () => $this->call(self::ADM, 'save', [], ['matinee_connect_policy' => 'admins', 'matinee_attempt_limit' => '1', 'matinee_max_servers' => '1', 'matinee_stream_cap_server' => '1', 'matinee_stream_cap_user' => '1', 'matinee_stream_cap_global' => '1', 'matinee_inflight_global' => '1']), 'save');
             $this->forbidden(fn () => $this->call(self::ADM, 'toggle', ['server_id' => $server], ['enabled' => '0']), 'toggle');
         }
         $this->assertSame(1, (int) $this->container['matineeServerModel']->get($server)['is_enabled']);
         $this->assertSame(Settings::POLICY_EVERYONE, (new Settings($this->container))->connectPolicy());
         $settings = new Settings($this->container);
         $this->assertSame([4, 2, 5], [$settings->streamCapServer(), $settings->streamCapUser(), $settings->streamCapGlobal()]);
-        foreach ([Settings::STREAM_CAP_SERVER_KEY, Settings::STREAM_CAP_USER_KEY, Settings::STREAM_CAP_GLOBAL_KEY] as $key) {
+        foreach ([Settings::STREAM_CAP_SERVER_KEY, Settings::STREAM_CAP_USER_KEY, Settings::STREAM_CAP_GLOBAL_KEY, Settings::INFLIGHT_GLOBAL_KEY] as $key) {
             $this->assertSame('', (string) $this->container['configModel']->getOption($key), $key);
         }
     }
@@ -615,6 +615,7 @@ class ControllerTest extends Base
             'matinee_stream_cap_server' => '4',
             'matinee_stream_cap_user' => '2',
             'matinee_stream_cap_global' => '5',
+            'matinee_inflight_global' => '8',
         ]);
     }
 
@@ -677,6 +678,57 @@ class ControllerTest extends Base
                 $this->assertSame([6, 3, 8], $this->streamCaps(), "$field=$bad");
                 $this->assertSame(10, (new Settings($this->container))->attemptLimit(), "$field=$bad saves no other field either");
             }
+        }
+    }
+
+    // ── M1: the in-flight cap ───────────────────────────────────────────────────
+
+    private const INFLIGHT_ERROR = 'The in-flight request limit must be a whole number from 1 to 1000.';
+
+    private function inflightCap(): int
+    {
+        $this->container['memoryCache']->flush();
+        return (new Settings($this->container))->inflightGlobal();
+    }
+
+    public function testTheAdminPageShowsTheInflightCap(): void
+    {
+        $this->loginAs(self::ADMIN);
+        $page = $this->get(self::ADM, 'show')->body();
+        $this->assertMatchesRegularExpression('#<input type="number" name="matinee_inflight_global" id="form-matinee_inflight_global" value="8"[^>]*min="1"[^>]*max="1000"[^>]*required#', $page);
+
+        $this->container['configModel']->save([Settings::INFLIGHT_GLOBAL_KEY => '12']);
+        $this->container['memoryCache']->flush();
+        $page = $this->get(self::ADM, 'show')->body();
+        $this->assertMatchesRegularExpression('#<label for="form-matinee_inflight_global"[^>]*>Plex requests in flight on this Kanboard</label>#', $page);
+        $this->assertMatchesRegularExpression('#<input type="number" name="matinee_inflight_global" id="form-matinee_inflight_global" value="12"[^>]*min="1"[^>]*max="1000"[^>]*required#', $page);
+        $this->assertStringContainsString(
+            '<p class="form-help">Playlists, video segments, music, posters and listings Plex is answering at once, at most 4 per user. Keep it under half of PHP-FPM&#039;s pm.max_children.</p>',
+            $page
+        );
+    }
+
+    public function testAdminSaveStoresTheInflightCap(): void
+    {
+        $this->loginAs(self::ADMIN);
+        $this->adminSave(['matinee_inflight_global' => '3']);
+        $this->assertSame('Settings saved successfully.', $this->flash('success'));
+        $this->assertSame(3, $this->inflightCap());
+        $this->assertSame('3', (string) $this->container['configModel']->getOption(Settings::INFLIGHT_GLOBAL_KEY));
+    }
+
+    public function testABadInflightCapFlashesTheErrorAndSavesNothing(): void
+    {
+        $this->loginAs(self::ADMIN);
+        $this->adminSave(['matinee_inflight_global' => '6']);
+        $this->assertSame(6, $this->inflightCap());
+        foreach (['0', '1001', '1.5', 'x', '', '0010000'] as $bad) {
+            session_set('flash', []);
+            $this->adminSave(['matinee_inflight_global' => $bad, 'matinee_attempt_limit' => '7']);
+            $this->assertSame(self::INFLIGHT_ERROR, $this->flash('failure'), "'$bad'");
+            $this->assertNull($this->flash('success'), "'$bad'");
+            $this->assertSame(6, $this->inflightCap(), "'$bad'");
+            $this->assertSame(10, (new Settings($this->container))->attemptLimit(), "'$bad' saves no other field either");
         }
     }
 
