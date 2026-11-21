@@ -203,7 +203,7 @@ class BrowseControllerTest extends Base
             $this->assertStringContainsString($title, $body);
         }
         $this->assertSame(6, preg_match_all('#href="[^"]*action=listing[^"]*ref=([A-Za-z0-9_.-]+)#', $body, $m));
-        $this->assertSame('/library/sections/1/all', $this->container['matineeRefSigner']->verify($m[1][0], $this->owner)['r']);
+        $this->assertSame('/library/sections/1/all', $this->container['matineeRefSigner']->verify($m[1][0], $this->owner, 'browse')['r']);
         $this->assertStringNotContainsString('/library/', $body);
 
         // A shared user gets it too; an outsider on a private server, or a missing server, is 403.
@@ -274,11 +274,11 @@ class BrowseControllerTest extends Base
             $this->assertMatchesRegularExpression('#src="[^"?]*\?controller=MatineeBrowseController&amp;action=art&amp;plugin=Matinee&amp;ref=[A-Za-z0-9_.-]+&amp;size=144"#', $img);
         }
         preg_match('#ref=([A-Za-z0-9_.-]+)&amp;size=144#', $imgs[0][0], $m);
-        $this->assertSame(['sv' => $this->server, 's' => '1', 'k' => 'art', 'r' => self::THUMB], $this->container['matineeRefSigner']->verify($m[1], $this->owner));
+        $this->assertSame(['sv' => $this->server, 's' => '1', 'k' => 'art', 'r' => self::THUMB], $this->container['matineeRefSigner']->verify($m[1], $this->owner, 'art'));
 
         // The show and the season link to their own listing.
         $this->assertSame(2, preg_match_all('#href="[^"?]*\?controller=MatineeBrowseController&amp;action=listing&amp;plugin=Matinee&amp;ref=([A-Za-z0-9_.-]+)"#', $body, $links));
-        $this->assertSame('/library/metadata/102/children', $this->container['matineeRefSigner']->verify($links[1][0], $this->owner)['r']);
+        $this->assertSame('/library/metadata/102/children', $this->container['matineeRefSigner']->verify($links[1][0], $this->owner, 'browse')['r']);
 
         // Never a Plex path, host or token-shaped thing.
         foreach (['/library/', 'plex.example.test', 'evil.example.test', 'X-Plex', 'UPSTREAM-SUMMARY', '/data/movies'] as $raw) {

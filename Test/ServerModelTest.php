@@ -232,10 +232,10 @@ class ServerModelTest extends Base
         $signer = $this->container['matineeRefSigner'];
         $this->assertInstanceOf(RefSigner::class, $signer);
         $ref = $signer->sign(7, 3, '2', 'browse', '/library/sections/2/all', 60);
-        $this->assertSame('2', (new RefSigner(Subkeys::refs($env)))->verify($ref, 7)['s']);
+        $this->assertSame('2', (new RefSigner(Subkeys::refs($env)))->verify($ref, 7, 'browse')['s']);
         foreach ([$env, Subkeys::token($env)] as $other) {
             try {
-                (new RefSigner($other))->verify($ref, 7);
+                (new RefSigner($other))->verify($ref, 7, 'browse');
                 $this->fail('a ref verified under the wrong key');
             } catch (MatineeForbiddenException) {
             }

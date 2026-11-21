@@ -10,9 +10,9 @@ use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
  *
  * - body = b64url(json({v:1, u, sv, s, k, r, exp})); sig = b64url(HMAC-SHA256(refKey, body)).
  * - verify checks the length and shape, then the signature (hash_equals), and only then decodes the body.
- *   The payload must have exactly the seven fields with their types, v = 1, u = the given user,
- *   now < exp ≤ now + TTLS[k] (the kind is checked first), a section key for s, and r matching kind k's PlexPaths
- *   regex: browse and art as in P2, media a part (direct) or an item (transcode), hls an item (C5, S13).
+ *   The payload must have exactly the seven fields with their types, v = 1, u = the given user, k = the kind the
+ *   caller expects, now < exp ≤ now + TTLS[k] (the kind is checked first), a section key for s, and r matching kind
+ *   k's PlexPaths regex: browse and art as in P2, media a part (direct) or an item (transcode), hls an item (C5, S13).
  * - Every refusal is the same MatineeForbiddenException. sign() refuses bad input, so it never mints a ref
  *   that verify would refuse.
  */
@@ -71,7 +71,7 @@ final class RefSigner
      * @return array{sv: int, s: string, k: string, r: string}
      * @throws MatineeForbiddenException
      */
-    public function verify(string $ref, int $userId): array
+    public function verify(string $ref, int $userId, string $kind): array
     {
         if (strlen($ref) > self::MAX_REF || preg_match(self::SHAPE, $ref, $m) !== 1) {
             throw new MatineeForbiddenException();
@@ -100,7 +100,7 @@ final class RefSigner
         $ok = $p['v'] === 1
             && is_int($p['u']) && $p['u'] === $userId
             && is_int($p['sv']) && $p['sv'] > 0
-            && is_string($p['k']) && in_array($p['k'], self::KINDS, true)
+            && is_string($p['k']) && in_array($p['k'], self::KINDS, true) && $p['k'] === $kind
             && is_int($p['exp']) && $p['exp'] > $now && $p['exp'] <= $now + self::TTLS[$p['k']]
             && is_string($p['s']) && PlexPaths::isSectionKey($p['s'])
             && is_string($p['r']) && self::resourceFits($p['k'], $p['r']);

@@ -66,14 +66,14 @@ class RefSignerTest extends TestCase
         $this->assertMatchesRegularExpression('/\A[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}\z/', $ref);
         $this->assertSame(
             ['sv' => self::SERVER, 's' => '2', 'k' => 'browse', 'r' => self::BROWSE],
-            self::signer()->verify($ref, self::USER)
+            self::signer()->verify($ref, self::USER, 'browse')
         );
     }
 
     public function testArtRoundTrip(): void
     {
         $ref = self::signer()->sign(self::USER, self::SERVER, '5', 'art', self::ART, 60);
-        $this->assertSame(['sv' => self::SERVER, 's' => '5', 'k' => 'art', 'r' => self::ART], self::signer()->verify($ref, self::USER));
+        $this->assertSame(['sv' => self::SERVER, 's' => '5', 'k' => 'art', 'r' => self::ART], self::signer()->verify($ref, self::USER, 'art'));
     }
 
     public function testTheBodyIsExactlyTheSpecPayload(): void
@@ -90,21 +90,21 @@ class RefSignerTest extends TestCase
     // A forged ref with the test key is the same as a minted one: the forge helper is faithful.
     public function testAForgedValidPayloadVerifies(): void
     {
-        $this->assertSame('2', self::signer()->verify(self::forge(self::payload()), self::USER)['s']);
+        $this->assertSame('2', self::signer()->verify(self::forge(self::payload()), self::USER, 'browse')['s']);
     }
 
     public function testExpiryBoundaries(): void
     {
         $ref = self::signer()->sign(self::USER, self::SERVER, '2', 'browse', self::BROWSE, 60);
-        $this->assertSame('2', self::signer(self::NOW + 59)->verify($ref, self::USER)['s']);
+        $this->assertSame('2', self::signer(self::NOW + 59)->verify($ref, self::USER, 'browse')['s']);
         $this->expectException(MatineeForbiddenException::class);
-        self::signer(self::NOW + 60)->verify($ref, self::USER);
+        self::signer(self::NOW + 60)->verify($ref, self::USER, 'browse');
     }
 
     // exp may be exactly now + 3600, not one second more (kills dropping or loosening the upper bound).
     public function testTheUpperBoundIsInclusive(): void
     {
-        $this->assertSame('2', self::signer()->verify(self::forge(self::payload(['exp' => self::NOW + 3600])), self::USER)['s']);
+        $this->assertSame('2', self::signer()->verify(self::forge(self::payload(['exp' => self::NOW + 3600])), self::USER, 'browse')['s']);
     }
 
     // ── kinds and TTLs (C5, S13) ─────────────────────────────────────────────
@@ -130,10 +130,10 @@ class RefSignerTest extends TestCase
     public function testPlayRefsRoundTripWithAnEightHourTtl(string $kind, string $resource): void
     {
         $ref = self::signer()->sign(self::USER, self::SERVER, '4', $kind, $resource, 28800);
-        $this->assertSame(['sv' => self::SERVER, 's' => '4', 'k' => $kind, 'r' => $resource], self::signer()->verify($ref, self::USER));
-        $this->assertSame('4', self::signer(self::NOW + 28799)->verify($ref, self::USER)['s']);
+        $this->assertSame(['sv' => self::SERVER, 's' => '4', 'k' => $kind, 'r' => $resource], self::signer()->verify($ref, self::USER, $kind));
+        $this->assertSame('4', self::signer(self::NOW + 28799)->verify($ref, self::USER, $kind)['s']);
         try {
-            self::signer(self::NOW + 28800)->verify($ref, self::USER);
+            self::signer(self::NOW + 28800)->verify($ref, self::USER, $kind);
             $this->fail('expected MatineeForbiddenException');
         } catch (MatineeForbiddenException) {
             $this->addToAssertionCount(1);
@@ -144,9 +144,9 @@ class RefSignerTest extends TestCase
     public function testPlayRefUpperBoundIsExactlyEightHours(string $kind, string $resource): void
     {
         $ok = self::forge(self::payload(['k' => $kind, 'r' => $resource, 'exp' => self::NOW + 28800]));
-        $this->assertSame($kind, self::signer()->verify($ok, self::USER)['k']);
+        $this->assertSame($kind, self::signer()->verify($ok, self::USER, $kind)['k']);
         $this->expectException(MatineeForbiddenException::class);
-        self::signer()->verify(self::forge(self::payload(['k' => $kind, 'r' => $resource, 'exp' => self::NOW + 28801])), self::USER);
+        self::signer()->verify(self::forge(self::payload(['k' => $kind, 'r' => $resource, 'exp' => self::NOW + 28801])), self::USER, $kind);
     }
 
     // A browse ref is still bounded by an hour at sign time (kills one global 28800 limit).
@@ -161,20 +161,20 @@ class RefSignerTest extends TestCase
     public function testAHandBuiltBrowseRefPastAnHourIsRefused(): void
     {
         $this->expectException(MatineeForbiddenException::class);
-        self::signer()->verify(self::forge(self::payload(['exp' => self::NOW + 3601])), self::USER);
+        self::signer()->verify(self::forge(self::payload(['exp' => self::NOW + 3601])), self::USER, 'browse');
     }
 
     public function testAHandBuiltArtRefPastAnHourIsRefused(): void
     {
         $this->expectException(MatineeForbiddenException::class);
-        self::signer()->verify(self::forge(self::payload(['k' => 'art', 'r' => self::ART, 'exp' => self::NOW + 3601])), self::USER);
+        self::signer()->verify(self::forge(self::payload(['k' => 'art', 'r' => self::ART, 'exp' => self::NOW + 3601])), self::USER, 'art');
     }
 
     public function testSignAcceptsThePlayTtlBounds(): void
     {
         foreach ([1, 28800] as $ttl) {
             $ref = self::signer()->sign(self::USER, self::SERVER, '2', 'hls', self::ITEM, $ttl);
-            $this->assertSame('hls', self::signer()->verify($ref, self::USER)['k']);
+            $this->assertSame('hls', self::signer()->verify($ref, self::USER, 'hls')['k']);
         }
     }
 
@@ -215,6 +215,8 @@ class RefSignerTest extends TestCase
             'part path as hls' => fn () => self::forge(self::payload(['k' => 'hls', 'r' => self::PART, 'exp' => self::NOW + 60])),
             'art path as media' => fn () => self::forge(self::payload(['k' => 'media', 'r' => self::ART])),
             'item path as browse' => fn () => self::forge(self::payload(['r' => self::ITEM])),
+            'art path as hls' => fn () => self::forge(self::payload(['k' => 'hls', 'r' => self::ART])),
+            'item children as hls' => fn () => self::forge(self::payload(['k' => 'hls', 'r' => '/library/metadata/42/children'])),
             'item path as art' => fn () => self::forge(self::payload(['k' => 'art', 'r' => self::ITEM])),
             'part path as browse' => fn () => self::forge(self::payload(['r' => self::PART])),
             'art path as browse' => fn () => self::forge(self::payload(['r' => self::ART])),
@@ -254,16 +256,48 @@ class RefSignerTest extends TestCase
         return array_map(fn (\Closure $c) => [$c], $cases);
     }
 
+    // Refused whatever kind the caller asks for, so no case passes only because of a kind mismatch.
     /** @dataProvider refusals */
     public function testEveryRefusalReadsTheSame(\Closure $ref): void
     {
+        foreach (RefSigner::KINDS as $kind) {
+            $this->assertRefused(fn () => self::signer()->verify($ref(), self::USER, $kind), $kind);
+        }
+    }
+
+    private function assertRefused(\Closure $fn, string $label): void
+    {
         try {
-            self::signer()->verify($ref(), self::USER);
-            $this->fail('expected MatineeForbiddenException');
+            $fn();
+            $this->fail("expected MatineeForbiddenException ($label)");
         } catch (MatineeForbiddenException $e) {
             $this->assertSame(MatineeForbiddenException::class, get_class($e));
             $this->assertSame('matinee.forbidden', $e->getMessage());
         }
+    }
+
+    /** @return array<string, array{string, string, string}> */
+    public static function kindPairs(): array
+    {
+        $resources = ['browse' => self::BROWSE, 'art' => self::ART, 'media' => self::PART, 'hls' => self::ITEM];
+        $cases = [];
+        foreach ($resources as $minted => $resource) {
+            foreach ([...RefSigner::KINDS, 'video', ''] as $asked) {
+                if ($asked !== $minted) {
+                    $cases["$minted asked as ".($asked === '' ? 'empty' : $asked)] = [$minted, $resource, $asked];
+                }
+            }
+        }
+        return $cases;
+    }
+
+    // m6: verify takes the kind the caller expects, and a ref of any other kind is refused the same way.
+    /** @dataProvider kindPairs */
+    public function testARefOfOneKindIsRefusedAsAnother(string $minted, string $resource, string $asked): void
+    {
+        $ref = self::signer()->sign(self::USER, self::SERVER, '2', $minted, $resource, 60);
+        $this->assertSame($minted, self::signer()->verify($ref, self::USER, $minted)['k']);
+        $this->assertRefused(fn () => self::signer()->verify($ref, self::USER, $asked), $asked);
     }
 
     // A timing leak is not observable here, so the constant-time compare is pinned in verify's source: swapping
@@ -320,7 +354,7 @@ class RefSignerTest extends TestCase
     {
         foreach ([1, 3600] as $ttl) {
             $ref = self::signer()->sign(self::USER, self::SERVER, '2', 'browse', self::BROWSE, $ttl);
-            $this->assertSame('2', self::signer()->verify($ref, self::USER)['s']);
+            $this->assertSame('2', self::signer()->verify($ref, self::USER, 'browse')['s']);
         }
     }
 
@@ -372,6 +406,6 @@ class RefSignerTest extends TestCase
         $ref = $signer->sign(self::USER, self::SERVER, '2', 'browse', self::BROWSE, 60);
         $exp = json_decode(sodium_base642bin(explode('.', $ref)[0], SODIUM_BASE64_VARIANT_URLSAFE_NO_PADDING), true)['exp'];
         $this->assertEqualsWithDelta(time() + 60, $exp, 2);
-        $this->assertSame('2', $signer->verify($ref, self::USER)['s']);
+        $this->assertSame('2', $signer->verify($ref, self::USER, 'browse')['s']);
     }
 }

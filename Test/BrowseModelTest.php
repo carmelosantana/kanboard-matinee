@@ -215,9 +215,9 @@ class BrowseModelTest extends Base
     }
 
     /** @return array{sv: int, s: string, k: string, r: string} */
-    private function verify(string $ref, int $userId): array
+    private function verify(string $ref, int $userId, string $kind): array
     {
-        return $this->signer()->verify($ref, $userId);
+        return $this->signer()->verify($ref, $userId, $kind);
     }
 
     // ── wiring ───────────────────────────────────────────────────────────────
@@ -243,7 +243,7 @@ class BrowseModelTest extends Base
             $this->assertSame(['key', 'title', 'type', 'ref'], array_keys($row));
             $this->assertSame(
                 ['sv' => $this->serverId, 's' => $row['key'], 'k' => 'browse', 'r' => '/library/sections/'.$row['key'].'/all'],
-                $this->verify($row['ref'], $this->alice)
+                $this->verify($row['ref'], $this->alice, 'browse')
             );
         }
         $this->assertSame([self::BASE.'/library/sections'], array_column($this->t->requests, 'url'));
@@ -255,9 +255,9 @@ class BrowseModelTest extends Base
         $this->t->respond(200, $this->fixture('sections'));
         $ref = $this->model()->sections($this->alice, $this->serverId)[0]['ref'];
         $this->now += 3599;
-        $this->assertSame('1', $this->verify($ref, $this->alice)['s']);
+        $this->assertSame('1', $this->verify($ref, $this->alice, 'browse')['s']);
         $this->now += 1;
-        $this->expectForbidden(fn () => $this->verify($ref, $this->alice), true);
+        $this->expectForbidden(fn () => $this->verify($ref, $this->alice, 'browse'), true);
     }
 
     public function testASharedServerListsItsSectionsForEveryActiveUser(): void
@@ -266,8 +266,8 @@ class BrowseModelTest extends Base
         $this->t->respond(200, $this->fixture('sections'));
         $rows = $this->model()->sections($this->bob, $this->serverId);
         $this->assertCount(6, $rows);
-        $this->assertSame($this->serverId, $this->verify($rows[0]['ref'], $this->bob)['sv']);
-        $this->expectForbidden(fn () => $this->verify($rows[0]['ref'], $this->alice), true);
+        $this->assertSame($this->serverId, $this->verify($rows[0]['ref'], $this->bob, 'browse')['sv']);
+        $this->expectForbidden(fn () => $this->verify($rows[0]['ref'], $this->alice, 'browse'), true);
     }
 
     public function testSectionsAreRefusedToAnyoneWhoMayNotBrowse(): void
@@ -339,25 +339,25 @@ class BrowseModelTest extends Base
         $this->assertSame([true, true, false, false, false, false, false, false], array_map(fn ($i) => $i['artRef'] !== null, $items));
         $this->assertSame(
             ['sv' => $this->serverId, 's' => '1', 'k' => 'browse', 'r' => '/library/metadata/102/children'],
-            $this->verify($items[1]['browseRef'], $this->alice)
+            $this->verify($items[1]['browseRef'], $this->alice, 'browse')
         );
         $this->assertSame(
             ['sv' => $this->serverId, 's' => '1', 'k' => 'browse', 'r' => '/library/metadata/103/children'],
-            $this->verify($items[2]['browseRef'], $this->alice)
+            $this->verify($items[2]['browseRef'], $this->alice, 'browse')
         );
         $this->assertSame(
             ['sv' => $this->serverId, 's' => '1', 'k' => 'art', 'r' => '/library/metadata/101/thumb/1700000000'],
-            $this->verify($items[0]['artRef'], $this->alice)
+            $this->verify($items[0]['artRef'], $this->alice, 'art')
         );
-        $this->assertSame('/library/metadata/102/thumb/1700000001', $this->verify($items[1]['artRef'], $this->alice)['r']);
+        $this->assertSame('/library/metadata/102/thumb/1700000001', $this->verify($items[1]['artRef'], $this->alice, 'art')['r']);
 
         // Child and art refs last the full hour and no longer.
         $this->now += 3599;
-        $this->assertSame('1', $this->verify($items[1]['browseRef'], $this->alice)['s']);
-        $this->assertSame('1', $this->verify($items[0]['artRef'], $this->alice)['s']);
+        $this->assertSame('1', $this->verify($items[1]['browseRef'], $this->alice, 'browse')['s']);
+        $this->assertSame('1', $this->verify($items[0]['artRef'], $this->alice, 'art')['s']);
         $this->now += 1;
-        $this->expectForbidden(fn () => $this->verify($items[1]['browseRef'], $this->alice), true);
-        $this->expectForbidden(fn () => $this->verify($items[0]['artRef'], $this->alice), true);
+        $this->expectForbidden(fn () => $this->verify($items[1]['browseRef'], $this->alice, 'browse'), true);
+        $this->expectForbidden(fn () => $this->verify($items[0]['artRef'], $this->alice, 'art'), true);
 
         $this->assertSame(
             [self::BASE.'/library/sections', self::BASE.'/library/sections/1/all?X-Plex-Container-Start=0&X-Plex-Container-Size=60'],
@@ -371,10 +371,10 @@ class BrowseModelTest extends Base
         $this->share();
         $this->queueListing();
         $items = $this->model()->listing($this->bob, $this->browseRef($this->bob), 0)['items'];
-        $this->assertSame('1', $this->verify($items[1]['browseRef'], $this->bob)['s']);
-        $this->assertSame('1', $this->verify($items[0]['artRef'], $this->bob)['s']);
-        foreach ([$items[1]['browseRef'], $items[0]['artRef']] as $ref) {
-            $this->expectForbidden(fn () => $this->verify($ref, $this->alice), true);
+        $this->assertSame('1', $this->verify($items[1]['browseRef'], $this->bob, 'browse')['s']);
+        $this->assertSame('1', $this->verify($items[0]['artRef'], $this->bob, 'art')['s']);
+        foreach (['browse' => $items[1]['browseRef'], 'art' => $items[0]['artRef']] as $kind => $ref) {
+            $this->expectForbidden(fn () => $this->verify($ref, $this->alice, $kind), true);
         }
     }
 

@@ -58,7 +58,7 @@ final class BrowseModel extends Base
         if ($start < 0 || $start > self::MAX_START) {
             throw new MatineeForbiddenException();
         }
-        $p = $this->verify($ref, $userId, 'browse');
+        $p = $this->signer()->verify($ref, $userId, 'browse');
         $server = $this->authorize($userId, $p['sv']);
 
         $live = $this->live($server, $userId, 'sections');
@@ -115,7 +115,7 @@ final class BrowseModel extends Base
      */
     public function art(int $userId, string $ref, int $size): array
     {
-        $p = $this->verify($ref, $userId, 'art');
+        $p = $this->signer()->verify($ref, $userId, 'art');
         if (! in_array($size, PlexClient::ART_SIZES, true)) {
             throw new MatineeForbiddenException();
         }
@@ -124,16 +124,6 @@ final class BrowseModel extends Base
     }
 
     // ── internals ────────────────────────────────────────────────────────────
-
-    /** @return array{sv: int, s: string, k: string, r: string} */
-    private function verify(string $ref, int $userId, string $kind): array
-    {
-        $p = $this->signer()->verify($ref, $userId);
-        if ($p['k'] !== $kind) {
-            throw new MatineeForbiddenException();
-        }
-        return $p;
-    }
 
     /** The server's public row when this user may browse it now (live rows); missing reads the same as refused. */
     private function authorize(int $userId, int $serverId): array
