@@ -11,8 +11,8 @@ use PHPUnit\Framework\TestCase;
 class PlexDirectTest extends TestCase
 {
     private const HASH = '0123456789abcdef0123456789abcdef';
-    private const IP_BASE = 'https://192.168.1.86:32400';
-    private const SECURE = 'https://192-168-1-86.0123456789abcdef0123456789abcdef.plex.direct:32400';
+    private const IP_BASE = 'https://192.168.1.10:32400';
+    private const SECURE = 'https://192-168-1-10.0123456789abcdef0123456789abcdef.plex.direct:32400';
 
     /** @dataProvider endpoints */
     public function testOnlyHttpsIpv4BasesAreDiscovered(string $base, ?array $endpoint): void
@@ -23,14 +23,14 @@ class PlexDirectTest extends TestCase
     public static function endpoints(): array
     {
         return [
-            'https IPv4 with port'     => [self::IP_BASE, ['ip' => '192.168.1.86', 'port' => 32400]],
-            'https IPv4, default port' => ['https://192.168.1.86', ['ip' => '192.168.1.86', 'port' => 443]],
-            'uppercase scheme'         => ['HTTPS://192.168.1.86:32400', ['ip' => '192.168.1.86', 'port' => 32400]],
-            'http IPv4'                => ['http://192.168.1.86:32400', null],
+            'https IPv4 with port'     => [self::IP_BASE, ['ip' => '192.168.1.10', 'port' => 32400]],
+            'https IPv4, default port' => ['https://192.168.1.10', ['ip' => '192.168.1.10', 'port' => 443]],
+            'uppercase scheme'         => ['HTTPS://192.168.1.10:32400', ['ip' => '192.168.1.10', 'port' => 32400]],
+            'http IPv4'                => ['http://192.168.1.10:32400', null],
             'IPv6 literal'             => ['https://[fd00::5]:32400', null],
             'hostname'                 => ['https://plex.example.test:32400', null],
             'plex.direct name'         => [self::SECURE, null],
-            'not a base URL'           => ['https://192.168.1.86:32400/identity', null],
+            'not a base URL'           => ['https://192.168.1.10:32400/identity', null],
             'numeric shorthand'        => ['https://3232235862:32400', null],
         ];
     }
@@ -52,7 +52,7 @@ class PlexDirectTest extends TestCase
             'a non-Plex name'                    => [['plex.example.com'], null],
             'a non-Plex wildcard'                => [['*.example.com'], null],
             'a specific IP label (not wildcard)' => [['10-0-0-5.' . self::HASH . '.plex.direct'], null],
-            'the typed IP label (not wildcard)'  => [['192-168-1-86.' . self::HASH . '.plex.direct'], null],
+            'the typed IP label (not wildcard)'  => [['192-168-1-10.' . self::HASH . '.plex.direct'], null],
             'uppercase hash'                     => [['*.' . strtoupper(self::HASH) . '.plex.direct'], null],
             'a 31-character hash'                => [['*.' . substr(self::HASH, 1) . '.plex.direct'], null],
             'a 33-character hash'                => [['*.' . self::HASH . 'a.plex.direct'], null],
@@ -73,7 +73,7 @@ class PlexDirectTest extends TestCase
 
     public function testANonDiscoverableBaseHasNoSecureName(): void
     {
-        $this->assertNull(PlexDirect::fromCertificate('http://192.168.1.86:32400', ['*.' . self::HASH . '.plex.direct']));
+        $this->assertNull(PlexDirect::fromCertificate('http://192.168.1.10:32400', ['*.' . self::HASH . '.plex.direct']));
     }
 
     /** @dataProvider candidates */
@@ -87,14 +87,14 @@ class PlexDirectTest extends TestCase
         return [
             'the rewrite'           => [self::SECURE, true],
             'another IP label'      => ['https://10-0-0-5.' . self::HASH . '.plex.direct:32400', false],
-            'another port'          => ['https://192-168-1-86.' . self::HASH . '.plex.direct:443', false],
-            'no port'               => ['https://192-168-1-86.' . self::HASH . '.plex.direct', false],
-            'http'                  => ['http://192-168-1-86.' . self::HASH . '.plex.direct:32400', false],
+            'another port'          => ['https://192-168-1-10.' . self::HASH . '.plex.direct:443', false],
+            'no port'               => ['https://192-168-1-10.' . self::HASH . '.plex.direct', false],
+            'http'                  => ['http://192-168-1-10.' . self::HASH . '.plex.direct:32400', false],
             'a non-Plex host'       => ['https://plex.example.com:32400', false],
             'the typed IP itself'   => [self::IP_BASE, false],
-            'uppercase hash'        => ['https://192-168-1-86.' . strtoupper(self::HASH) . '.plex.direct:32400', false],
-            'a short hash'          => ['https://192-168-1-86.' . substr(self::HASH, 1) . '.plex.direct:32400', false],
-            'a suffix after'        => ['https://192-168-1-86.' . self::HASH . '.plex.direct.evil.test:32400', false],
+            'uppercase hash'        => ['https://192-168-1-10.' . strtoupper(self::HASH) . '.plex.direct:32400', false],
+            'a short hash'          => ['https://192-168-1-10.' . substr(self::HASH, 1) . '.plex.direct:32400', false],
+            'a suffix after'        => ['https://192-168-1-10.' . self::HASH . '.plex.direct.evil.test:32400', false],
             'a path'                => [self::SECURE . '/', false],
         ];
     }

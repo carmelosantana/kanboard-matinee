@@ -1143,12 +1143,12 @@ class ServerModelTest extends Base
     // ── secure-name discovery (https://<IPv4>:port → plex.direct) ───────────────
 
     private const HASH = '0123456789abcdef0123456789abcdef';
-    private const IP_BASE = 'https://192.168.1.86:32400';
-    private const SECURE = 'https://192-168-1-86.0123456789abcdef0123456789abcdef.plex.direct:32400';
-    private const SECURE_HOST = '192-168-1-86.0123456789abcdef0123456789abcdef.plex.direct';
+    private const IP_BASE = 'https://192.168.1.10:32400';
+    private const SECURE = 'https://192-168-1-10.0123456789abcdef0123456789abcdef.plex.direct:32400';
+    private const SECURE_HOST = '192-168-1-10.0123456789abcdef0123456789abcdef.plex.direct';
 
     /** The admin's private target for the LAN server, and DNS for its plex.direct name (to $ips). */
-    private function lan(string $targets = '192.168.1.86:32400', array $ips = ['192.168.1.86']): void
+    private function lan(string $targets = '192.168.1.10:32400', array $ips = ['192.168.1.10']): void
     {
         $this->setConfig(UrlGuard::PRIVATE_TARGETS_KEY, $targets);
         $this->container['memoryCache']->flush();
@@ -1175,7 +1175,7 @@ class ServerModelTest extends Base
         $this->assertSame(self::SECURE, $this->factoryCalls[0]['baseUrl']);
         $this->assertSame([self::SECURE.'/identity', self::SECURE.'/library/sections'], $this->tokenUrls());
         foreach ($this->t->requests as $request) {
-            $this->assertStringNotContainsString('192.168.1.86', $request['url'], 'the token never goes to the IP form');
+            $this->assertStringNotContainsString('192.168.1.10', $request['url'], 'the token never goes to the IP form');
         }
         // The token is sealed to the plex.direct URL and opens with it.
         $this->assertSame(self::TOKEN, $this->model()->tokenFor($this->model()->get($id)));
@@ -1186,16 +1186,16 @@ class ServerModelTest extends Base
 
     public function testAnHttpsIpWithoutAPortKeepsPort443(): void
     {
-        $secure443 = 'https://192-168-1-86.'.self::HASH.'.plex.direct:443';
-        $this->setConfig(UrlGuard::PRIVATE_TARGETS_KEY, '192.168.1.86:443');
+        $secure443 = 'https://192-168-1-10.'.self::HASH.'.plex.direct:443';
+        $this->setConfig(UrlGuard::PRIVATE_TARGETS_KEY, '192.168.1.10:443');
         $this->container['memoryCache']->flush();
         defined('MATINEE_TESTING') || define('MATINEE_TESTING', true);
-        UrlGuard::setResolverForTesting(fn (string $host): array => $host === self::SECURE_HOST ? ['192.168.1.86'] : []);
+        UrlGuard::setResolverForTesting(fn (string $host): array => $host === self::SECURE_HOST ? ['192.168.1.10'] : []);
         $this->t->discovers($secure443);
 
-        $id = $this->connect($this->user('alice'), 'https://192.168.1.86');
+        $id = $this->connect($this->user('alice'), 'https://192.168.1.10');
 
-        $this->assertSame(['https://192.168.1.86'], $this->t->discoveries);
+        $this->assertSame(['https://192.168.1.10'], $this->t->discoveries);
         $this->assertSame($secure443, $this->model()->get($id)['base_url']);
     }
 
@@ -1213,7 +1213,7 @@ class ServerModelTest extends Base
         $this->assertSame([], $this->t->requests, 'no request carried the token');
         $this->assertSame([], $this->factoryCalls, 'no client was built');
         $this->assertSame(0, $this->serverRows());
-        $this->assertStringContainsString('connect failed at discover (host 192.168.1.86', $this->lastLog());
+        $this->assertStringContainsString('connect failed at discover (host 192.168.1.10', $this->lastLog());
     }
 
     public static function notASecureName(): array
@@ -1223,11 +1223,11 @@ class ServerModelTest extends Base
             'no plex.direct certificate'   => [null],
             'a non-Plex host'              => ['https://plex.example.com:32400'],
             'another IP label'             => ['https://10-0-0-5.'.$h.'.plex.direct:32400'],
-            'another port'                 => ['https://192-168-1-86.'.$h.'.plex.direct:443'],
-            'http'                         => ['http://192-168-1-86.'.$h.'.plex.direct:32400'],
-            'an uppercase hash'            => ['https://192-168-1-86.'.strtoupper($h).'.plex.direct:32400'],
-            'a short hash'                 => ['https://192-168-1-86.'.substr($h, 1).'.plex.direct:32400'],
-            'a suffix after plex.direct'   => ['https://192-168-1-86.'.$h.'.plex.direct.evil.test:32400'],
+            'another port'                 => ['https://192-168-1-10.'.$h.'.plex.direct:443'],
+            'http'                         => ['http://192-168-1-10.'.$h.'.plex.direct:32400'],
+            'an uppercase hash'            => ['https://192-168-1-10.'.strtoupper($h).'.plex.direct:32400'],
+            'a short hash'                 => ['https://192-168-1-10.'.substr($h, 1).'.plex.direct:32400'],
+            'a suffix after plex.direct'   => ['https://192-168-1-10.'.$h.'.plex.direct.evil.test:32400'],
             'the typed IP back'            => [self::IP_BASE],
             'an unreachable server'        => [PlexException::unreachable()],
             'a transport error'            => [new \RuntimeException('curl said '.self::TOKEN)],
@@ -1238,10 +1238,10 @@ class ServerModelTest extends Base
     {
         $alice = $this->user('alice');
         // No private target at all, then a target that names another port.
-        foreach (['' => 'private_network', '192.168.1.86:8443' => 'port_not_allowed'] as $targets => $reason) {
+        foreach (['' => 'private_network', '192.168.1.10:8443' => 'port_not_allowed'] as $targets => $reason) {
             $this->lan((string) $targets);
             $this->expectFailure(fn () => $this->model()->connect($alice, 'Living room', self::IP_BASE, self::TOKEN));
-            $this->assertStringContainsString('connect failed at discover (host 192.168.1.86, '.$reason, $this->lastLog());
+            $this->assertStringContainsString('connect failed at discover (host 192.168.1.10, '.$reason, $this->lastLog());
         }
         $this->assertSame([], $this->t->discoveries);
         $this->assertSame([], $this->t->requests);
@@ -1263,17 +1263,17 @@ class ServerModelTest extends Base
         $this->assertSame([self::IP_BASE], $this->t->discoveries);
         $this->assertSame([], $this->t->requests, 'no request carried the token');
         $this->assertSame(0, $this->serverRows());
-        $this->assertStringContainsString('connect failed at discover (host 192.168.1.86, '.$reason, $this->lastLog());
+        $this->assertStringContainsString('connect failed at discover (host 192.168.1.10, '.$reason, $this->lastLog());
     }
 
     public static function rewrittenRefusals(): array
     {
         return [
             'resolves to another LAN IP'        => ['192.168.1.0/24:32400', ['192.168.1.87'], '', 'pinned elsewhere'],
-            'resolves to the IP and another'    => ['192.168.1.0/24:32400', ['192.168.1.87', '192.168.1.86'], '', 'pinned elsewhere'],
-            'resolves to an untargeted IP'      => ['192.168.1.86:32400', ['10.9.9.9'], '', 'private_network'],
-            'does not resolve'                  => ['192.168.1.86:32400', [], '', 'unresolvable'],
-            'not on the host allow-list'        => ['192.168.1.86:32400', ['192.168.1.86'], '192.168.1.86', 'host_not_allowed'],
+            'resolves to the IP and another'    => ['192.168.1.0/24:32400', ['192.168.1.87', '192.168.1.10'], '', 'pinned elsewhere'],
+            'resolves to an untargeted IP'      => ['192.168.1.10:32400', ['10.9.9.9'], '', 'private_network'],
+            'does not resolve'                  => ['192.168.1.10:32400', [], '', 'unresolvable'],
+            'not on the host allow-list'        => ['192.168.1.10:32400', ['192.168.1.10'], '192.168.1.10', 'host_not_allowed'],
         ];
     }
 
@@ -1282,7 +1282,7 @@ class ServerModelTest extends Base
         $this->lan();
         $alice = $this->user('alice');
         $this->setConfig(Settings::MAX_SERVERS_KEY, '5');
-        foreach ([self::BASE, 'http://192.168.1.86:32400', 'https://[fd00::5]:32400', self::SECURE] as $url) {
+        foreach ([self::BASE, 'http://192.168.1.10:32400', 'https://[fd00::5]:32400', self::SECURE] as $url) {
             $id = $this->connect($alice, $url);
             $this->assertSame($url, $this->model()->get($id)['base_url']);
         }
@@ -1335,7 +1335,7 @@ class ServerModelTest extends Base
 
         $this->assertSame($sent, count($this->t->requests));
         $this->assertSame($before, $this->row($id));
-        $this->assertStringContainsString('update failed at discover (host 192.168.1.86', $this->lastLog());
+        $this->assertStringContainsString('update failed at discover (host 192.168.1.10', $this->lastLog());
     }
 
     public function testAnUnchangedPlexDirectAddressIsNotRediscovered(): void
