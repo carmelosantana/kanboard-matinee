@@ -103,7 +103,7 @@ final class PlexPaths
     }
 
     /**
-     * A query key that reads as an X-Plex header (lowercased, "-" and "_" removed, it starts with "xplex"): Plex takes
+     * A query key that reads as an X-Plex header (lowercased, "-", "_" and "." removed, it starts with "xplex"): Plex takes
      * those from the query too, so a viewer could relabel their own requests (X-Plex-Client-Identifier and the like).
      */
     private static function hasPlexHeaderKey(string $u): bool
@@ -113,7 +113,7 @@ final class PlexPaths
             return false;
         }
         foreach (explode('&', substr($u, $q + 1)) as $pair) {
-            $key = str_replace(['-', '_'], '', strtolower(explode('=', $pair, 2)[0]));
+            $key = str_replace(['-', '_', '.'], '', strtolower(explode('=', $pair, 2)[0]));
             if (str_starts_with($key, 'xplex')) {
                 return true;
             }

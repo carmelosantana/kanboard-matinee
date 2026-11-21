@@ -247,6 +247,8 @@ class PlexPathsTest extends TestCase
             'mixed separators key' => ["$base/index.m3u8?x-PLEX_-_platform=1", false],
             'leading separator key' => ["$base/index.m3u8?_-x-plex=1", false],
             'bare xplex key' => ["$base/index.m3u8?xplex", false],
+            'dotted key' => ["$base/00001.ts?X.Plex.Device.Name=evil", false],
+            'dotted and dashed key' => ["$base/index.m3u8?a=1&x.plex-product_x=evil", false],
             'xplex key with no value' => ["$base/index.m3u8?a=1&X-Plex-Device-Name", false],
             'xplex in a value only' => ["$base/00001.ts?x=X-Plex-Device-Name", true],
             'plex key without x' => ["$base/00001.ts?plex-device=1", true],
