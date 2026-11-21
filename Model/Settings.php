@@ -31,6 +31,14 @@ final class Settings extends Base
     public const ATTEMPT_WINDOW = 600;
     public const MAX_SERVERS = 3;
 
+    /** P3 C4b: active long streams (HLS sessions, mp3 transcodes) per server, per user and on the whole install. */
+    public const STREAM_CAP_SERVER_KEY = 'matinee_stream_cap_server';
+    public const STREAM_CAP_USER_KEY = 'matinee_stream_cap_user';
+    public const STREAM_CAP_GLOBAL_KEY = 'matinee_stream_cap_global';
+    public const STREAM_CAP_SERVER = 4;
+    public const STREAM_CAP_USER = 2;
+    public const STREAM_CAP_GLOBAL = 5;
+
     public function connectPolicy(): string
     {
         return $this->configModel->getOption(self::CONNECT_POLICY) === self::POLICY_ADMINS ? self::POLICY_ADMINS : self::POLICY_EVERYONE;
@@ -44,6 +52,21 @@ final class Settings extends Base
     public function maxServers(): int
     {
         return $this->positiveInt(self::MAX_SERVERS_KEY, self::MAX_SERVERS);
+    }
+
+    public function streamCapServer(): int
+    {
+        return $this->positiveInt(self::STREAM_CAP_SERVER_KEY, self::STREAM_CAP_SERVER);
+    }
+
+    public function streamCapUser(): int
+    {
+        return $this->positiveInt(self::STREAM_CAP_USER_KEY, self::STREAM_CAP_USER);
+    }
+
+    public function streamCapGlobal(): int
+    {
+        return $this->positiveInt(self::STREAM_CAP_GLOBAL_KEY, self::STREAM_CAP_GLOBAL);
     }
 
     /** The per-install client id, or '' before ensureClientId() has run. Read-only: never writes. */
