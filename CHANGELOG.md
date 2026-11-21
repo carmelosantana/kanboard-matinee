@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-Version stays 0.1.0 and is not tagged. This is the P1 foundation: servers and the sharing switch. Nothing plays
-yet.
+Version stays 0.1.0 and is not tagged. This covers the P1 foundation (servers and the sharing switch), P2
+browse and P3 playback.
 
 **Light scope (2026-11-20).** Per-project shares are gone before they ever shipped. A server is private to its
 owner or shared with every active Kanboard user, and a shared server is always the whole server. The
@@ -12,6 +12,11 @@ audiences and project-role abilities were removed; schema v1 was edited in place
 
 **P2 browse (2026-11-20).** Anyone who may browse a server can page through its libraries and see posters.
 Nothing plays yet.
+
+**P3 playback (2026-11-21).** Movies, episodes and music tracks play in the browser, under three stream caps.
+Spec S3 asks for `ignore_user_abort(false)`; stream endpoints set `true` instead, so a client abort ends the
+stream through the normal path and its cap row is stopped at once rather than leaking (see the README's
+"Security model").
 
 **Connecting by IP (2026-11-20).** `https://<Plex IP>:32400` now connects. It used to fail every time, because
 Plex's `*.plex.direct` certificate never covers a bare IP.
@@ -27,6 +32,23 @@ Plex's `*.plex.direct` certificate never covers a bare IP.
 
 ### Added
 
+- **Player page (`matinee/play`):** a **Play** link on every movie, episode and track opens a player inside
+  Kanboard. It re-checks the live library and the item's section, then claims a session for video. Every player
+  page renews the Kanboard session every 5 minutes; a video page pings its session every 30 s and sends one stop
+  beacon on leave, on a fatal player error or a media error. A refused ping reloads once, then shows the error.
+- **Audio:** mp3, flac and aac in mp4/m4a with no video stream play directly, in `206` windows of at most 8 MiB
+  (`ByteRange`). Everything else is Plex's 320 kbps mp3 transcode, a single `200` capped at 15 minutes and
+  64 MiB.
+- **Video:** every movie and episode plays over Plex's HLS transcoder at up to 1080p and 8 Mbps, with subtitles
+  burned in, through vendored hls.js 1.7.1 (native HLS where MSE is missing). `HlsPlaylist` rewrites every URI to
+  a same-origin `matinee/hls/proxy` link; segments stream with a 64 MiB cap.
+- **Stream caps (`TranscodeModel`):** long streams (video sessions and transcoded tracks) are capped per server
+  (4), per user (2) and globally (5), each set under **Settings → Matinee** from 1 to 1000. Claims are serialized
+  on a lock row. At a cap the player page is a 503 with `Retry-After: 30`; media and HLS requests are empty 503s.
+  A lazy sweep stops at most two sessions unseen for 120 s, on video claims and one Matinee page in ten.
+- **Schema v3:** `matinee_transcodes` and `matinee_locks` on SQLite, MySQL, Postgres and SQL Server.
+- **Streaming transport:** `PlexTransport::stream()` writes through a `ResponseSink` with per-call timeouts (60 s,
+  900 s for the mp3 transcode, 3 s for stops), a 1 KiB/s low-speed floor over 15 s, and an exact byte cap.
 - **Browse (Media):** a **Media** link in the dashboard sidebar lists the servers you may browse, then a
   server's libraries, then a library as a poster grid of 60 items a page. Shows, seasons, artists and albums
   open into their children. The breadcrumb names the server and library. A page past the end of a shrunken
@@ -59,6 +81,18 @@ Plex's `*.plex.direct` certificate never covers a bare IP.
 
 ### Security
 
+- P3: play, media and HLS refs last at most 8 hours and are re-verified on every request (signature, user,
+  expiry, kind, live browse right); HLS requests must also name the caller's own live session. The ref payload
+  is unchanged from P2.
+- P3: the pinned-address check runs before the first byte reaches the client. Stream endpoints drop the
+  Kanboard session without writing it, answer GET only, and send `nosniff`, `default-src 'none'; sandbox`,
+  `Content-Disposition: inline`, `Cross-Origin-Resource-Policy: same-origin` and `private, no-store`. Each kind
+  passes only its known content types.
+- P3: playlists fail closed on non-ASCII text, an unlisted tag, an unquoted `URI` attribute, a slash outside
+  one, more than 50,000 URIs or 16 MiB. HLS child paths carrying an `X-Plex` query key are refused.
+- P3: Plex names each viewer's device `Matinee (<username>)`, the viewer's rather than the owner's.
+- P3: only the player page widens the CSP (`media-src` and `worker-src` `'self' blob:`); `script-src` is
+  untouched, and hls.js loads there only.
 - Tokens are sealed with XChaCha20-Poly1305 under a subkey of a root key from `MATINEE_KEY` or
   `DATA_DIR/matinee/secret.key`, bound to the server row, owner, address and machine id. The key file is
   created race-free at 0600 in a 0700 directory; symlinks, loose directories and wrong-size keys fail closed.
@@ -85,6 +119,9 @@ Plex's `*.plex.direct` certificate never covers a bare IP.
   2 MiB body can't exhaust PHP memory.
 
 ### Tests
+
+- P3 docs: `./testing/run-plugin-tests.sh Matinee`: OK (1779 tests, 20990 assertions, 2 skipped).
+  `node --test Test/js/player.test.mjs`: 18 pass.
 
 - P2, after the whole-branch security gate (pass; no Critical, High or Medium):
   `./testing/run-plugin-tests.sh Matinee`: OK (901 tests, 7606 assertions). MariaDB and Postgres: 901 tests,

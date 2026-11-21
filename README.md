@@ -3,11 +3,11 @@
 Connect a Plex server to Kanboard and keep it to yourself, or share the whole server with everyone on your
 Kanboard. The Plex token is encrypted at rest and never shown to anyone, admins included.
 
-**Status:** 0.1.0, in development (P1 foundation and P2 browse). Not released or listed in ModMenu yet.
+**Status:** 0.1.0, in development (P1 foundation, P2 browse and P3 playback). Not released or listed in ModMenu yet.
 
 ## What it does today
 
-P1 is the foundation: servers and the sharing switch. P2 adds browsing. Nothing plays yet.
+P1 is the foundation: servers and the sharing switch. P2 adds browsing. P3 adds playback.
 
 - **Connect a Plex server** with a name, its address and your Plex token. Matinee checks the server answers
   and the token works before it stores anything.
@@ -17,8 +17,10 @@ P1 is the foundation: servers and the sharing switch. P2 adds browsing. Nothing 
   every server and can switch any of them off.
 - **Browse it** (see [Browsing](#browsing)). **Media** on the dashboard lists the servers you may browse, their
   libraries, and each library's posters.
+- **Play it** (see [Playing](#playing)). Movies, episodes and music tracks play in the browser, under stream
+  caps an admin sets.
 
-Playing media, watch-together rooms and playlists come in later phases (see [Roadmap](#roadmap)).
+Watch-together rooms and playlists come in later phases (see [Roadmap](#roadmap)).
 
 ## Requirements
 
@@ -89,8 +91,8 @@ Open the server under **Plex servers** and use **Share with everyone** or **Make
 owner, can flip it, and only while the server is enabled. An admin can't share or unshare someone else's
 server, but can disable it.
 
-Once playback ships, everyone you share with browses and plays through your Plex, and Plex shows all of that
-playback as you.
+Everyone you share with browses and plays through your Plex. Plex counts that playback against your account,
+and names each viewer's device `Matinee (<username>)`.
 
 ## Browsing
 
@@ -112,6 +114,96 @@ albums and tracks.
 
 Admins browse only shared servers, like everyone else; an admin can't browse someone's private server.
 
+## Playing
+
+A **Play** link sits on every movie, episode and track in a listing. It opens the player page inside Kanboard.
+The page re-checks that you may browse the server, that the library is still live and that the item belongs to
+it.
+
+### Music
+
+A track plays straight from its file (direct play) when its container and codec are one of these pairs and it
+has no video stream:
+
+| Container | Audio codec | Sent as |
+|---|---|---|
+| `mp3` | `mp3` | `audio/mpeg` |
+| `flac` | `flac` | `audio/flac` |
+| `mp4` or `m4a` | `aac` | `audio/mp4` |
+
+All three play in Chrome, Firefox and Safari. Every other track (ALAC, Ogg, Opus, WMA, WAV and the rest)
+plays as a 320 kbps mp3 transcode made by Plex.
+
+- **Direct play is sent in windows.** Each request answers `206 Partial Content` with at most 8 MiB, so seeking
+  works and no request holds a worker for long. A request without a usable `Range` gets the first 8 MiB.
+- **A transcoded track can't seek.** It is one `200` response with `Accept-Ranges: none`, capped at 15 minutes
+  and 64 MiB. A pause longer than about a minute ends it (see [Web server](#web-server)), and the player then
+  shows "This item could not be played." Start the track again from the listing.
+
+### Video
+
+Every movie and episode plays over HLS through Plex's transcoder, at up to 1080p and 8 Mbps, with subtitles
+burned in. Matinee asks Plex to direct-stream video and audio when it can, so a compatible file is remuxed
+rather than re-encoded.
+
+The player uses the vendored hls.js (see [Vendored files](#vendored-files)). A browser without Media Source
+Extensions but with native HLS, such as Safari on iOS, plays the stream natively. Any other browser shows "Your
+browser cannot play this video."
+
+Every playlist Matinee passes on is rewritten so each address in it points back to Matinee, never to Plex. A
+playlist that carries anything unexpected (an unknown tag, a URL outside a `URI` attribute, non-ASCII text) is
+refused whole.
+
+### The player page
+
+- **Ping.** A video page pings Matinee every 30 seconds, so a paused film keeps its slot. If a ping is refused
+  (the session was stopped, or the server is no longer yours to browse), the page reloads and claims a fresh
+  session. A second refusal within two minutes stops trying and shows the error instead of looping.
+- **Keepalive.** Every player page, audio included, renews your Kanboard session every 5 minutes, so a long
+  film or album doesn't sign you out.
+- **Stop on leave.** Leaving or reloading the page sends one stop beacon. Matinee marks the session stopped and
+  asks Plex to end the transcode. A fatal player error or a media error stops the session the same way, so a
+  broken player never holds a slot. A page restored with the browser's Back button reloads, because its
+  session was stopped when you left.
+- **Sweep.** A session that hasn't been seen for 120 seconds (a closed laptop, a crashed tab) no longer counts
+  against any cap. Matinee stops such sessions lazily, at most two at a time: whenever a video page opens, and
+  on about one Matinee page in ten.
+
+Play links are signed for you only and last 8 hours, so a film can be paused and resumed within an evening.
+
+### Stream caps
+
+A long stream is a video session, or a transcoded track while it plays. Direct-play music windows are short
+requests and don't count. Each long stream counts against three caps:
+
+| Cap | Default | Setting |
+|---|---|---|
+| Per server | 4 | Long streams per server |
+| Per user | 2 | Long streams per user |
+| On this Kanboard | 5 | Long streams on this Kanboard |
+
+Each is a whole number from 1 to 1000, set under [Admin settings](#admin-settings). Claims are serialized, so
+concurrent requests can't pass a cap.
+
+When a cap is reached, the player page answers `503` with `Retry-After: 30` and reads "This server is busy
+right now. Try again in a minute." A media or HLS request over a cap is an empty `503` with `Retry-After: 30`.
+Opening the next film in the same tab at a per-user cap of 1 can beat the previous page's stop beacon and get
+the busy page; reloading fixes it.
+
+## Web server
+
+Each long stream holds one PHP-FPM worker for as long as Plex is sending. Three settings keep that bounded:
+
+- **Keep nginx's `fastcgi_buffering` on** (the default). When a listener pauses a transcoded track, nginx keeps
+  reading from PHP into a temp file, so the worker is freed once Plex finishes rather than held by a paused
+  browser. Matinee never sends `X-Accel-Buffering: no`. Without buffering, a paused transcode holds its worker
+  until the 15-minute cap.
+- **Set PHP-FPM's `request_terminate_timeout` to 900 s or more**, or leave it at 0. A shorter value cuts a
+  transcoded track before its own 15-minute cap.
+- **Keep the global stream cap under a quarter of `pm.max_children`.** Every long stream pins a worker, and the
+  rest of Kanboard needs the others. The default global cap of 5 wants `pm.max_children` of 21 or more; lower
+  the cap if your pool is smaller.
+
 ## Admin settings
 
 **Settings → Matinee** (admins only).
@@ -121,6 +213,9 @@ Admins browse only shared servers, like everyone else; an admin can't browse som
 | Who may connect a Plex server | Every user | Every active user, or administrators only |
 | Server connection attempts per user per 10 minutes | 10 | Connect, verify and saving an edit each count one |
 | Servers per user | 3 | How many servers one user may own |
+| Long streams per server | 4 | Video sessions and transcoded tracks one server may run at once (see [Stream caps](#stream-caps)) |
+| Long streams per user | 2 | Long streams one user may run at once, across every server |
+| Long streams on this Kanboard | 5 | Long streams across every server and user; keep it under a quarter of `pm.max_children` |
 | Private targets | empty | Private addresses Matinee may reach (below) |
 | Allowed hosts | empty | When set, the only hosts Matinee may reach at all |
 
@@ -193,6 +288,8 @@ includes key bytes or paths.
 |---|---|
 | `matinee_servers` | owner, name, base address, Plex machine id, sealed token, key id, enabled flag, shared flag, status, timestamps |
 | `matinee_attempts` | one row per server connection attempt, for the rate limit; pruned after an hour |
+| `matinee_transcodes` | one row per long stream: server, user, session id, kind (`hls` or `mp3`), last seen, stopped flag; stopped rows are deleted after a day |
+| `matinee_locks` | one row, `streams`, that serializes stream claims |
 
 Settings live in core's `settings` table under `matinee_*` keys, including a per-install Plex client id.
 
@@ -228,16 +325,34 @@ Deleting a user removes their servers.
   can be signed or followed (a library or item listing, a poster), so a reference can't steer Matinee to any
   other Plex endpoint.
 - **Plex sees one name per viewer.** Requests carry `X-Plex-Device-Name: Matinee (<username>)`. The username is
-  the only Kanboard data sent to Plex.
+  the only Kanboard data sent to Plex. During playback the name is the viewer's, not the owner's.
+- **Playback refs.** Play, media and HLS links are signed the same way and last up to 8 hours. Every media,
+  playlist and segment request re-checks the signature, the user, the expiry and that you may still browse the
+  server. An HLS request must also name a live session of your own on that server. Only Plex item, part and
+  transcode paths can be reached.
+- **Streams.** Media, playlists and segments are sent with `nosniff`, `Content-Security-Policy: default-src
+  'none'; sandbox`, `Content-Disposition: inline`, `Cross-Origin-Resource-Policy: same-origin` and
+  `Cache-Control: private, no-store`. Only a known content type for each kind is passed on; anything else is
+  an empty 502. Media endpoints answer GET only. A stream request drops the Kanboard session without writing it
+  first, so a long stream can't overwrite newer session data when it ends.
+- **The player page** alone widens the Content Security Policy, adding `media-src 'self' blob:` and
+  `worker-src 'self' blob:` for hls.js. `script-src` is never touched, and hls.js and the player script load on
+  that page only.
+- **Client aborts (a deviation from the spec).** The spec's S3 asks for `ignore_user_abort(false)`. Matinee sets
+  `ignore_user_abort(true)` for the stream window instead. With `false`, PHP bails out on the first write after
+  the browser goes away, `finally` blocks never run, and the stream's cap row leaks until the sweep finds it.
+  With `true`, the response sink notices the abort itself, curl stops cleanly, and the row is stopped at once.
+  A shutdown function stops any row the request claimed as a backstop. The cost is that a worker may read one
+  more chunk from Plex after the browser leaves.
 
 ## Roles
 
-What each role can do with a server. Browsing works today; rooms and playlists arrive with P4–P5. Project roles play no part.
+What each role can do with a server. Browsing and playing work today; rooms and playlists arrive with P4–P5. Project roles play no part.
 
 | Who | Can |
 |---|---|
-| Server owner | connect, edit, verify and remove their servers; share or unshare them; browse, start or control rooms and edit playlists on them |
-| Everyone, when the server is shared | every active user: browse, start or control rooms and edit playlists |
+| Server owner | connect, edit, verify and remove their servers; share or unshare them; browse, play, start or control rooms and edit playlists on them |
+| Everyone, when the server is shared | every active user: browse, play, start or control rooms and edit playlists |
 | App admin | see every server; verify, disable or remove any of them. No browse of a private server, and no sharing switch on someone else's. |
 
 Connecting a server follows **Who may connect a Plex server**. Nothing works on a disabled server or on a
@@ -251,9 +366,16 @@ server whose owner is deactivated.
   server cap by a little. An owner can't add the same host and port twice.
 - **Sharing is all or nothing.** A shared server reaches every active user, including users added later, and
   every library the owner adds later. Keep a server private if that is too wide.
-- **The owner's Plex sees all traffic as the owner.** Plex activity shows "Matinee (username)", so the owner
-  can see who watched what.
-- **Transcoding load** will land on the owner's Plex (P3 adds stream caps).
+- **The owner's Plex carries all traffic.** Plex shows each playing viewer as "Matinee (username)", so the
+  owner can see who watched what. All viewers share one Plex client id per install; Plex tells their sessions
+  apart by session id.
+- **Transcoding load lands on the owner's Plex.** Every video is an HLS transcode or remux, and off-list music
+  is an mp3 transcode. The [stream caps](#stream-caps) bound how many run at once.
+- **All media bandwidth flows through Kanboard.** Every byte is proxied, so the Kanboard host's upload is the
+  ceiling for everyone playing at once.
+- **Segment requests within a session aren't limited.** A viewer holding one session can fetch its playlists
+  and segments as fast as they like; only the number of sessions is capped.
+- **A transcoded track can't seek or resume after a long pause** (see [Music](#music)).
 - **Browsing has no rate limit.** Each library page costs Plex two requests and each poster one, for anyone
   the server is shared with. A user who keeps reloading adds load to the owner's Plex (never more than one
   Plex call per Matinee request beyond those). Keep a server private if you don't trust everyone on the board.
@@ -265,7 +387,7 @@ server whose owner is deactivated.
 |---|---|
 | P1 (done) | servers, the sharing switch, policy, settings |
 | P2 (done) | signed media refs, browse pages, artwork |
-| P3 | playback: audio with ranged responses, video through Plex HLS transcode, stream caps |
+| P3 (done) | playback: audio with ranged responses, video through Plex HLS transcode, stream caps |
 | P4 | watch-together rooms, synced to within about 2 s |
 | P5 | playlists per server (Matinee's own; nothing is written to Plex) |
 
@@ -277,7 +399,7 @@ Removing `plugins/Matinee/` stops the plugin but deletes none of its data. What 
 
 | Left behind | How to delete it |
 |---|---|
-| Tables `matinee_servers` and `matinee_attempts` | `DROP TABLE` each |
+| Tables `matinee_servers`, `matinee_attempts`, `matinee_transcodes` and `matinee_locks` | `DROP TABLE` each |
 | Matinee's row in core's `plugin_schema_versions` table (`plugin` = `matinee`) | delete it too, or a reinstall skips creating the tables |
 | Rows in core's `settings` table whose `option` starts with `matinee_` | delete those rows (the `option` column is a reserved word on MySQL, so quote it there) |
 | The key file `DATA_DIR/matinee/secret.key` | delete the `DATA_DIR/matinee/` directory |
@@ -296,7 +418,26 @@ from the package was installed or run. `Test/VendorTest.php` checks the file aga
 |---|---|---|---|---|---|
 | `Assets/vendor/hls.js/hls.min.js` | 1.7.1 | `https://registry.npmjs.org/hls.js/-/hls.js-1.7.1.tgz` | `sha512-DlzIkeBAS9IIQ432k3BUf3HlwbsR0+trB1i2lDdN2gUkNkrehFurh0/48M5c1/EjlDkdGng1gwZIpwyPxvdZ/g==` | `6cfad701a61fb8a99add5e84449e64661169b0652bf44ceb2a28465c8817b5f1` | 2026-11-21 |
 
+To check the file yourself, run `sha256sum Assets/vendor/hls.js/hls.min.js` and compare it with the table.
+
 hls.js is licensed under Apache-2.0; its license is at `Assets/vendor/hls.js/LICENSE`.
+
+## Tests
+
+From the harness checkout (the directory above this plugin):
+
+```sh
+./testing/run-plugin-tests.sh Matinee
+```
+
+That runs the PHPUnit suite on SQLite. It includes `Test/PlayerJsTest.php`, which runs the player's node tests
+when `node` is on `PATH` and skips them otherwise. To run the node tests alone, from this directory:
+
+```sh
+node --test Test/js/player.test.mjs
+```
+
+Name the file. The directory form, `node --test Test/js`, fails on Node 22.
 
 ## License
 
