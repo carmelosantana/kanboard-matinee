@@ -12,6 +12,7 @@ use Kanboard\Plugin\Matinee\Model\MatineeBusyException;
 use Kanboard\Plugin\Matinee\Model\MatineeConnectException;
 use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
 use Kanboard\Plugin\Matinee\Model\MatineeRangeException;
+use Kanboard\Plugin\Matinee\Model\ServerModel;
 use Kanboard\Plugin\Matinee\Model\TranscodeModel;
 
 /** Counts closeSession() instead of ending a session (C3d), and records the seams in the order they run. */
@@ -1072,10 +1073,13 @@ class PlayControllerTest extends Base
         $item = json_decode((string) file_get_contents(__DIR__.'/fixtures/plex/item-track-mp3.json'), true);
         $item['MediaContainer']['Metadata'][0]['title'] = '<img src=x onerror=alert(1)>"';
         $item['MediaContainer']['Metadata'][0]['parentTitle'] = '<b>bold</b>';
+        $this->container['db']->table(ServerModel::TABLE)->eq('id', $this->server)->update(['name' => '<img src=x onerror=alert(2)>']);
         $this->queueItem((string) json_encode($item));
         $body = $this->play($this->ref($this->owner, 'media', '/library/metadata/3001'))->body();
         $this->assertStringContainsString('&lt;img src=x onerror=alert(1)&gt;&quot;', $body);
         $this->assertStringContainsString('&lt;b&gt;bold&lt;/b&gt;', $body);
+        // The server's name in the breadcrumb, escaped exactly once.
+        $this->assertMatchesRegularExpression('#<a href="[^"]*action=server[^"]*"[^>]*>&lt;img src=x onerror=alert\(2\)&gt;</a>#', $body);
         $this->assertStringNotContainsString('<img src=x', $body);
         $this->assertStringNotContainsString('<b>bold', $body);
     }
@@ -1126,6 +1130,7 @@ class PlayControllerTest extends Base
         }
         $r = $this->moviePage();
         $this->assertSame(503, $r->code());
+        $this->assertSame('30', $r->headers()['Retry-After'] ?? null);
         $this->assertStringContainsString('<p class="alert alert-error">'.self::BUSY.'</p>', $r->body());
         $this->assertStringNotContainsString('<video', $r->body());
         $this->assertCount(2, $this->container['db']->table(TranscodeModel::TABLE)->findAll());

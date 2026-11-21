@@ -88,6 +88,22 @@ class PlayerAssetsTest extends Base
         $this->assertSame([self::HLS, self::PLAYER], $this->js());
     }
 
+    /** The layout renders the hooked scripts as core does: hls.js first, both deferred, both with a src. */
+    public function testTheLayoutRendersHlsJsThenThePlayerDeferred(): void
+    {
+        $this->bootstrap('MatineePlayController', 'play');
+        $html = $this->container['helper']->hook->asset('js', 'template:layout:js');
+        $this->assertSame(2, preg_match_all('#<script\b[^>]*></script>#', $html, $tags));
+        $this->assertStringContainsString('hls.min.js?', $tags[0][0]);
+        $this->assertStringContainsString('player.js?', $tags[0][1]);
+        $this->assertLessThan(strpos($html, 'player.js?'), strpos($html, 'hls.min.js?'));
+        foreach ($tags[0] as $tag) {
+            $this->assertMatchesRegularExpression('#\sdefer[\s>]#', $tag);
+            $this->assertMatchesRegularExpression('#\ssrc="[^"]+"#', $tag);
+            $this->assertDoesNotMatchRegularExpression('#\sasync[\s>]#', $tag);
+        }
+    }
+
     public function testEveryOtherRouteIsUntouched(): void
     {
         foreach ([
@@ -96,6 +112,8 @@ class PlayerAssetsTest extends Base
             ['MatineePlayController', 'media', 'Matinee'],
             ['MatineePlayController', 'hlsStart', 'Matinee'],
             ['DashboardController', 'show', ''],
+            ['MatineeBrowseController', 'play', 'Matinee'],
+            ['MatineePlayController', 'play', ''],
         ] as [$controller, $action, $plugin]) {
             $this->bootstrap($controller, $action, $plugin);
             $this->assertSame(self::CORE, $this->container['cspRules'], "$controller::$action");

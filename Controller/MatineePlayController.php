@@ -16,8 +16,8 @@ use Kanboard\Plugin\Matinee\Model\PlaybackModel;
  *
  * - `play` (C2c, C5b, C6): the player page in the dashboard layout. Audio gets an `<audio>` sourced from `media`; video
  *   gets a `<video>` whose claimed session, hls/start, ping, stop and keepalive URLs and reusable CSRF token travel in
- *   `data-` attributes for player.js (no inline script). Forbidden is core's 403; Busy is the busy page with a 503;
- *   Connect is P2's failure page with a 502.
+ *   `data-` attributes for player.js (no inline script). Forbidden is core's 403; Busy is the busy page with a 503
+ *   and `Retry-After: 30`; Connect is P2's failure page with a 502.
  * - `media`: GET only. One window of a direct part, or an mp3 transcode, streamed through the ResponseSink, which alone
  *   opens the response (C3e). Once the ref and the server pass, the session is dropped without a write (C3d), and
  *   client aborts end the stream cleanly (C3f). A refusal is an empty body at 403, 405 (any other method, HEAD
@@ -43,6 +43,7 @@ class MatineePlayController extends MatineeBaseController
         } catch (MatineeForbiddenException) {
             throw new AccessForbiddenException();
         } catch (MatineeBusyException) {
+            $this->response->withHeader('Retry-After', '30');
             $this->renderMedia('Matinee:play/busy', [], 503);
             return;
         } catch (MatineeConnectException) {
