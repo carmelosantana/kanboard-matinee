@@ -115,6 +115,17 @@ trait MatineeControllerHarness
         session_set('flash', []);
     }
 
+    /**
+     * After parent::tearDown(): PHPUnit keeps every test object until the run ends, and core's Base keeps the
+     * dispatcher, whose listeners (Matinee's among them) hold the whole container. Dropping it frees the container, so
+     * a long suite stays under the 128 MiB PHP default (run-realdb-tests.sh).
+     */
+    private function releaseContainer(): void
+    {
+        $this->dispatcher = null;
+        gc_collect_cycles();
+    }
+
     private function user(string $name, string $role = Role::APP_USER): int
     {
         $id = (int) (new UserModel($this->container))->create(['username' => $name, 'name' => ucfirst($name), 'role' => $role]);

@@ -50,6 +50,7 @@ class BrowseControllerTest extends Base
     {
         $this->cleanKeyDir();
         parent::tearDown();
+        $this->releaseContainer();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

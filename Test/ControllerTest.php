@@ -38,6 +38,7 @@ class ControllerTest extends Base
     {
         $this->cleanKeyDir();
         parent::tearDown();
+        $this->releaseContainer();
     }
 
     private function forbidden(callable $fn, string $label = ''): void
