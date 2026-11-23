@@ -3,6 +3,7 @@
 use Kanboard\Core\Security\Role;
 use Kanboard\Plugin\Matinee\Model\MatineePolicy;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * MatineePolicy (plan Task 11; spec "Light scope", §11 S6) driven by in-memory lookups, so every row runs without a
@@ -64,6 +65,7 @@ class MatineePolicyTest extends TestCase
     }
 
     /** @dataProvider table */
+    #[DataProvider('table')]
     public function testAbilities(int $serverId, int $user, ?callable $tweak, string $expected): void
     {
         $w = self::world();
@@ -75,7 +77,7 @@ class MatineePolicyTest extends TestCase
         $this->assertSame($expected, self::abilities(self::policy($w), $user, $server));
     }
 
-    public function table(): array
+    public static function table(): array
     {
         $deactivate = static fn (int $id): \Closure => static function (array &$w) use ($id) {
             $w['users'][$id]['is_active'] = 0;
@@ -137,6 +139,7 @@ class MatineePolicyTest extends TestCase
     }
 
     /** @dataProvider connectTable */
+    #[DataProvider('connectTable')]
     public function testCanConnectServer(int $user, string $policy, ?int $inactive, bool $expected): void
     {
         $w = self::world();
@@ -147,7 +150,7 @@ class MatineePolicyTest extends TestCase
         $this->assertSame($expected, self::policy($w)->canConnectServer($user));
     }
 
-    public function connectTable(): array
+    public static function connectTable(): array
     {
         return [
             'user, policy everyone' => [self::OTHER, 'everyone', null, true],
@@ -161,6 +164,7 @@ class MatineePolicyTest extends TestCase
     }
 
     /** @dataProvider activeAdminTable */
+    #[DataProvider('activeAdminTable')]
     public function testIsActiveAdmin(int $user, ?\Closure $tweak, bool $expected): void
     {
         $w = self::world();
@@ -170,7 +174,7 @@ class MatineePolicyTest extends TestCase
         $this->assertSame($expected, self::policy($w)->isActiveAdmin($user));
     }
 
-    public function activeAdminTable(): array
+    public static function activeAdminTable(): array
     {
         return [
             'admin' => [self::ADMIN, null, true],
@@ -188,6 +192,7 @@ class MatineePolicyTest extends TestCase
     }
 
     /** @dataProvider sectionTable */
+    #[DataProvider('sectionTable')]
     public function testSectionAllowed(string $key, bool $expected): void
     {
         // PlexClient::sections() has already dropped every type outside the allow-list.
@@ -199,7 +204,7 @@ class MatineePolicyTest extends TestCase
         $this->assertSame($expected, self::policy(self::world())->sectionAllowed($live, $key));
     }
 
-    public function sectionTable(): array
+    public static function sectionTable(): array
     {
         return [
             'live' => ['2', true],

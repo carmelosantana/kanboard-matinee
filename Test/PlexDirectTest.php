@@ -2,6 +2,7 @@
 
 use Kanboard\Plugin\Matinee\Http\PlexDirect;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * PlexDirect: which bases get a secure-name discovery, which certificate names count as Plex's, and the one
@@ -15,6 +16,7 @@ class PlexDirectTest extends TestCase
     private const SECURE = 'https://192-168-1-10.0123456789abcdef0123456789abcdef.plex.direct:32400';
 
     /** @dataProvider endpoints */
+    #[DataProvider('endpoints')]
     public function testOnlyHttpsIpv4BasesAreDiscovered(string $base, ?array $endpoint): void
     {
         $this->assertSame($endpoint, PlexDirect::ipv4Endpoint($base));
@@ -36,6 +38,7 @@ class PlexDirectTest extends TestCase
     }
 
     /** @dataProvider certificates */
+    #[DataProvider('certificates')]
     public function testOnlyAPlexDirectWildcardGivesASecureName(array $names, ?string $expected): void
     {
         $this->assertSame($expected, PlexDirect::fromCertificate(self::IP_BASE, $names));
@@ -77,6 +80,7 @@ class PlexDirectTest extends TestCase
     }
 
     /** @dataProvider candidates */
+    #[DataProvider('candidates')]
     public function testOnlyTheTypedIpAndPortAreASecureNameFor(string $candidate, bool $ok): void
     {
         $this->assertSame($ok, PlexDirect::isSecureNameFor(self::IP_BASE, $candidate));

@@ -11,6 +11,7 @@ use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
 use Kanboard\Plugin\Matinee\Test\FakeTransport;
 use Kanboard\Plugin\Matinee\Test\RecordingSink;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * PlexClient (spec §3, §11 S9, S11, S13, S14): headers, whitelisted parsing of /identity, /library/sections and
@@ -125,6 +126,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badBaseUrls */
+    #[DataProvider('badBaseUrls')]
     public function testABaseUrlWithAQueryOrFragmentIsRefused(string $base): void
     {
         try {
@@ -136,7 +138,7 @@ class PlexClientTest extends TestCase
         $this->assertSame([], $this->t->requests);
     }
 
-    public function badBaseUrls(): array
+    public static function badBaseUrls(): array
     {
         return [
             'query'    => [self::BASE . '/?X-Plex-Token=' . self::TOKEN],
@@ -145,6 +147,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider headerInjection */
+    #[DataProvider('headerInjection')]
     public function testHeaderValuesWithControlCharactersAreRefused(string $token, string $clientId, string $device): void
     {
         try {
@@ -156,7 +159,7 @@ class PlexClientTest extends TestCase
         }
     }
 
-    public function headerInjection(): array
+    public static function headerInjection(): array
     {
         return [
             'token CRLF'     => [self::TOKEN . "\r\nX-evil: 1", self::CLIENT_ID, 'Matinee'],
@@ -172,6 +175,7 @@ class PlexClientTest extends TestCase
      *
      * @dataProvider badDeviceNames
      */
+    #[DataProvider('badDeviceNames')]
     public function testADeviceNameNotShapedLikeDeviceNamesOutputIsRefused(string $device): void
     {
         try {
@@ -183,7 +187,7 @@ class PlexClientTest extends TestCase
         }
     }
 
-    public function badDeviceNames(): array
+    public static function badDeviceNames(): array
     {
         return [
             'NEL (C1 control)'  => ["Evil\xc2\x85"],
@@ -198,6 +202,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider deviceNames */
+    #[DataProvider('deviceNames')]
     public function testEveryDeviceNameOutputIsAccepted(string $username, int $id, string $expected): void
     {
         $this->t->respond(200, $this->fixture('identity'));
@@ -217,13 +222,14 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badMachineIds */
+    #[DataProvider('badMachineIds')]
     public function testIdentityWithAnInsaneMachineIdentifierIsBadJson(mixed $id): void
     {
         $this->t->respondJson(['MediaContainer' => ['machineIdentifier' => $id, 'version' => '1.0']]);
         $this->expectPlexError(fn () => $this->client()->identity(), PlexException::BAD_JSON);
     }
 
-    public function badMachineIds(): array
+    public static function badMachineIds(): array
     {
         return [
             'missing'   => [null],
@@ -245,13 +251,14 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider versions */
+    #[DataProvider('versions')]
     public function testIdentityVersionIsFilteredOrBlanked(mixed $raw, string $expected): void
     {
         $this->t->respondJson(['MediaContainer' => ['machineIdentifier' => self::MACHINE, 'version' => $raw]]);
         $this->assertSame($expected, $this->client()->identity()['version']);
     }
 
-    public function versions(): array
+    public static function versions(): array
     {
         return [
             'normal'     => ['1.40.2.8395-c67dce28e', '1.40.2.8395-c67dce28e'],
@@ -305,13 +312,14 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider emptyDirectories */
+    #[DataProvider('emptyDirectories')]
     public function testSectionsWithNoDirectoryListIsEmpty(array $container): void
     {
         $this->t->respondJson(['MediaContainer' => $container]);
         $this->assertSame([], $this->client()->sections());
     }
 
-    public function emptyDirectories(): array
+    public static function emptyDirectories(): array
     {
         return [
             'missing'   => [['size' => 0]],
@@ -347,6 +355,7 @@ class PlexClientTest extends TestCase
     // ── errors ───────────────────────────────────────────────────────────────
 
     /** @dataProvider statuses */
+    #[DataProvider('statuses')]
     public function testStatusMapping(int $status, string $reason): void
     {
         $this->t->respond($status, 'UPSTREAM-BODY ' . self::TOKEN . ' ' . self::BASE . '/x?X-Plex-Token=' . self::TOKEN);
@@ -354,7 +363,7 @@ class PlexClientTest extends TestCase
         $this->assertSame($status, $e->status);
     }
 
-    public function statuses(): array
+    public static function statuses(): array
     {
         return [
             '401'        => [401, PlexException::TOKEN_REJECTED],
@@ -382,13 +391,14 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider junkBodies */
+    #[DataProvider('junkBodies')]
     public function testJunkBodiesAreBadJson(string $body): void
     {
         $this->t->respond(200, $body);
         $this->expectPlexError(fn () => $this->client()->sections(), PlexException::BAD_JSON);
     }
 
-    public function junkBodies(): array
+    public static function junkBodies(): array
     {
         return [
             'html'         => ['<html>UPSTREAM-BODY</html>'],
@@ -667,6 +677,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badArtOrKeyShapes */
+    #[DataProvider('badArtOrKeyShapes')]
     public function testAThumbOrKeyWithABadShapeIsDropped(mixed $value): void
     {
         $this->t->respondJson(['MediaContainer' => ['librarySectionID' => '1', 'Metadata' => [
@@ -677,7 +688,7 @@ class PlexClientTest extends TestCase
         $this->assertNull($item['key']);
     }
 
-    public function badArtOrKeyShapes(): array
+    public static function badArtOrKeyShapes(): array
     {
         return [
             'absolute url'    => ['https://evil.example.test/library/metadata/1/thumb/2'],
@@ -728,6 +739,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider unsafeTitles */
+    #[DataProvider('unsafeTitles')]
     public function testChildrenTitlesLoseControlAndFormatCharacters(string $raw, string $expected): void
     {
         $this->t->respondJson(['MediaContainer' => ['Metadata' => [
@@ -740,13 +752,14 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider unsafeTitles */
+    #[DataProvider('unsafeTitles')]
     public function testSectionTitlesLoseControlAndFormatCharacters(string $raw, string $expected): void
     {
         $this->t->respondJson(['MediaContainer' => ['Directory' => [['key' => '1', 'type' => 'movie', 'title' => $raw]]]]);
         $this->assertSame($expected, $this->client()->sections()[0]['title']);
     }
 
-    public function unsafeTitles(): array
+    public static function unsafeTitles(): array
     {
         return [
             'rtl override'    => ["evil\u{202E}gpj.exe", 'evilgpj.exe'],
@@ -798,13 +811,14 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider sectionIds */
+    #[DataProvider('sectionIds')]
     public function testSectionIsStringifiedOrNull(mixed $raw, ?string $expected): void
     {
         $this->t->respondJson(['MediaContainer' => ['librarySectionID' => $raw, 'Metadata' => []]]);
         $this->assertSame($expected, $this->client()->children('/library/sections/1/all', 0, 60)['section']);
     }
 
-    public function sectionIds(): array
+    public static function sectionIds(): array
     {
         return [
             'int'        => [7, '7'],
@@ -821,6 +835,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider totals */
+    #[DataProvider('totals')]
     public function testTotalIsTotalSizeElseStartPlusWhatCameBack(mixed $raw, int $start, int $expected): void
     {
         $mc = ['Metadata' => [['ratingKey' => '1', 'type' => 'movie'], ['ratingKey' => 'x', 'type' => 'movie']]];
@@ -831,7 +846,7 @@ class PlexClientTest extends TestCase
         $this->assertSame($expected, $this->client()->children('/library/sections/1/all', $start, 60)['total']);
     }
 
-    public function totals(): array
+    public static function totals(): array
     {
         return [
             'int'          => [250, 0, 250],
@@ -847,6 +862,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider emptyMetadata */
+    #[DataProvider('emptyMetadata')]
     public function testChildrenWithNoMetadataListIsEmpty(array $mc): void
     {
         $this->t->respondJson(['MediaContainer' => $mc]);
@@ -855,7 +871,7 @@ class PlexClientTest extends TestCase
         $this->assertSame(0, $out['total']);
     }
 
-    public function emptyMetadata(): array
+    public static function emptyMetadata(): array
     {
         return [
             'missing'  => [['size' => 0]],
@@ -866,6 +882,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badChildrenArgs */
+    #[DataProvider('badChildrenArgs')]
     public function testChildrenRefusesBadArgumentsWithNoRequest(string $path, int $start, int $size): void
     {
         try {
@@ -878,7 +895,7 @@ class PlexClientTest extends TestCase
         $this->assertSame([], $this->t->requests);
     }
 
-    public function badChildrenArgs(): array
+    public static function badChildrenArgs(): array
     {
         return [
             'art path'      => ['/library/metadata/1/thumb/2', 0, 60],
@@ -951,13 +968,14 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider imageTypes */
+    #[DataProvider('imageTypes')]
     public function testArtReturnsTheRawBodyAndTheNormalisedType(string $header, string $type): void
     {
         $this->t->respond(200, self::PNG, ['Content-Type' => $header]);
         $this->assertSame(['type' => $type, 'body' => self::PNG], $this->client()->art('/library/metadata/1/thumb/2', 144));
     }
 
-    public function imageTypes(): array
+    public static function imageTypes(): array
     {
         return [
             'jpeg'        => ['image/jpeg', 'image/jpeg'],
@@ -978,13 +996,14 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badImageTypes */
+    #[DataProvider('badImageTypes')]
     public function testArtWithANonImageTypeIsBadType(?string $header): void
     {
         $this->t->respond(200, '<svg onload="UPSTREAM-BODY"/>', $header === null ? [] : ['Content-Type' => $header]);
         $this->expectPlexError(fn () => $this->client()->art('/library/metadata/1/thumb/2', 144), PlexException::BAD_TYPE);
     }
 
-    public function badImageTypes(): array
+    public static function badImageTypes(): array
     {
         return [
             'svg'        => ['image/svg+xml'],
@@ -999,6 +1018,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badArtArgs */
+    #[DataProvider('badArtArgs')]
     public function testArtRefusesBadArgumentsWithNoRequest(string $path, int $size): void
     {
         try {
@@ -1011,7 +1031,7 @@ class PlexClientTest extends TestCase
         $this->assertSame([], $this->t->requests);
     }
 
-    public function badArtArgs(): array
+    public static function badArtArgs(): array
     {
         return [
             'browse path' => ['/library/sections/1/all', 144],
@@ -1026,6 +1046,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider statuses */
+    #[DataProvider('statuses')]
     public function testArtStatusMapping(int $status, string $reason): void
     {
         $this->t->respond($status, 'UPSTREAM-BODY ' . self::TOKEN, ['Content-Type' => 'image/png']);
@@ -1059,6 +1080,7 @@ class PlexClientTest extends TestCase
     // ── item() (P3 Task 8; spec §7, S13; C1a) ────────────────────────────────
 
     /** @dataProvider itemFixtures */
+    #[DataProvider('itemFixtures')]
     public function testItemParsesTheWhitelistedFields(string $fixture, string $path, array $expected): void
     {
         $this->t->respond(200, $this->fixture($fixture));
@@ -1066,7 +1088,7 @@ class PlexClientTest extends TestCase
         $this->assertSame(self::BASE . $path, $this->t->requests[0]['url']);
     }
 
-    public function itemFixtures(): array
+    public static function itemFixtures(): array
     {
         return [
             'mp3 track' => ['item-track-mp3', '/library/metadata/3001', [
@@ -1119,6 +1141,7 @@ class PlexClientTest extends TestCase
      *
      * @dataProvider badCodecs
      */
+    #[DataProvider('badCodecs')]
     public function testItemCodecsOutsideTheShapeAreEmptyOrAnUnknownVideoCodec(mixed $codec): void
     {
         $this->t->respond(200, self::itemJson(['ratingKey' => '7', 'type' => 'track', 'Media' => [[
@@ -1130,6 +1153,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider absentVideoCodecs */
+    #[DataProvider('absentVideoCodecs')]
     public function testAnAbsentVideoCodecIsNull(array $media): void
     {
         $this->t->respond(200, self::itemJson(['ratingKey' => '7', 'type' => 'track', 'Media' => [$media + [
@@ -1138,12 +1162,12 @@ class PlexClientTest extends TestCase
         $this->assertNull($this->client()->item('/library/metadata/7')['videoCodec']);
     }
 
-    public function absentVideoCodecs(): array
+    public static function absentVideoCodecs(): array
     {
         return ['missing' => [[]], 'json null' => [['videoCodec' => null]]];
     }
 
-    public function badCodecs(): array
+    public static function badCodecs(): array
     {
         return [
             'trailing space' => ['MP3 '],
@@ -1158,6 +1182,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badParts */
+    #[DataProvider('badParts')]
     public function testItemPartIsNullUnlessItIsAPartPath(mixed $media): void
     {
         $meta = ['ratingKey' => '7', 'type' => 'track'] + ($media === 'absent' ? [] : ['Media' => $media]);
@@ -1166,7 +1191,7 @@ class PlexClientTest extends TestCase
         $this->assertNull($item['part']);
     }
 
-    public function badParts(): array
+    public static function badParts(): array
     {
         return [
             'no media'      => ['absent'],
@@ -1180,13 +1205,14 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider malformedItems */
+    #[DataProvider('malformedItems')]
     public function testMalformedItemsAreBadJson(string $body): void
     {
         $this->t->respond(200, $body);
         $this->expectPlexError(fn () => $this->client()->item('/library/metadata/7'), PlexException::BAD_JSON);
     }
 
-    public function malformedItems(): array
+    public static function malformedItems(): array
     {
         return [
             'no metadata'    => [(string) json_encode(['MediaContainer' => ['librarySectionID' => 3]])],
@@ -1203,6 +1229,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badItemPaths */
+    #[DataProvider('badItemPaths')]
     public function testItemRefusesANonItemPathWithNoRequest(string $path): void
     {
         try {
@@ -1214,7 +1241,7 @@ class PlexClientTest extends TestCase
         $this->assertSame([], $this->t->requests);
     }
 
-    public function badItemPaths(): array
+    public static function badItemPaths(): array
     {
         return [
             'children' => ['/library/metadata/7/children'],
@@ -1297,6 +1324,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider partTypes */
+    #[DataProvider('partTypes')]
     public function testPartTypesAreCanonical(string $path, string $upstream, string $sent): void
     {
         $sink = $this->sink();
@@ -1305,7 +1333,7 @@ class PlexClientTest extends TestCase
         $this->assertSame($sent, $sink->headers['content-type']);
     }
 
-    public function partTypes(): array
+    public static function partTypes(): array
     {
         return [
             'mp3'          => [self::MP3_PART, 'audio/mpeg', 'audio/mpeg'],
@@ -1318,6 +1346,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badPartTypes */
+    #[DataProvider('badPartTypes')]
     public function testAPartTypeOutsideItsContainerListIsBadType(string $path, ?string $upstream): void
     {
         $sink = $this->sink();
@@ -1327,7 +1356,7 @@ class PlexClientTest extends TestCase
         $this->assertSame('', $sink->body);
     }
 
-    public function badPartTypes(): array
+    public static function badPartTypes(): array
     {
         return [
             'html'        => [self::MP3_PART, 'text/html'],
@@ -1369,6 +1398,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider bad200s */
+    #[DataProvider('bad200s')]
     public function testOther200sAreHttpErrorsAndTheSinkNeverOpens(int $start, ?string $length): void
     {
         $sink = $this->sink();
@@ -1379,7 +1409,7 @@ class PlexClientTest extends TestCase
         $this->assertSame('', $sink->body);
     }
 
-    public function bad200s(): array
+    public static function bad200s(): array
     {
         return [
             'not from 0'      => [100, '700'],
@@ -1393,6 +1423,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badUpstreamRanges */
+    #[DataProvider('badUpstreamRanges')]
     public function testA206WhoseRangeDoesNotFitIsBadRange(?string $range): void
     {
         $sink = $this->sink();
@@ -1401,7 +1432,7 @@ class PlexClientTest extends TestCase
         $this->assertSame(0, $sink->opens);
     }
 
-    public function badUpstreamRanges(): array
+    public static function badUpstreamRanges(): array
     {
         return [
             'start moved'  => ['bytes 0-999/5000'],
@@ -1429,6 +1460,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider statuses */
+    #[DataProvider('statuses')]
     public function testPartStatusMapping(int $status, string $reason): void
     {
         $sink = $this->sink();
@@ -1481,6 +1513,7 @@ class PlexClientTest extends TestCase
      *
      * @dataProvider mismatchedLengths
      */
+    #[DataProvider('mismatchedLengths')]
     public function testA206WhoseContentLengthIsNotItsRangeIsBadRange(string $length): void
     {
         $sink = $this->sink();
@@ -1490,7 +1523,7 @@ class PlexClientTest extends TestCase
         $this->assertSame('', $sink->body);
     }
 
-    public function mismatchedLengths(): array
+    public static function mismatchedLengths(): array
     {
         return [
             'the window' => ['1000'],
@@ -1529,6 +1562,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badWindows */
+    #[DataProvider('badWindows')]
     public function testPartRefusesABadWindowWithNoRequest(string $path, int $start, int $end): void
     {
         try {
@@ -1540,7 +1574,7 @@ class PlexClientTest extends TestCase
         $this->assertSame([], $this->t->requests);
     }
 
-    public function badWindows(): array
+    public static function badWindows(): array
     {
         return [
             'item path'     => ['/library/metadata/7', 0, 9],
@@ -1603,6 +1637,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badTranscodeTypes */
+    #[DataProvider('badTranscodeTypes')]
     public function testMusicTranscodeOfAnotherTypeIsBadType(?string $type): void
     {
         $sink = $this->sink();
@@ -1611,12 +1646,13 @@ class PlexClientTest extends TestCase
         $this->assertSame(0, $sink->opens);
     }
 
-    public function badTranscodeTypes(): array
+    public static function badTranscodeTypes(): array
     {
         return ['ogg' => ['audio/ogg'], 'html' => ['text/html'], 'missing' => [null], 'flac' => ['audio/flac']];
     }
 
     /** @dataProvider statuses */
+    #[DataProvider('statuses')]
     public function testMusicTranscodeStatusMapping(int $status, string $reason): void
     {
         $sink = $this->sink();
@@ -1650,6 +1686,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badTranscodeArgs */
+    #[DataProvider('badTranscodeArgs')]
     public function testMusicTranscodeRefusesBadArgumentsWithNoRequest(string $path, string $session): void
     {
         try {
@@ -1661,7 +1698,7 @@ class PlexClientTest extends TestCase
         $this->assertSame([], $this->t->requests);
     }
 
-    public function badTranscodeArgs(): array
+    public static function badTranscodeArgs(): array
     {
         return [
             'part path'     => [self::MP3_PART, self::SESSION],
@@ -1743,6 +1780,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider playlistTypes */
+    #[DataProvider('playlistTypes')]
     public function testHlsPlaylistTypesAreAccepted(string $type): void
     {
         $this->t->respond(200, '#EXTM3U', ['Content-Type' => $type])->respond(200, '#EXTM3U', ['Content-Type' => $type]);
@@ -1750,7 +1788,7 @@ class PlexClientTest extends TestCase
         $this->assertSame('#EXTM3U', $this->client()->hlsPlaylist(self::HLS_BASE . '/index.m3u8', self::SESSION));
     }
 
-    public function playlistTypes(): array
+    public static function playlistTypes(): array
     {
         return [
             'apple'           => ['application/vnd.apple.mpegurl'],
@@ -1760,6 +1798,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badPlaylistTypes */
+    #[DataProvider('badPlaylistTypes')]
     public function testAPlaylistOfAnotherTypeIsBadType(?string $type): void
     {
         $this->t->respond(200, 'UPSTREAM-BODY', $type === null ? [] : ['Content-Type' => $type])
@@ -1768,7 +1807,7 @@ class PlexClientTest extends TestCase
         $this->expectPlexError(fn () => $this->client()->hlsPlaylist(self::HLS_BASE . '/index.m3u8', self::SESSION), PlexException::BAD_TYPE);
     }
 
-    public function badPlaylistTypes(): array
+    public static function badPlaylistTypes(): array
     {
         return ['html' => ['text/html'], 'json' => ['application/json'], 'missing' => [null], 'mp2t' => ['video/mp2t']];
     }
@@ -1781,6 +1820,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider statuses */
+    #[DataProvider('statuses')]
     public function testHlsBufferedStatusMapping(int $status, string $reason): void
     {
         $this->t->respond($status, 'UPSTREAM-BODY', ['Content-Type' => 'application/vnd.apple.mpegurl'])
@@ -1802,12 +1842,13 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badStartArgs */
+    #[DataProvider('badStartArgs')]
     public function testHlsStartRefusesBadArgumentsWithNoRequest(string $path, string $session): void
     {
         $this->assertRefusedWithNoRequest(fn () => $this->client()->hlsStart($path, $session));
     }
 
-    public function badStartArgs(): array
+    public static function badStartArgs(): array
     {
         return [
             'part path'     => [self::MP3_PART, self::SESSION],
@@ -1847,12 +1888,13 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badPlaylistChildren */
+    #[DataProvider('badPlaylistChildren')]
     public function testHlsPlaylistRefusesAChildOutsideItsSessionWithNoRequest(string $u): void
     {
         $this->assertRefusedWithNoRequest(fn () => $this->client()->hlsPlaylist($u, self::SESSION));
     }
 
-    public function badPlaylistChildren(): array
+    public static function badPlaylistChildren(): array
     {
         $other = '/video/:/transcode/universal/session/' . self::OTHER_SESSION . '/base';
         return [
@@ -1886,6 +1928,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider segmentTypes */
+    #[DataProvider('segmentTypes')]
     public function testSegmentTypesAreCanonicalByExtension(string $name, string $upstream, string $sent): void
     {
         $sink = $this->sink();
@@ -1895,7 +1938,7 @@ class PlexClientTest extends TestCase
         $this->assertSame(['content-type' => $sent], $sink->headers);
     }
 
-    public function segmentTypes(): array
+    public static function segmentTypes(): array
     {
         return [
             'ts'            => ['00000.ts', 'video/mp2t', 'video/mp2t'],
@@ -1908,6 +1951,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badSegmentTypes */
+    #[DataProvider('badSegmentTypes')]
     public function testASegmentOfAnotherTypeIsBadTypeAndTheSinkNeverOpens(string $name, ?string $type): void
     {
         $sink = $this->sink();
@@ -1917,7 +1961,7 @@ class PlexClientTest extends TestCase
         $this->assertSame('', $sink->body);
     }
 
-    public function badSegmentTypes(): array
+    public static function badSegmentTypes(): array
     {
         return [
             'ts html'      => ['00000.ts', 'text/html'],
@@ -1932,6 +1976,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider segmentLengths */
+    #[DataProvider('segmentLengths')]
     public function testASegmentLengthIsForwardedOnlyWhenItIsDigits(string $length, bool $kept): void
     {
         $sink = $this->sink();
@@ -1940,7 +1985,7 @@ class PlexClientTest extends TestCase
         $this->assertSame($kept ? ['content-type' => 'video/mp2t', 'content-length' => $length] : ['content-type' => 'video/mp2t'], $sink->headers);
     }
 
-    public function segmentLengths(): array
+    public static function segmentLengths(): array
     {
         return [
             'one digit'  => ['1', true],
@@ -1955,6 +2000,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider statuses */
+    #[DataProvider('statuses')]
     public function testSegmentStatusMapping(int $status, string $reason): void
     {
         $sink = $this->sink();
@@ -2006,6 +2052,7 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider overCapLengths */
+    #[DataProvider('overCapLengths')]
     public function testASegmentDeclaredOver64MiBIsTooLargeBeforeTheSinkOpens(string $length): void
     {
         $sink = $this->sink();
@@ -2015,7 +2062,7 @@ class PlexClientTest extends TestCase
         $this->assertSame('', $sink->body);
     }
 
-    public function overCapLengths(): array
+    public static function overCapLengths(): array
     {
         return [
             'one byte over' => ['67108865'],
@@ -2030,12 +2077,13 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badSegmentChildren */
+    #[DataProvider('badSegmentChildren')]
     public function testHlsSegmentRefusesAChildOutsideItsSessionWithNoRequest(string $u, string $session): void
     {
         $this->assertRefusedWithNoRequest(fn () => $this->client()->hlsSegment($u, $session, $this->sink()));
     }
 
-    public function badSegmentChildren(): array
+    public static function badSegmentChildren(): array
     {
         return [
             'another session' => ['/video/:/transcode/universal/session/' . self::OTHER_SESSION . '/base/00000.ts', self::SESSION],
@@ -2067,12 +2115,13 @@ class PlexClientTest extends TestCase
     }
 
     /** @dataProvider badStopSessions */
+    #[DataProvider('badStopSessions')]
     public function testHlsStopRefusesANonV4SessionWithNoRequest(string $session): void
     {
         $this->assertRefusedWithNoRequest(fn () => $this->client()->hlsStop($session));
     }
 
-    public function badStopSessions(): array
+    public static function badStopSessions(): array
     {
         return ['upper' => [strtoupper(self::SESSION)], 'empty' => [''], 'injected' => [self::SESSION . '&X-Plex-Token=x']];
     }
@@ -2111,12 +2160,13 @@ class PlexClientTest extends TestCase
     // ── deviceName() (S14) ───────────────────────────────────────────────────
 
     /** @dataProvider deviceNames */
+    #[DataProvider('deviceNames')]
     public function testDeviceName(string $username, int $id, string $expected): void
     {
         $this->assertSame($expected, PlexClient::deviceName($username, $id));
     }
 
-    public function deviceNames(): array
+    public static function deviceNames(): array
     {
         return [
             'plain'              => ['alice', 3, 'Matinee (alice)'],

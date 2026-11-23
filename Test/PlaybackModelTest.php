@@ -23,6 +23,7 @@ use Kanboard\Plugin\Matinee\Model\TranscodeModel;
 use Kanboard\Plugin\Matinee\Plugin;
 use Kanboard\Plugin\Matinee\Test\FakeTransport;
 use Kanboard\Plugin\Matinee\Test\RecordingSink;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /** A sink that runs a callback on every write (after recording it), so a test can act mid-stream. */
 class PlaybackCallbackSink extends RecordingSink
@@ -266,6 +267,7 @@ class PlaybackModelTest extends Base
     // ── page: direct or transcode (C1a, C5b) ─────────────────────────────────
 
     /** @dataProvider tracks */
+    #[DataProvider('tracks')]
     public function testThePageChoosesDirectOrTranscode(string $itemJson, string $ratingKey, ?string $part): void
     {
         $this->queuePage($itemJson);
@@ -277,7 +279,7 @@ class PlaybackModelTest extends Base
         );
     }
 
-    public function tracks(): array
+    public static function tracks(): array
     {
         $mp3 = (string) file_get_contents(__DIR__.'/fixtures/plex/item-track-mp3.json');
         $flac = (string) file_get_contents(__DIR__.'/fixtures/plex/item-track-flac.json');
@@ -366,13 +368,14 @@ class PlaybackModelTest extends Base
     }
 
     /** @dataProvider otherSections */
+    #[DataProvider('otherSections')]
     public function testThePageRefusesAnItemFromAnotherSectionOrNone(mixed $section): void
     {
         $this->queuePage(self::item(['container' => 'mp3', 'audioCodec' => 'mp3'], 'track', $section));
         $this->expectForbidden(fn () => $this->model()->page($this->alice, $this->ref($this->alice, 'media', '/library/metadata/7')), true);
     }
 
-    public function otherSections(): array
+    public static function otherSections(): array
     {
         return ['another section' => [1], 'none' => [null], 'not a key' => ['3a']];
     }
@@ -1114,6 +1117,7 @@ class PlaybackModelTest extends Base
     }
 
     /** @dataProvider hlsRefusals */
+    #[DataProvider('hlsRefusals')]
     public function testHlsMasterAndChildRefuseBeforePlex(string $method, string $case): void
     {
         $this->share();
@@ -1238,6 +1242,7 @@ class PlaybackModelTest extends Base
     }
 
     /** @dataProvider badChildren */
+    #[DataProvider('badChildren')]
     public function testAChildFailingS2IsForbiddenWithNoPlexRequest(string $rest): void
     {
         $session = $this->claimRow($this->alice)['session'];
@@ -1247,7 +1252,7 @@ class PlaybackModelTest extends Base
         $this->assertSame(self::T0, (int) $this->rows()[0]['last_seen_at']);
     }
 
-    public function badChildren(): array
+    public static function badChildren(): array
     {
         $base = '/video/:/transcode/universal/session/{s}/';
         return [

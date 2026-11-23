@@ -2,6 +2,7 @@
 
 use Kanboard\Plugin\Matinee\Http\ByteRange;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /** ByteRange (C1b; S11): the client's Range becomes a clamped window, and the upstream Content-Range is checked. */
 class ByteRangeTest extends TestCase
@@ -14,6 +15,7 @@ class ByteRangeTest extends TestCase
     }
 
     /** @dataProvider windows */
+    #[DataProvider('windows')]
     public function testWindow(?string $header, array $expected): void
     {
         $this->assertSame($expected, ByteRange::window($header));
@@ -44,6 +46,7 @@ class ByteRangeTest extends TestCase
     }
 
     /** @dataProvider upstreams */
+    #[DataProvider('upstreams')]
     public function testUpstream(?string $header, ?array $expected): void
     {
         $this->assertSame($expected, ByteRange::upstream($header, 100, 199));
@@ -70,6 +73,7 @@ class ByteRangeTest extends TestCase
     }
 
     /** @dataProvider unsatisfied */
+    #[DataProvider('unsatisfied')]
     public function testUnsatisfiedTotal(?string $header, ?int $expected): void
     {
         $this->assertSame($expected, ByteRange::unsatisfiedTotal($header));

@@ -2,6 +2,7 @@
 
 use Kanboard\Plugin\Matinee\Http\PlexPaths;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 class PlexPathsTest extends TestCase
 {
@@ -69,6 +70,7 @@ class PlexPathsTest extends TestCase
     }
 
     /** @dataProvider paths */
+    #[DataProvider('paths')]
     public function testPathPredicates(string $path, bool $browse, bool $art): void
     {
         $this->assertSame($browse, PlexPaths::isBrowse($path), 'isBrowse');
@@ -98,6 +100,7 @@ class PlexPathsTest extends TestCase
     }
 
     /** @dataProvider sectionKeys */
+    #[DataProvider('sectionKeys')]
     public function testIsSectionKey(string $key, bool $ok): void
     {
         $this->assertSame($ok, PlexPaths::isSectionKey($key));
@@ -124,6 +127,7 @@ class PlexPathsTest extends TestCase
     }
 
     /** @dataProvider sectionKeys */
+    #[DataProvider('sectionKeys')]
     public function testSectionAllRefusesABadKey(string $key, bool $ok): void
     {
         if ($ok) {
@@ -187,6 +191,7 @@ class PlexPathsTest extends TestCase
     }
 
     /** @dataProvider playPaths */
+    #[DataProvider('playPaths')]
     public function testPlayPathPredicates(string $path, bool $part, bool $item): void
     {
         $this->assertSame($part, PlexPaths::isPart($path), 'isPart');
@@ -215,6 +220,7 @@ class PlexPathsTest extends TestCase
     }
 
     /** @dataProvider badRatingKeys */
+    #[DataProvider('badRatingKeys')]
     public function testItemRefusesABadKey(string $key): void
     {
         $this->expectException(\InvalidArgumentException::class);
@@ -291,6 +297,7 @@ class PlexPathsTest extends TestCase
     }
 
     /** @dataProvider hlsChildren */
+    #[DataProvider('hlsChildren')]
     public function testIsHlsChild(string $u, bool $ok): void
     {
         $this->assertSame($ok, PlexPaths::isHlsChild($u));
@@ -308,6 +315,7 @@ class PlexPathsTest extends TestCase
 
     // m5: S2's regex admits any 36-char [0-9a-f-] segment; hlsSession names only a v4 id Matinee could have minted.
     /** @dataProvider nonV4Sessions */
+    #[DataProvider('nonV4Sessions')]
     public function testHlsSessionIsOnlyAV4Id(string $id): void
     {
         $u = '/video/:/transcode/universal/session/'.$id.'/base/index.m3u8';
@@ -341,6 +349,7 @@ class PlexPathsTest extends TestCase
     }
 
     /** @dataProvider sessionIds */
+    #[DataProvider('sessionIds')]
     public function testIsSessionId(string $id, bool $ok): void
     {
         $this->assertSame($ok, PlexPaths::isSessionId($id));

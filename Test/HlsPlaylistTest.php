@@ -3,6 +3,7 @@
 use Kanboard\Plugin\Matinee\Http\HlsPlaylist;
 use Kanboard\Plugin\Matinee\Http\PlexException;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * HlsPlaylist (spec §7 Video, S2; P3 C2d, C2e): every URI in a Plex playlist, bare or in a tag's URI="…", becomes a
@@ -151,6 +152,7 @@ class HlsPlaylistTest extends TestCase
     }
 
     /** @dataProvider badProxyUrls */
+    #[DataProvider('badProxyUrls')]
     public function testABadProxyUrlFailsThePlaylist(string $url): void
     {
         $this->assertBadPlaylist(static fn () => HlsPlaylist::rewrite(
@@ -159,7 +161,7 @@ class HlsPlaylistTest extends TestCase
     }
 
     /** @return array<string, array{string}> */
-    public function badProxyUrls(): array
+    public static function badProxyUrls(): array
     {
         return [
             'empty'     => [''],
@@ -229,6 +231,7 @@ class HlsPlaylistTest extends TestCase
     }
 
     /** @dataProvider overlongLines */
+    #[DataProvider('overlongLines')]
     public function testALineOverTheCapFailsWhole(string $line): void
     {
         $this->assertSame(8193, strlen($line));
@@ -236,7 +239,7 @@ class HlsPlaylistTest extends TestCase
     }
 
     /** @return array<string, array{string}> */
-    public function overlongLines(): array
+    public static function overlongLines(): array
     {
         $head = '#EXT-X-MEDIA:A="';
         return [
@@ -271,6 +274,7 @@ class HlsPlaylistTest extends TestCase
     }
 
     /** @dataProvider badPlaylists */
+    #[DataProvider('badPlaylists')]
     public function testAnUnsafePlaylistFailsWhole(string $body): void
     {
         try {
@@ -284,7 +288,7 @@ class HlsPlaylistTest extends TestCase
     }
 
     /** @return array<string, array{string}> */
-    public function badPlaylists(): array
+    public static function badPlaylists(): array
     {
         $ok = "#EXTM3U\n#EXTINF:2.0,\n00000.ts\n";
         return [

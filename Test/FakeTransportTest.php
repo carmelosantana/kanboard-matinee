@@ -6,6 +6,7 @@ use Kanboard\Plugin\Matinee\Http\PlexException;
 use Kanboard\Plugin\Matinee\Http\PlexStreamSink;
 use Kanboard\Plugin\Matinee\Test\FakeTransport;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /** The FakeTransport double plays scripted streams the way CurlTransport does (C3a): a sanity check. */
 class FakeTransportTest extends TestCase
@@ -96,6 +97,7 @@ class FakeTransportTest extends TestCase
     }
 
     /** @dataProvider badOpts */
+    #[DataProvider('badOpts')]
     public function testBadOptsAreRefusedAsCurlTransportRefusesThem(string $method, array $opts): void
     {
         $t = (new FakeTransport())->respond(200, 'ok')->streams(200, [], ['a']);

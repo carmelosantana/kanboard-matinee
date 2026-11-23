@@ -7,6 +7,7 @@ use Kanboard\Plugin\Matinee\Http\PlexStreamSink;
 use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * The real transport (spec §3, §11 S8 and S9) against a fake Plex server run with `php -S` on 127.0.0.1.
@@ -200,6 +201,7 @@ class CurlTransportTest extends TestCase
     }
 
     /** @dataProvider bigBodies */
+    #[DataProvider('bigBodies')]
     public function testABodyOverTheCapIsTooLarge(string $path): void
     {
         try {
@@ -248,6 +250,7 @@ class CurlTransportTest extends TestCase
     }
 
     /** @dataProvider malformedUrls */
+    #[DataProvider('malformedUrls')]
     public function testAMalformedUrlIsRefusedBeforeAnyConnection(string $url): void
     {
         $before = self::hits();
@@ -384,6 +387,7 @@ class CurlTransportTest extends TestCase
     // ── fail closed on curl options; nothing reaches stdout ──────────────────
 
     /** @dataProvider badLimits */
+    #[DataProvider('badLimits')]
     public function testTheConstructorRefusesLimitsBelowOne(int $connectTimeout, int $timeout, int $maxBytes): void
     {
         $this->expectException(\InvalidArgumentException::class);
@@ -448,6 +452,7 @@ class CurlTransportTest extends TestCase
     // ── headers ──────────────────────────────────────────────────────────────
 
     /** @dataProvider deniedHeaders */
+    #[DataProvider('deniedHeaders')]
     public function testHopAndRoutingHeadersAreRefused(string $name): void
     {
         $before = self::hits();
@@ -764,6 +769,7 @@ class CurlTransportTest extends TestCase
     }
 
     /** @dataProvider badGetOpts */
+    #[DataProvider('badGetOpts')]
     public function testGetRefusesBadOptsBeforeAnyConnection(array $opts): void
     {
         $before = self::hits();
@@ -812,6 +818,7 @@ class CurlTransportTest extends TestCase
     }
 
     /** @dataProvider badStreamOpts */
+    #[DataProvider('badStreamOpts')]
     public function testStreamRefusesBadOptsBeforeAnyConnection(array $opts): void
     {
         $before = self::hits();
@@ -845,6 +852,7 @@ class CurlTransportTest extends TestCase
     }
 
     /** @dataProvider pinPaths */
+    #[DataProvider('pinPaths')]
     public function testAPinMismatchNeverOpensTheSink(string $path): void
     {
         $sink = self::sink();
@@ -917,6 +925,7 @@ class CurlTransportTest extends TestCase
     // ── pure helpers ─────────────────────────────────────────────────────────
 
     /** @dataProvider resolveEntries */
+    #[DataProvider('resolveEntries')]
     public function testResolveEntry(string $host, int $port, string $ip, string $expected): void
     {
         $this->assertSame($expected, CurlTransport::resolveEntry($host, $port, $ip));
@@ -932,6 +941,7 @@ class CurlTransportTest extends TestCase
     }
 
     /** @dataProvider resolveLists */
+    #[DataProvider('resolveLists')]
     public function testResolveListPinsHostnamesOnly(string $host, int $port, string $ip, array $expected): void
     {
         $this->assertSame($expected, CurlTransport::resolveList($host, $port, $ip));
@@ -947,6 +957,7 @@ class CurlTransportTest extends TestCase
     }
 
     /** @dataProvider addressPairs */
+    #[DataProvider('addressPairs')]
     public function testSameAddress(string $a, string $b, bool $same): void
     {
         $this->assertSame($same, CurlTransport::sameAddress($a, $b));

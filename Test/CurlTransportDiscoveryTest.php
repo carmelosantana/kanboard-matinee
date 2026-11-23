@@ -5,6 +5,7 @@ use Kanboard\Plugin\Matinee\Http\PlexException;
 use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * CurlTransport::discoverPlexDirect() against real TLS listeners on 127.0.0.1 (Test/fixtures/tls-plex/server.php).
@@ -228,6 +229,7 @@ class CurlTransportDiscoveryTest extends TestCase
     }
 
     /** @dataProvider notDiscoverable */
+    #[DataProvider('notDiscoverable')]
     public function testOnlyAnHttpsIpv4BaseIsProbed(string $base): void
     {
         $before = self::record('plex');

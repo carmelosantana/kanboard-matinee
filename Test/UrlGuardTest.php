@@ -3,6 +3,7 @@
 use Kanboard\Plugin\Matinee\Http\UnsafeUrlException;
 use Kanboard\Plugin\Matinee\Http\UrlGuard;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * SSRF guard for Plex server URLs (spec §3, §11 S1 and S8, §12). No network: DNS goes through the resolver
@@ -43,6 +44,7 @@ class UrlGuardTest extends TestCase
     // ── public hosts and ports ───────────────────────────────────────────────
 
     /** @dataProvider publicPasses */
+    #[DataProvider('publicPasses')]
     public function testPublicHostPasses(string $url, array $expected): void
     {
         $this->dns(['plex.example.test' => [self::PUBLIC_IP]]);
@@ -64,6 +66,7 @@ class UrlGuardTest extends TestCase
     }
 
     /** @dataProvider publicBadPorts */
+    #[DataProvider('publicBadPorts')]
     public function testPublicHostOnAnotherPortIsRefused(string $url): void
     {
         $this->dns(['plex.example.test' => [self::PUBLIC_IP]]);
@@ -84,6 +87,7 @@ class UrlGuardTest extends TestCase
     // ── private networks need a matching target (S1) ─────────────────────────
 
     /** @dataProvider privateAddresses */
+    #[DataProvider('privateAddresses')]
     public function testPrivateAddressIsRefusedWithoutATarget(string $ip, string $cidr, bool $loopback = false): void
     {
         $this->dns(['plex.lan' => [$ip]]);
@@ -93,6 +97,7 @@ class UrlGuardTest extends TestCase
     }
 
     /** @dataProvider privateAddresses */
+    #[DataProvider('privateAddresses')]
     public function testPrivateAddressPassesWithAMatchingTarget(string $ip, string $cidr, bool $loopback = false): void
     {
         $this->dns(['plex.lan' => [$ip]]);
@@ -104,6 +109,7 @@ class UrlGuardTest extends TestCase
     }
 
     /** @dataProvider privateAddresses */
+    #[DataProvider('privateAddresses')]
     public function testPrivateAddressIsRefusedOnAPortTheTargetDoesNotName(string $ip, string $cidr, bool $loopback = false): void
     {
         $this->dns(['plex.lan' => [$ip]]);
@@ -158,6 +164,7 @@ class UrlGuardTest extends TestCase
     }
 
     /** @dataProvider loopbackAddresses */
+    #[DataProvider('loopbackAddresses')]
     public function testANameTargetDoesNotAuthoriseLoopback(string $ip, string $ipTarget): void
     {
         $this->dns(['plex.lan' => [$ip]]);
@@ -226,6 +233,7 @@ class UrlGuardTest extends TestCase
      * @dataProvider blockedAddresses
      * @param string[] $covering valid targets whose networks contain the address (or its embedded IPv4)
      */
+    #[DataProvider('blockedAddresses')]
     public function testBlockedAddressIsRefusedEvenWithAMatchingTarget(string $ip, array $covering): void
     {
         $this->dns(['evil.example' => [$ip]]);
@@ -303,6 +311,7 @@ class UrlGuardTest extends TestCase
     // ── base URL shape ──────────────────────────────────────────────────────────
 
     /** @dataProvider invalidUrls */
+    #[DataProvider('invalidUrls')]
     public function testInvalidUrlIsRefused(string $url): void
     {
         $this->dns(['plex.example.test' => [self::PUBLIC_IP], 'cafe.be' => [self::PUBLIC_IP]]);
@@ -346,6 +355,7 @@ class UrlGuardTest extends TestCase
     }
 
     /** @dataProvider validUrls */
+    #[DataProvider('validUrls')]
     public function testValidBaseUrl(string $url): void
     {
         $this->assertTrue(UrlGuard::isValidBaseUrl($url), $url);
@@ -367,6 +377,7 @@ class UrlGuardTest extends TestCase
     }
 
     /** @dataProvider normalisedUrls */
+    #[DataProvider('normalisedUrls')]
     public function testNormaliseBaseUrl(string $in, string $out): void
     {
         $this->assertSame($out, UrlGuard::normaliseBaseUrl($in));
@@ -430,6 +441,7 @@ class UrlGuardTest extends TestCase
     }
 
     /** @dataProvider validTargets */
+    #[DataProvider('validTargets')]
     public function testValidTargetEntry(string $entry): void
     {
         $this->assertTrue(UrlGuard::isValidTargetEntry($entry), $entry);
@@ -455,6 +467,7 @@ class UrlGuardTest extends TestCase
     }
 
     /** @dataProvider invalidTargets */
+    #[DataProvider('invalidTargets')]
     public function testInvalidTargetEntry(string $entry): void
     {
         $this->assertFalse(UrlGuard::isValidTargetEntry($entry), $entry);
@@ -531,6 +544,7 @@ class UrlGuardTest extends TestCase
     }
 
     /** @dataProvider leakyUrls */
+    #[DataProvider('leakyUrls')]
     public function testMessageNeverCarriesQueryOrUserinfo(string $url, string $reason): void
     {
         $this->dns(['evil.example' => ['169.254.169.254'], 'plex.lan' => ['10.0.0.5']]);

@@ -5,6 +5,7 @@ use Kanboard\Plugin\Matinee\Crypto\KeyStore;
 use Kanboard\Plugin\Matinee\Crypto\KeyStoreException;
 use Kanboard\Plugin\Matinee\Crypto\Subkeys;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 class KeyStoreTest extends TestCase
 {
@@ -126,6 +127,7 @@ class KeyStoreTest extends TestCase
     }
 
     /** @dataProvider wrongSizes */
+    #[DataProvider('wrongSizes')]
     public function testWrongSizeFileFailsClosedAndIsLeftByteIdentical(int $size): void
     {
         $bytes = $size === 0 ? '' : random_bytes($size);
@@ -179,6 +181,7 @@ class KeyStoreTest extends TestCase
     }
 
     /** @dataProvider badEnvValues */
+    #[DataProvider('badEnvValues')]
     public function testMalformedEnvKeyFailsClosedAndCreatesNoFile(string $env): void
     {
         try {
@@ -313,6 +316,7 @@ class KeyStoreTest extends TestCase
     }
 
     /** @dataProvider unsafeDirModes */
+    #[DataProvider('unsafeDirModes')]
     public function testGroupOrWorldWritableExistingDirIsRefused(int $mode): void
     {
         mkdir($this->dir, 0700, true);

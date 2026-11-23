@@ -5,6 +5,7 @@ require_once __DIR__.'/support/ReleasesContainer.php';
 use KanboardTests\units\Base;
 use Kanboard\Core\Plugin\Hook;
 use Kanboard\Plugin\Matinee\Plugin;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Tag == plugin.json == getPluginVersion(): drift across the three is the most common release defect.
 class PluginVersionTest extends Base
@@ -45,6 +46,7 @@ class PluginVersionTest extends Base
     }
 
     /** @dataProvider extensionSets */
+    #[DataProvider('extensionSets')]
     public function testIsSupportedNeedsSodiumAndCurl(array $loaded, bool $expected): void
     {
         $this->assertSame($expected, Plugin::isSupported(fn (string $ext) => in_array($ext, $loaded, true)));

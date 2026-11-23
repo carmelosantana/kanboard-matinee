@@ -4,6 +4,7 @@ use Kanboard\Plugin\Matinee\Crypto\CryptoException;
 use Kanboard\Plugin\Matinee\Crypto\RefSigner;
 use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 class RefSignerTest extends TestCase
 {
@@ -127,6 +128,7 @@ class RefSignerTest extends TestCase
     }
 
     /** @dataProvider playRefs */
+    #[DataProvider('playRefs')]
     public function testPlayRefsRoundTripWithAnEightHourTtl(string $kind, string $resource): void
     {
         $ref = self::signer()->sign(self::USER, self::SERVER, '4', $kind, $resource, 28800);
@@ -141,6 +143,7 @@ class RefSignerTest extends TestCase
     }
 
     /** @dataProvider playRefs */
+    #[DataProvider('playRefs')]
     public function testPlayRefUpperBoundIsExactlyEightHours(string $kind, string $resource): void
     {
         $ok = self::forge(self::payload(['k' => $kind, 'r' => $resource, 'exp' => self::NOW + 28800]));
@@ -258,6 +261,7 @@ class RefSignerTest extends TestCase
 
     // Refused whatever kind the caller asks for, so no case passes only because of a kind mismatch.
     /** @dataProvider refusals */
+    #[DataProvider('refusals')]
     public function testEveryRefusalReadsTheSame(\Closure $ref): void
     {
         foreach (RefSigner::KINDS as $kind) {
@@ -293,6 +297,7 @@ class RefSignerTest extends TestCase
 
     // m6: verify takes the kind the caller expects, and a ref of any other kind is refused the same way.
     /** @dataProvider kindPairs */
+    #[DataProvider('kindPairs')]
     public function testARefOfOneKindIsRefusedAsAnother(string $minted, string $resource, string $asked): void
     {
         $ref = self::signer()->sign(self::USER, self::SERVER, '2', $minted, $resource, 60);
@@ -340,6 +345,7 @@ class RefSignerTest extends TestCase
     }
 
     /** @dataProvider badSignInputs */
+    #[DataProvider('badSignInputs')]
     public function testSignRefusesBadInput(array $args, string $message): void
     {
         try {

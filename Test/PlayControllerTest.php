@@ -14,6 +14,7 @@ use Kanboard\Plugin\Matinee\Model\MatineeForbiddenException;
 use Kanboard\Plugin\Matinee\Model\MatineeRangeException;
 use Kanboard\Plugin\Matinee\Model\ServerModel;
 use Kanboard\Plugin\Matinee\Model\TranscodeModel;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /** Counts closeSession() instead of ending a session (C3d), and records the seams in the order they run. */
 class MatineePlayControllerSpy extends MatineePlayController
@@ -626,6 +627,7 @@ class PlayControllerTest extends Base
     }
 
     /** @dataProvider badChildren */
+    #[DataProvider('badChildren')]
     public function testHlsProxyRefusesAChildFailingS2WithNoPlexRequest(string $rest): void
     {
         [, $session] = $this->claim($this->owner);
@@ -634,7 +636,7 @@ class PlayControllerTest extends Base
         $this->assertSame(0, MatineePlayControllerSpy::$closed);
     }
 
-    public function badChildren(): array
+    public static function badChildren(): array
     {
         $base = '/video/:/transcode/universal/session/{s}/';
         return [

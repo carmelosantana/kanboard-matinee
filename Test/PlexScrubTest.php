@@ -3,6 +3,7 @@
 use Kanboard\Plugin\Matinee\Http\PlexException;
 use Kanboard\Plugin\Matinee\Http\PlexScrub;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * PlexScrub::stripToken removes every X-Plex-Token query key, in any case, spelling and percent-encoding, from a
@@ -12,12 +13,13 @@ use PHPUnit\Framework\TestCase;
 class PlexScrubTest extends TestCase
 {
     /** @dataProvider uris */
+    #[DataProvider('uris')]
     public function testStripToken(string $in, string $expected): void
     {
         $this->assertSame($expected, PlexScrub::stripToken($in));
     }
 
-    public function uris(): array
+    public static function uris(): array
     {
         return [
             'canonical case, only param'  => ['/a/b.m3u8?X-Plex-Token=secret', '/a/b.m3u8'],
@@ -64,12 +66,13 @@ class PlexScrubTest extends TestCase
     }
 
     /** @dataProvider tokenless */
+    #[DataProvider('tokenless')]
     public function testAUriWithoutATokenComesBackByteIdentical(string $in): void
     {
         $this->assertSame($in, PlexScrub::stripToken($in));
     }
 
-    public function tokenless(): array
+    public static function tokenless(): array
     {
         return [
             'plain path'       => ['/library/parts/1/file.mp4'],
@@ -85,6 +88,7 @@ class PlexScrubTest extends TestCase
      *
      * @dataProvider refused
      */
+    #[DataProvider('refused')]
     public function testATokenThatSurvivesStrippingRefusesTheWholeUri(string $in): void
     {
         try {
@@ -98,7 +102,7 @@ class PlexScrubTest extends TestCase
         }
     }
 
-    public function refused(): array
+    public static function refused(): array
     {
         return [
             'nested in a value'        => ['/a?url=%2Flibrary%2Fx%3FX-Plex-Token%3Dsecret'],

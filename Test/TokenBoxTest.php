@@ -3,6 +3,7 @@
 use Kanboard\Plugin\Matinee\Crypto\CryptoException;
 use Kanboard\Plugin\Matinee\Crypto\TokenBox;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 class TokenBoxTest extends TestCase
 {
@@ -83,6 +84,7 @@ class TokenBoxTest extends TestCase
     }
 
     /** @dataProvider tamperedOpens */
+    #[DataProvider('tamperedOpens')]
     public function testOpenFailsWhenAnyBoundFieldDiffers(int $serverId, int $ownerId, string $baseUrl, string $machine): void
     {
         $sealed = $this->sealDefault();
@@ -123,6 +125,7 @@ class TokenBoxTest extends TestCase
     }
 
     /** @dataProvider malformedInputs */
+    #[DataProvider('malformedInputs')]
     public function testMalformedInputsCannotOpen(?string $nonce, ?string $ct): void
     {
         $sealed = $this->sealDefault();

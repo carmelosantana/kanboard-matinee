@@ -5,6 +5,7 @@ require_once __DIR__ . '/support/RecordingSink.php';
 use Kanboard\Plugin\Matinee\Http\ResponseSink;
 use Kanboard\Plugin\Matinee\Test\RecordingSink;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * ResponseSink (C3e, C3f; S9, S11): the one place a proxied stream opens the response. First with recorders in place
@@ -87,6 +88,7 @@ class ResponseSinkTest extends TestCase
     }
 
     /** @dataProvider refusedHeaders */
+    #[DataProvider('refusedHeaders')]
     public function testHeadersOutsideTheForwardableSetOrWithBreaksAreNeverSent(array $headers): void
     {
         $this->sink()->open(200, $headers);
@@ -114,6 +116,7 @@ class ResponseSinkTest extends TestCase
     }
 
     /** @dataProvider allowedValues */
+    #[DataProvider('allowedValues')]
     public function testWellFormedLengthsAndRangeUnitsAreForwarded(string $name, string $value, string $line): void
     {
         $this->sink()->open(200, [$name => $value]);

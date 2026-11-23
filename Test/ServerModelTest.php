@@ -24,6 +24,7 @@ use Kanboard\Plugin\Matinee\Model\ServerModel;
 use Kanboard\Plugin\Matinee\Model\Settings;
 use Kanboard\Plugin\Matinee\Plugin;
 use Kanboard\Plugin\Matinee\Test\FakeTransport;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /** Collects every log line so tests can check the logged stage and that no secret is logged. */
 class MatineeTestLogger extends \Psr\Log\AbstractLogger
@@ -1200,6 +1201,7 @@ class ServerModelTest extends Base
     }
 
     /** @dataProvider notASecureName */
+    #[DataProvider('notASecureName')]
     public function testNoPlexDirectNameFailsGenericallyWithoutATokenRequest(string|\Throwable|null $answer): void
     {
         $this->lan();
@@ -1249,6 +1251,7 @@ class ServerModelTest extends Base
     }
 
     /** @dataProvider rewrittenRefusals */
+    #[DataProvider('rewrittenRefusals')]
     public function testTheRewrittenNameIsGuardedAndPinnedToTheTypedIp(string $targets, array $ips, string $allowed, string $reason): void
     {
         $this->lan($targets, $ips);
